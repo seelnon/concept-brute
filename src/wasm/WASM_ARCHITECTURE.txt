@@ -1,0 +1,32 @@
+# PERFORMANCE & RUST WASM ARCHITECTURE NOTES
+Created: 2026-10-03
+
+## 1. Rust to WebAssembly Pipeline
+- Source file: `src/wasm/src/lib.rs` (no_std, SIMD-ready, zero-alloc in inner loops)
+- Target binary: `src/wasm/canvas_core.wasm` (built with `rustc --target wasm32-unknown-unknown -O --crate-type=cdylib`)
+- Base64 sync bundle: `src/wasm/wasmBinary.js` (enables synchronous initialization via `atob()` with fetch fallback)
+- JavaScript bridge: `src/wasm/wasmBridge.js` (`wasmCore`)
+
+## 2. Liquify Acceleration
+- `wasmCore.liquifyDisplaceFull`: Displaces 2D coordinate displacement maps directly in WASM linear memory.
+  Optimized in `wasmBridge.js` to transfer only the bounding row slice (`rowStart..rowEnd`) rather than the entire canvas buffer.
+- `wasmCore.liquifyRenderBox`: Warps pixels within chunk bounding boxes using bilinear filtering in Rust.
+- Both `src/tools/liquify.js` and `src/tools/liquify_was_fast.js` now leverage `wasmCore.liquifyDisplaceFull` for 60-120fps live dragging.
+
+## 3. Fluid Paint Acceleration
+- `wasmCore.fluidComputeVelocityField`: Computes velocity vector field (`u`, `v`) with capsule distance and vortex normal projections in Rust.
+- `wasmCore.fluidAdvectAndShade`: Executes Semi-Lagrangian advection, height propagation, smoothstep boundary blending, and 3D impasto surface shading in a single native WASM pass.
+- Eliminates thousands of redundant JS bilinear interpolations and math calls per sub-step.
+- Sub-stepping in `paintFluidOnChunks` optimized (`maxSubStepDist = Math.max(24, size * 0.45)`, max 3 sub-steps) with persistent scratch buffers (`getScratchB`) to eliminate typed array garbage collection spikes.
+
+## 4. How to Recompile WASM
+```bash
+export PATH="/root/.cargo/bin:$PATH"
+rustc --target wasm32-unknown-unknown -O --crate-type=cdylib src/wasm/src/lib.rs -o src/wasm/canvas_core.wasm
+node -e '
+const fs = require("fs");
+const wasmBuf = fs.readFileSync("src/wasm/canvas_core.wasm");
+const b64 = wasmBuf.toString("base64");
+fs.writeFileSync("src/wasm/wasmBinary.js", `export const WASM_BASE64 = "${b64}";\n`);
+'
+```

@@ -1,0 +1,1276 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>CONCEPT_BRUTE</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='black'/><rect x='20' y='20' width='60' height='60' fill='white'/></svg>">
+    <link rel="stylesheet" href="./src/index.css">
+  </head>
+  <body>
+    <div id="app">
+      <!--  BRUTALIST TOOLBAR  -->
+      <div id="top-bar">
+        <div class="history-group">
+          <button id="btn-save" title="Save" class="tool-btn">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" stroke-linejoin="miter"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+          </button>
+          <button id="btn-undo" title="Undo" class="tool-btn">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
+          </button>
+          <button id="btn-redo" title="Redo" class="tool-btn">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3l3 2.7"/></svg>
+          </button>
+        </div>
+        
+        <button id="toggle-tools" class="dots-btn" title="Toggle Tools">⋮</button>
+
+        <div class="tool-group" id="tool-group">
+          <button id="btn-brush" class="tool-btn active-tool" title="Brush (1)">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m12 19 7-7 3 3-7 7-3-3z"/><path d="m18 13-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/></svg>
+          </button>
+          <button id="btn-wireframe" class="tool-btn" title="Wireframe (2)">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 6a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/><path d="M5 22a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/><path d="M5 6v10"/><path d="M19 14a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/><path d="M5 16s4.5-4.5 14-4.5"/></svg>
+          </button>
+          <button id="btn-lasso" class="tool-btn" title="Lasso (3)">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M7 22a5 5 0 0 1-2-4"/><path d="M3.3 14A6.8 6.8 0 0 1 2 10c0-4.4 4.5-8 10-8s10 3.6 10 8-4.5 8-10 8a12 12 0 0 1-5-1"/></svg>
+          </button>
+          <button id="btn-smudge" class="tool-btn" title="Smudge (4)">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M7 10v4a5 5 0 0 0 10 0v-4"/><path d="M7 10a5 5 0 0 1 10 0"/><path d="M12 2v8"/><path d="M12 14v4"/><path d="M12 21v1"/></svg>
+          </button>
+          <button id="btn-eraser" class="tool-btn" title="Eraser (5)">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.9-9.9c1-1 2.5-1 3.4 0l4.4 4.4c1 1 1 2.5 0 3.4l-4.4 4.4"/><path d="M22 21H7"/></svg>
+          </button>
+          <button id="btn-liquify" class="tool-btn" title="Liquify (6) / (G)">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" stroke-linejoin="bevel"><path d="M12 2v20M17 2c-3 5-3 15 0 20M7 2c3 5 3 15 0 20M2 12h20M2 17c5-3 15-3 20 0M2 7c5 3 15 3 20 0" /></svg>
+          </button>
+          <button id="btn-fluid" class="tool-btn" title="Fluid Paint (7) / (F)">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" stroke-linejoin="miter"><path d="M12 2s8 6 8 11a8 8 0 0 1-16 0c0-5 8-11 8-11z"/></svg>
+          </button>
+          <button id="btn-air" class="tool-btn" title="Air Paint (8) / (A)">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.59 4.59A2 2 0 1 1 11 8H2m10.59 11.41A2 2 0 1 0 14 16H2M15.59 12A2 2 0 1 1 17 9H2"/></svg>
+          </button>
+
+          <button id="btn-ref_move" class="tool-btn" title="Ref Move" style="display: none;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m5 9  -3 3 3 3"/><path d="M22 12H2"/><path d="m19 9 3 3-3 3"/><path d="m15 5-3-3-3 3"/><path d="M12 2v20"/><path d="m15 19-3 3-3-3"/></svg>
+          </button>
+        </div>
+
+        <button id="toggle-sliders" class="dots-btn" title="Toggle Sliders">⋮</button>
+
+        <div class="slider-group" id="slider-group">
+            <div class="slider-container">
+                <div class="slider-header">
+                    <label class="slider-label">SIZE</label>
+                    <span id="size-val" class="slider-value">40</span>
+                </div>
+                <input type="range" id="brush-size" min="0" max="400" value="214" class="brutal-range main-range">
+            </div>
+
+            <div class="slider-container" id="control-opacity">
+                <div class="slider-header">
+                    <label class="slider-label">OPACITY</label>
+                    <span id="opacity-val" class="slider-value">100%</span>
+                </div>
+                <input type="range" id="brush-opacity" min="0" max="100" value="100" class="brutal-range main-range">
+            </div>
+
+            <div class="slider-container" id="control-flow">
+                <div class="slider-header">
+                    <label class="slider-label" id="lbl-flow">FLOW</label>
+                    <span id="flow-val" class="slider-value">100%</span>
+                </div>
+                <input type="range" id="brush-flow" min="0" max="100" value="100" class="brutal-range main-range">
+            </div>
+
+            <div class="slider-container" id="control-falloff" style="display: none;">
+                <div class="slider-header">
+                    <label class="slider-label">FALLOFF</label>
+                    <span id="falloff-val" class="slider-value">50%</span>
+                </div>
+                <input type="range" id="brush-falloff" min="1" max="100" value="50" class="brutal-range main-range">
+            </div>
+
+            <div class="slider-container" id="control-liquify-quality" style="display: none;">
+                <div class="slider-header">
+                    <label class="slider-label">QUALITY</label>
+                    <span id="liquify-quality-val" class="slider-value">RESOLVE</span>
+                </div>
+                <input type="range" id="brush-liquify-quality" min="1" max="3" value="2" class="brutal-range main-range">
+            </div>
+
+            <div class="slider-container" id="control-fluidity" style="display: none;">
+                <div class="slider-header">
+                    <label class="slider-label">FLUIDITY</label>
+                    <span id="val-fluidity" class="slider-value">80%</span>
+                </div>
+                <input type="range" id="slider-fluidity" min="0" max="100" value="80" class="brutal-range main-range">
+            </div>
+
+            <div class="slider-container" id="control-bristles" style="display: none;">
+                <div class="slider-header">
+                    <label class="slider-label">BRISTLES</label>
+                    <span id="val-bristles" class="slider-value">50</span>
+                </div>
+                <input type="range" id="slider-bristles" min="10" max="100" value="50" class="brutal-range main-range">
+            </div>
+        </div>
+
+        <button id="toggle-sensitivity" class="dots-btn" title="Toggle Sensitivity">⋮</button>
+        
+        <div class="sensitivity-group group-collapsed" id="sensitivity-group">
+          <div class="slider-container">
+            <div class="slider-header">
+                <label class="slider-label" title="Speed Size Sensitivity">S-SIZE</label>
+                <span id="s-size-val" class="slider-value">15</span>
+            </div>
+            <div class="brutal-slider-wrapper">
+              <button class="slider-reset-arrow" data-target="speed-size" title="Reset to 0">▼</button>
+              <input type="range" id="speed-size" min="-100" max="100" value="15" class="brutal-range s-range">
+            </div>
+          </div>
+          <div class="slider-container">
+            <div class="slider-header">
+                <label class="slider-label" title="Speed Opacity Sensitivity">S-OPAC</label>
+                <span id="s-opac-val" class="slider-value">10</span>
+            </div>
+            <div class="brutal-slider-wrapper">
+              <button class="slider-reset-arrow" data-target="speed-opacity" title="Reset to 0">▼</button>
+              <input type="range" id="speed-opacity" min="-100" max="100" value="10" class="brutal-range s-range">
+            </div>
+          </div>
+          <div class="slider-container">
+            <div class="slider-header">
+                <label class="slider-label" title="Speed Value Sensitivity">S-VAL</label>
+                <span id="s-val-val" class="slider-value">-20</span>
+            </div>
+            <div class="brutal-slider-wrapper">
+              <button class="slider-reset-arrow" data-target="speed-value" title="Reset to 0">▼</button>
+              <input type="range" id="speed-value" min="-100" max="100" value="-20" class="brutal-range s-range">
+            </div>
+          </div>
+          <div class="slider-container">
+            <div class="slider-header">
+                <label class="slider-label" title="Speed Hue Sensitivity">S-HUE</label>
+                <span id="s-hue-val" class="slider-value">-50</span>
+            </div>
+            <div class="brutal-slider-wrapper">
+              <button class="slider-reset-arrow" data-target="speed-hue" title="Reset to 0">▼</button>
+              <input type="range" id="speed-hue" min="-100" max="100" value="-50" class="brutal-range s-range">
+            </div>
+          </div>
+        </div>
+
+        
+
+        <div class="flex-grow"></div>
+
+        <div class="toolbar-divider"></div>
+        <div class="history-group" style="margin-right: 8px;">
+          <button id="btn-settings" title="Settings" class="tool-btn with-shadow">
+             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </button>
+          <button id="btn-clear" class="brutal-btn">Clear</button>
+          <button id="btn-fullscreen" class="brutal-btn">Full</button>
+        </div>
+      </div>
+
+      <!-- REFERENCE TOOLBAR (HIDDEN BY DEFAULT) -->
+      <div id="top-bar-ref" class="hidden">
+        <button id="btn-ref-back" class="tool-btn" title="Back to Drawing">
+           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <div class="toolbar-divider"></div>
+        <div class="tool-group">
+          <button id="btn-ref-move" class="tool-btn active-tool" title="Move Image">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m5 9-3 3 3 3"/><path d="M22 12H2"/><path d="m19 9 3 3-3 3"/><path d="m15 5-3-3-3 3"/><path d="M12 2v20"/><path d="m15 19-3 3-3-3"/></svg>
+          </button>
+          <button id="btn-ref-crop" class="tool-btn" title="Crop Image">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/></svg>
+          </button>
+          <button id="btn-ref-knife" class="tool-btn" title="Knife / Split">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.77 3.77z"/></svg>
+          </button>
+          <button id="btn-ref-color" class="tool-btn" title="Color Correct">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 1 0 20"/></svg>
+          </button>
+        </div>
+        <div class="toolbar-divider"></div>
+        <button id="btn-ref-extract" class="brutal-btn" title="Extract Palette">EXTRACT</button>
+        <div class="flex-grow"></div>
+        <div class="slider-container">
+            <label class="slider-label">REF OPACITY</label>
+            <div class="slider-controls">
+                <input type="range" id="ref-opacity" min="0" max="100" value="100" class="brutal-range">
+                <span id="ref-opacity-val" class="slider-value">100%</span>
+            </div>
+        </div>
+        <div class="toolbar-divider"></div>
+        <button id="btn-ref-delete" class="brutal-btn" style="background: #ff4444; color: white;">DELETE</button>
+      </div>
+
+      <!-- WORKSPACE -->
+      <div id="canvas-container" tabindex="0">
+        <canvas id="fluid-canvas" class="hidden" style="position: absolute; top:0; left:0; width:100%; height:100%; z-index:10000; cursor: crosshair;"></canvas>
+        <div id="brush-cursor"></div>
+        <div id="brush-crosshair">
+          <div class="cross-h"></div>
+          <div class="cross-v"></div>
+        </div>
+        
+        <!-- FLOATING PANELS -->
+        <div id="panel-color" class="ui-panel">
+          <div id="handle-color" class="panel-handle">
+            <span class="panel-title">COLOR PALETTE</span>
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <button id="btn-toggle-texture" class="shortcut-toggle-btn" title="Toggle Texture Reveal Mode" aria-label="Toggle Texture Reveal Mode"></button>
+              <div id="current-color-preview"></div>
+            </div>
+          </div>
+          
+          <!-- TEXTURE PAINT SETTINGS DRAWER -->
+          <div id="texture-settings" class="hidden" style="border-bottom: 2px solid black; padding: 6px; background: #f0f0f0; user-select: none; pointer-events: auto;">
+             <!-- PATTERNS SELECTOR -->
+             <div style="font-size: 8px; font-weight: 900; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px;">TEXTURE PATTERN</div>
+             <div style="display: flex; gap: 3px; margin-bottom: 8px;">
+                <button id="btn-tex-dot" class="mini-btn active-btn" style="flex: 1; font-size: 8px; font-weight: bold; padding: 1px 0; height: 16px; min-width: 0;" title="Circle dot pattern">DOT</button>
+                <button id="btn-tex-sq" class="mini-btn" style="flex: 1; font-size: 8px; font-weight: bold; padding: 1px 0; height: 16px; min-width: 0;" title="Square pattern">SQ</button>
+                <button id="btn-tex-line" class="mini-btn" style="flex: 1; font-size: 8px; font-weight: bold; padding: 1px 0; height: 16px; min-width: 0;" title="Stripe pattern">LINE</button>
+                <button id="btn-tex-tri" class="mini-btn" style="flex: 1; font-size: 8px; font-weight: bold; padding: 1px 0; height: 16px; min-width: 0;" title="Triangle pattern">TRI</button>
+             </div>
+             <!-- DENSITY SLIDER -->
+             <div style="display: flex; justify-content: space-between; font-size: 8px; font-weight: 900; margin-bottom: 2px;">
+                <span>DENSITY</span>
+                <span id="tex-density-val">50%</span>
+             </div>
+             <input type="range" id="slider-tex-density" min="1" max="99" value="50" class="brutal-range" style="width: 100%; margin-bottom: 6px; height: 12px; cursor: pointer;">
+             <!-- SCALE SLIDER -->
+             <div style="display: flex; justify-content: space-between; font-size: 8px; font-weight: 900; margin-bottom: 2px;">
+                <span>GRID SIZE</span>
+                <span id="tex-size-val">16px</span>
+             </div>
+             <input type="range" id="slider-tex-size" min="4" max="64" value="16" class="brutal-range" style="width: 100%; height: 12px; cursor: pointer;">
+          </div>
+          
+          <div class="panel-content">
+             <!-- CUSTOM COLOR SELECTOR -->
+             <div id="color-selector">
+                <div id="sv-picker">
+                   <div class="sv-cursor"></div>
+                </div>
+                <input type="range" id="hue-slider" min="0" max="360" value="0">
+             </div>
+             <!-- SWATCHES -->
+             <div id="palette"></div>
+             <button id="btn-reset-palette" class="brutal-btn full-width">Reset</button>
+          </div>
+        </div>
+
+        <div id="panel-images" class="ui-panel">
+           <div id="handle-images" class="panel-handle">
+            <span class="panel-title">REFERENCE</span>
+            <button id="btn-open-recording" class="panel-toggle" title="Timelapse Recording" style="color: red; font-size: 14px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0; background: transparent; border: none; cursor: pointer;">●</button>
+          </div>
+          <div class="panel-content">
+            <div id="image-list">
+              <div class="empty-state">Empty</div>
+            </div>
+            <button id="btn-import" class="import-area">
+               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            </button>
+            <input type="file" id="file-import" class="hidden" accept="image/*">
+          </div>
+        </div>
+
+        <div id="panel-brush-tips" class="ui-panel">
+          <div id="handle-brush-tips" class="panel-handle">
+            <span class="panel-title">BRUSH TEXTURES</span>
+            <button id="btn-tips-collapse" class="panel-toggle">_</button>
+          </div>
+          <div id="tips-content" class="panel-content">
+             <!-- TIP PREVIEW / EDITOR -->
+             <div id="tip-editor-container">
+                <canvas id="tip-editor-canvas" width="128" height="128"></canvas>
+                <div id="tip-editor-controls">
+                   <button id="btn-tip-eraser" class="mini-btn">E</button>
+                   <button id="btn-tip-reset" class="mini-btn">R</button>
+                   <button id="btn-tip-clear" class="mini-btn">C</button>
+                </div>
+                <button id="btn-tip-capture" class="mini-btn" title="Sample from Canvas" style="position: absolute; bottom: 4px; left: 4px;">T</button>
+             </div>
+             <!-- TEXTURE SWATCHES -->
+              <div class="brush-settings-container" style="padding: 0 8px;">
+                  <div id="height-control" class="brush-setting" style="margin: 8px 0;">
+                    <div class="setting-label" style="display: flex; justify-content: space-between; align-items: center;">
+                      <span class="uppercase font-black" style="font-size: 9px; font-weight: 900;">IMPASTO</span>
+                      <span id="height-val" class="font-black" style="font-size: 9px; font-weight: 900;">0%</span>
+                    </div>
+                    <input type="range" id="brush-height" min="0" max="100" value="0" class="minimal-range" style="width: 100%;">
+                  </div>
+
+                  <div id="oiliness-control" class="brush-setting" style="margin: 8px 0;">
+                    <div class="setting-label" style="display: flex; justify-content: space-between; align-items: center;">
+                      <span class="uppercase font-black" style="font-size: 9px; font-weight: 900;">OILINESS</span>
+                      <span id="oiliness-val" class="font-black" style="font-size: 9px; font-weight: 900;">0%</span>
+                    </div>
+                    <input type="range" id="brush-oiliness" min="0" max="100" value="50" class="minimal-range" style="width: 100%;">
+                  </div>
+
+                  <div id="airbrush-control" class="brush-setting" style="margin: 8px 0;">
+                    <div class="setting-label" style="display: flex; justify-content: space-between; align-items: center;">
+                      <span class="uppercase font-black" style="font-size: 9px; font-weight: 900;">AIRBRUSH</span>
+                      <span id="airbrush-val" class="font-black" style="font-size: 9px; font-weight: 900;">0%</span>
+                    </div>
+                    <input type="range" id="brush-airbrush" min="0" max="100" value="0" class="minimal-range" style="width: 100%;">
+                  </div>
+                  <button id="btn-advanced-brush" class="brutal-btn full-width" style="margin-top: 4px; font-size: 9px; height: 24px;">ADVANCED</button>
+              </div>
+             <div id="tip-palette">
+                <!-- 6 main slots -->
+                <div id="tip-main-slots" class="tip-grid"></div>
+                <div class="tip-gen-header" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px 0; border-top: 2px solid black; margin-top: 4px;">
+                    <button id="btn-refresh-col-0" class="mini-gen-btn" style="background: white; border: 2px solid black; font-weight: 900; height: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 10px;" title="Refresh Column 1">↻</button>
+                    <button id="btn-refresh-col-1" class="mini-gen-btn" style="background: white; border: 2px solid black; font-weight: 900; height: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 10px;" title="Refresh Column 2">↻</button>
+                    <button id="btn-refresh-col-2" class="mini-gen-btn" style="background: white; border: 2px solid black; font-weight: 900; height: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 10px;" title="Refresh Column 3">↻</button>
+                </div>
+                <!-- Generated combos -->
+                <div id="tip-generated-slots" class="tip-grid"></div>
+             </div>
+          </div>
+        </div>
+
+        <div id="panel-layers" class="ui-panel">
+           <div id="handle-layers" class="panel-handle">
+            <span class="panel-title">LAYERS</span>
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <button id="btn-toggle-shortcuts" class="shortcut-toggle-btn" title="Toggle Touch Toolkit" aria-label="Toggle Touch Toolkit"></button>
+              <div id="status" class="status-indicator">READY</div>
+            </div>
+          </div>
+          
+          <div id="layer-stack"></div>
+          
+          <!-- ZOOM UI AT BOTTOM OF LAYERS PANEL -->
+          <div class="zoom-container">
+            <div class="zoom-buttons">
+                <button id="btn-zoom-out" class="mini-btn">-</button>
+                <span id="zoom-val" class="zoom-value">100%</span>
+                <button id="btn-zoom-in" class="mini-btn">+</button>
+                <div style="width: 8px;"></div>
+                <button id="btn-zoom-fit" class="mini-btn" style="height: 16px; padding: 0 4px;">FIT</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- TIMELAPSE RECORDING PANEL -->
+        <div id="panel-recording" class="ui-panel hidden" style="width: 290px; left: 340px; top: 180px; z-index: 10001; max-height: 90vh; overflow-y: auto;">
+          <div id="handle-recording" class="panel-handle">
+            <span class="panel-title" style="letter-spacing: 0.05em; color: red; font-weight: 900;">● TIMELAPSE RECORDER</span>
+            <button id="btn-recording-close" class="mini-btn">X</button>
+          </div>
+          <div class="panel-content" style="padding: 10px; display: flex; flex-direction: column; gap: 8px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; font-size: 10px; font-weight: 900; background: #e0e0e0; padding: 4px; border: 2px solid #000;">
+              <span>SESSION ID: <strong id="rec-session-id" style="color: blue;">NONE</strong></span>
+              <span>FRAMES: <strong id="rec-frame-count">0</strong></span>
+            </div>
+            
+            <!-- RECORD & STOP BUTTONS -->
+            <div style="display: flex; gap: 6px;">
+              <button id="btn-rec-toggle" class="brutal-btn" style="flex: 1; height: 32px; font-weight: 900; background: #fff; color: red; border-color: #000; font-size: 11px;" title="Start/Pause recording active changes">
+                ● RECORD
+              </button>
+              <button id="btn-rec-clear" class="brutal-btn" style="height: 32px; width: 32px; padding: 0; font-weight: bold; background: #fcc;" title="Clear timeline completely">
+                ■
+              </button>
+            </div>
+
+            <!-- REGION CONFIGURATION -->
+            <div class="settings-category" id="cat-rec-bounds">
+              <div class="category-header">CAPTURE BOUNDS</div>
+              <div class="category-content" style="padding: 8px; display: flex; flex-direction: column; gap: 4px;">
+                <div id="rec-mode-info" style="font-size: 10px; line-height: 1.3; margin-bottom: 4px;">
+                  Mode: <strong id="rec-mode-type">Infinite Selection</strong>
+                </div>
+                <div id="rec-infinite-controls" style="display: flex; flex-direction: column; gap: 4px;">
+                  <button id="btn-rec-toggle-box" class="brutal-btn full-width" style="height: 24px; font-size: 9px; font-weight: 900; margin-bottom: 4px;">
+                    SHOW/EDIT SELECTION BOX
+                  </button>
+                  <div style="display: flex; gap: 4px; align-items: center; justify-content: space-between; font-size: 9px; margin-top: 2px;">
+                    <span style="font-weight: 900;">BOX SIZE:</span>
+                    <div style="display: flex; gap: 2px;">
+                      <button id="btn-rec-size-small" class="mini-btn" style="height: 16px; font-size: 8px; padding: 0 4px;">300SQ</button>
+                      <button id="btn-rec-size-medium" class="mini-btn" style="height: 16px; font-size: 8px; padding: 0 4px;">500SQ</button>
+                      <button id="btn-rec-size-large" class="mini-btn" style="height: 16px; font-size: 8px; padding: 0 4px;">800SQ</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- SETTINGS: Quality & Threshold -->
+            <div class="settings-category" id="cat-rec-settings">
+              <div class="category-header">SNAPSHOT SETTINGS</div>
+              <div class="category-content" style="padding: 8px; display: flex; flex-direction: column; gap: 6px;">
+                <!-- Quality slider / setting -->
+                <div style="display: flex; justify-content: space-between; font-size: 9px; font-weight: 900; align-items: center;">
+                  <span>RESOLUTION</span>
+                  <span id="rec-quality-val" style="color: blue;">1/4 SIZE</span>
+                </div>
+                <div style="display: flex; gap: 3px;">
+                  <button id="btn-rec-res-14" class="mini-btn active-btn" style="flex: 1; font-size: 8px; padding: 2px 0;">1/4 (FAST)</button>
+                  <button id="btn-rec-res-12" class="mini-btn" style="flex: 1; font-size: 8px; padding: 2px 0;">1/2 (MED)</button>
+                  <button id="btn-rec-res-11" class="mini-btn" style="flex: 1; font-size: 8px; padding: 2px 0;">FULL (HIGH)</button>
+                </div>
+
+                <!-- Stroke trigger slider / setting -->
+                <div style="display: flex; justify-content: space-between; font-size: 9px; font-weight: 900; margin-top: 2px;">
+                  <span>SNAP INTERVAL (STROKES)</span>
+                  <span id="rec-stride-val">4 strokes</span>
+                </div>
+                <input type="range" id="rec-stride-slider" min="1" max="15" value="4" class="brutal-range" style="width: 100%; height: 12px; cursor: pointer;">
+                
+                <!-- Manual snapshot -->
+                <button id="btn-rec-snap-manual" class="brutal-btn full-width" style="height: 24px; font-size: 9px; font-weight: 900; background: #eef; margin-top: 2px;">
+                  📸 SNAP FRAME NOW
+                </button>
+              </div>
+            </div>
+
+            <!-- PLAYER SECTION -->
+            <div class="settings-category" id="cat-rec-preview">
+              <div class="category-header">TIMELINE PREVIEW</div>
+              <div class="category-content" style="padding: 4px; background: #000; display: flex; flex-direction: column;">
+                <div style="background: #e0e0e0; border-bottom: 2px solid #000; padding: 4px; font-size: 9px; font-weight: 900; text-transform: uppercase; color: #000; display: flex; justify-content: space-between;">
+                  <span>FRAME PREVIEW</span>
+                  <span id="rec-player-frame-info">FRAME 0 / 0</span>
+                </div>
+                <div id="rec-player-wrapper" style="position: relative; width: 100%; aspect-ratio: 4/3; display: flex; align-items: center; justify-content: center; overflow: hidden; background: #111;">
+                  <img id="rec-player-screen" style="max-width: 100%; max-height: 100%; object-fit: contain; display: none;">
+                  <div id="rec-player-empty" style="color: #888; font-size: 9px; text-transform: uppercase; font-weight: bold; text-align: center; padding: 20px; line-height: 1.5;">
+                    No frames snapped<br><span style="font-size: 8px; color: #555;">Start painting to record!</span>
+                  </div>
+                </div>
+                
+                <!-- SCRUBBER -->
+                <div style="background: #222; padding: 4px; border-top: 2px solid #000;">
+                  <input type="range" id="rec-scrubber" min="0" max="0" value="0" class="brutal-range" style="width: 100%; height: 12px; cursor: pointer; background: #444; margin-bottom: 4px;">
+                  
+                  <!-- PLAYBACK CONTROLS -->
+                  <div style="display: flex; justify-content: space-between; align-items: center; gap: 4px;">
+                    <div style="display: flex; gap: 2px;">
+                      <button id="btn-player-prev" class="mini-btn" style="color: #fff; background: #333; height: 16px; font-size: 8px;">◀◀</button>
+                      <button id="btn-player-play" class="mini-btn" style="color: #fff; background: #333; height: 16px; font-size: 8px; font-weight: bold;">▶ PLAY</button>
+                      <button id="btn-player-next" class="mini-btn" style="color: #fff; background: #333; height: 16px; font-size: 8px;">▶▶</button>
+                    </div>
+                    <div style="display: flex; font-size: 8px; color: #aaa; gap: 4px; align-items: center;">
+                      <span>FPS:</span>
+                      <input type="number" id="rec-fps" value="12" style="width: 42px; background: #333; color: #fff; border: 1px solid #555; font-size: 9px; padding: 0 1px; text-align: center;">
+                    </div>
+                  </div>
+                </div>
+
+                <!-- TIMELINE OPERATIONS & EDITING INSIDE COLLAPSIBLE -->
+                <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 4px; background: #f0f0f0; padding: 4px; border: 2px solid #000;">
+                  <div style="display: flex; gap: 4px;">
+                    <button id="btn-rec-trim-start" class="brutal-btn" style="flex: 1; height: 20px; font-size: 8px; font-weight: bold; padding: 0;" title="Delete all frames before currently chosen frame">
+                      ✂ TRIM START
+                    </button>
+                    <button id="btn-rec-trim-end" class="brutal-btn" style="flex: 1; height: 20px; font-size: 8px; font-weight: bold; padding: 0;" title="Delete all frames after currently chosen frame">
+                      ✂ TRIM END
+                    </button>
+                    <button id="btn-rec-del-frame" class="brutal-btn" style="height: 20px; font-size: 8px; font-weight: bold; padding: 0 8px; background: #fbb;" title="Delete currently selected frame only">
+                      DEL FRAME
+                    </button>
+                  </div>
+                  <button id="btn-rec-export-video" class="brutal-btn full-width" style="height: 26px; font-size: 10px; font-weight: 900; background: #ddf; color: #000;" title="Export frames sequence as a high-quality MP4 or WebM video file">
+                    🎬 EXPORT MP4/WEBM VIDEO
+                  </button>
+                  <button id="btn-rec-export-json" class="brutal-btn full-width" style="height: 24px; font-size: 9px; font-weight: 900; background: #dfd; border-style: dotted;" title="Export frames sequence as JSON payload">
+                    💾 DOWNLOAD JSON SEQUENCE BACKUP
+                  </button>
+                </div>
+
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- TOUCH TOOLKIT PANEL -->
+        <div id="panel-touch-shortcuts" class="ui-panel hidden" style="width: 144px;">
+          <div id="handle-touch-shortcuts" class="panel-handle">
+            <span class="panel-title">TOUCH KIT</span>
+            <button id="btn-close-shortcuts" class="mini-btn">X</button>
+          </div>
+          <div class="panel-content" style="padding: 8px; display: flex; gap: 8px;">
+            <!-- Column 1: Actions & Size -->
+            <div style="display: flex; flex-direction: column; gap: 4px; width: 56px; flex-shrink: 0;">
+              <button id="btn-touch-undo" class="brutal-btn" style="height: 36px; padding: 0;" title="Undo">↶</button>
+              <button id="btn-touch-redo" class="brutal-btn" style="height: 36px; padding: 0;" title="Redo">↷</button>
+              <button id="btn-touch-picker" class="brutal-btn" style="height: 72px; padding: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;" title="Eyedropper">
+                <span style="font-size: 16px;">💧</span>
+                <span style="font-size: 7px; font-weight: 900;">PICKER</span>
+              </button>
+              <button id="btn-touch-size-down" class="brutal-btn" style="height: 36px; font-weight: 900;" title="Decrease Size">-</button>
+              <button id="btn-touch-size-up" class="brutal-btn" style="height: 36px; font-weight: 900;" title="Increase Size">+</button>
+            </div>
+
+            <!-- Column 2: Transforms -->
+            <div style="display: flex; flex-direction: column; gap: 4px; flex-grow: 1; width: 56px;">
+              <button id="btn-touch-transform" class="brutal-btn" style="height: 40px; font-size: 8px;" title="Transform">TRAN</button>
+              <button id="btn-touch-apply" class="brutal-btn" style="height: 40px; font-size: 8px;" title="Apply">APPLY</button>
+              <button id="btn-touch-deselect" class="brutal-btn" style="height: 40px; font-size: 8px;" title="Deselect">DESEL</button>
+              <button id="btn-touch-mirror" class="brutal-btn" style="height: 40px; font-size: 8px;" title="Mirror (B)">MIRR</button>
+              <button id="btn-touch-delete" class="brutal-btn" style="height: 40px; font-size: 8px; background-color: #ff4d4d; color: white;" title="Delete">DEL</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- SETTINGS PANEL -->
+        <div id="panel-settings" class="ui-panel hidden" style="width: 320px; height: 500px;">
+          <div id="handle-settings" class="panel-handle">
+            <span class="panel-title">SETTINGS</span>
+            <button id="btn-close-settings" class="mini-btn">X</button>
+          </div>
+          
+          <!-- TAB HEADERS -->
+          <div class="settings-tabs">
+            <button class="settings-tab active" data-tab="general">GEN</button>
+            <button class="settings-tab" data-tab="projects">PRJ</button>
+            <button class="settings-tab" data-tab="data">DATA</button>
+            <button class="settings-tab" data-tab="info">INFO</button>
+          </div>
+
+          <div class="panel-content settings-main" style="flex-grow: 1; overflow-y: auto;">
+             <!-- GENERAL TAB -->
+              <div id="tab-general" class="tab-pane active">
+                  <div class="settings-group">
+                     <label class="settings-label">CANVAS BACKGROUND</label>
+                     <input type="color" id="settings-bg-color" value="#ffffff" class="settings-input-color">
+                  </div>
+                  <div class="settings-divider"></div>
+                  <div class="settings-group">
+                     <label class="settings-label">GRID PATTERN</label>
+                     <select id="settings-grid-pattern" class="full-width" style="border: 2px solid #000; font-family: inherit; font-size: 10px;">
+                         <option value="dots">DOTS</option>
+                         <option value="lines">LINES</option>
+                         <option value="squares">SQUARES</option>
+                         <option value="crosses">CROSSES</option>
+                     </select>
+                  </div>
+                  <div class="settings-group">
+                     <label class="settings-label">GRID COLOR</label>
+                     <input type="color" id="settings-grid-color" value="#cccccc" class="settings-input-color">
+                  </div>
+                  <div class="settings-group">
+                     <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <label class="settings-label">GRID SIZE</label>
+                        <span id="grid-size-val" style="font-size: 9px; font-weight: 900;">20px</span>
+                     </div>
+                     <input type="range" id="settings-grid-size" min="10" max="200" step="10" value="20" class="brutal-range" style="width: 100%;">
+                  </div>
+                  <div class="settings-group">
+                     <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <label class="settings-label">PATTERN SIZE</label>
+                        <span id="grid-thickness-val" style="font-size: 9px; font-weight: 900;">2px</span>
+                     </div>
+                     <input type="range" id="settings-grid-thickness" min="1" max="50" step="1" value="2" class="brutal-range" style="width: 100%;">
+                  </div>
+                  <div class="settings-group">
+                     <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <label class="settings-label">GRID INTENSITY</label>
+                        <span id="grid-intensity-val" style="font-size: 9px; font-weight: 900;">100%</span>
+                     </div>
+                     <input type="range" id="settings-grid-intensity" min="0" max="100" value="100" class="brutal-range" style="width: 100%;">
+                  </div>
+                  <div class="settings-row">
+                     <label class="settings-label">SHOW GRID</label>
+                     <div class="checkbox-wrapper">
+                        <input type="checkbox" id="settings-grid-show" checked class="settings-input-check">
+                        <span class="checkbox-custom"></span>
+                     </div>
+                  </div>
+                  <div class="settings-divider"></div>
+                  <!-- Static Canvas settings (only visible if engine is static) -->
+                  <div id="settings-static-section" class="settings-group hidden">
+                     <label class="settings-label" style="display: block; margin-bottom: 6px; font-weight: 900;">STATIC CANVAS CONFIG</label>
+                     
+                     <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                        <div style="flex: 1;">
+                           <label class="settings-label" style="font-size: 8px;">WIDTH (px)</label>
+                           <input type="number" id="settings-static-width" style="width: 100%; height: 24px; padding: 2px; font-family: inherit; font-size: 10px; border: 2px solid #000;" value="2400">
+                        </div>
+                        <div style="flex: 1;">
+                           <label class="settings-label" style="font-size: 8px;">HEIGHT (px)</label>
+                           <input type="number" id="settings-static-height" style="width: 100%; height: 24px; padding: 2px; font-family: inherit; font-size: 10px; border: 2px solid #000;" value="3600">
+                        </div>
+                     </div>
+
+                     <div class="settings-row" style="margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
+                        <label class="settings-label">KEEP ASPECT RATIO</label>
+                        <div class="checkbox-wrapper">
+                           <input type="checkbox" id="settings-static-aspect" checked class="settings-input-check">
+                           <span class="checkbox-custom"></span>
+                        </div>
+                     </div>
+
+                     <div class="settings-row" style="margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
+                        <label class="settings-label">PRESERVE ARTWORK</label>
+                        <div class="checkbox-wrapper">
+                           <input type="checkbox" id="settings-static-preserve" checked class="settings-input-check">
+                           <span class="checkbox-custom"></span>
+                        </div>
+                     </div>
+
+                     <button id="btn-apply-static-settings" class="brutal-btn full-width" style="font-size: 10px; padding: 6px; font-weight: 900; background: #000; color: #fff; cursor: pointer;">APPLY CANVAS SETTINGS</button>
+                     <p style="font-size: 8px; color: #ff4444; margin-top: 6px; font-weight: bold; line-height: 1.2; text-transform: uppercase;">Note: Changing canvas dimensions clears undo/redo history.</p>
+                  </div>
+              </div>
+
+             <!-- PROJECTS TAB -->
+             <div id="tab-projects" class="tab-pane">
+                 <label class="settings-label">CANVAS PROJECTS</label>
+                 <button id="btn-project-new" class="brutal-btn full-width" style="margin-bottom: 8px;">+ NEW</button>
+                 <div id="project-list" class="project-grid"></div>
+             </div>
+
+             <!-- DATA TAB -->
+             <div id="tab-data" class="tab-pane">
+                 <button id="btn-force-save" class="brutal-btn full-width" style="margin-bottom: 8px;">FORCE SAVE NOW</button>
+                 <div class="settings-group">
+                    <label class="settings-label">STORAGE INFO</label>
+                    <div class="data-info">
+                        <span id="storage-chunks">0</span> CHUNKS
+                    </div>
+                    <div class="data-info">
+                        <span id="storage-size">0.00</span> MB
+                    </div>
+                 </div>
+                 <div class="settings-divider"></div>
+
+                 <div class="settings-group">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <label class="settings-label">AUTOSAVE DELAY</label>
+                        <span id="autosave-val" style="font-size: 9px; font-weight: 900;">4s</span>
+                    </div>
+                    <input type="range" id="settings-autosave" min="0" max="100" value="0" class="brutal-range" style="width: 100%;">
+                    <div class="settings-row" style="margin-top: 8px; margin-bottom: 0;">
+                       <label class="settings-label">AUTOSAVE ENABLED</label>
+                       <div class="checkbox-wrapper">
+                          <input type="checkbox" id="settings-autosave-enable" checked class="settings-input-check">
+                          <span class="checkbox-custom"></span>
+                       </div>
+                    </div>
+                 </div>
+
+                 <div class="settings-divider"></div>
+                 <button id="btn-clear-storage" class="brutal-btn full-width" style="background: #ff4444; color: white;">RESET SYSTEM</button>
+                 <p style="font-size: 8px; margin-top: 8px; opacity: 0.6; line-height: 1.2;">WARNING: Reset deletes all projects and data forever.</p>
+             </div>
+
+             <div id="tab-info" class="tab-pane">
+                 <label class="settings-label">HOTKEYS</label>
+                 <div class="hotkey-list" style="font-size: 9px; line-height: 1.6;">
+                    <div class="hotkey-item"><span>[1 - 6]</span> <span>BRUSH/WIRE/LASSO/SMUDGE/ERASE/REF</span></div>
+                    <div class="hotkey-item"><span>[B]</span> <span>MIRROR VIEW (OR SELECTION)</span></div>
+                    <div class="hotkey-item"><span>[X]</span> <span>ERASER (OR CTRL+X CUT)</span></div>
+                    <div class="hotkey-item"><span>[ALT]</span> <span>EYEDROPPER</span></div>
+                    <div class="hotkey-item"><span>[SPACE]</span> <span>PAN CANVAS</span></div>
+                    <div class="hotkey-item"><span>[SHIFT]</span> <span>STRAIGHT LINES</span></div>
+                    <div class="settings-divider"></div>
+                    <div class="hotkey-item"><span>[CTRL+Z]</span> <span>UNDO</span></div>
+                    <div class="hotkey-item"><span>[CTRL+Y]</span> <span>REDO</span></div>
+                    <div class="hotkey-item"><span>[CTRL+S]</span> <span>SAVE / EXPORT SELECTION</span></div>
+                    <div class="hotkey-item"><span>[[ / ]]</span> <span>BRUSH SIZE (ALSO W / E)</span></div>
+                    <div class="hotkey-item"><span>[S / D]</span> <span>OPACITY +/- (CTRL+D DESELECT)</span></div>
+                    <div class="hotkey-item"><span>[T]</span> <span>TRANSFORM SELECTION</span></div>
+                    <div class="hotkey-item"><span>[ENTER]</span> <span>APPLY TRANSFORM</span></div>
+                    <div class="hotkey-item"><span>[F]</span> <span>FULLSCREEN</span></div>
+                    <div class="hotkey-item"><span>[ESC]</span> <span>CANCEL / CLOSE ALL</span></div>
+                 </div>
+                 <div class="settings-divider"></div>
+                 <p style="font-size: 8px; opacity: 0.6;">BRUTE_ENGINE v0.8.3</p>
+             </div>
+          </div>
+        </div>
+
+        <!-- ADVANCED BRUSH SETTINGS PANEL -->
+        <div id="panel-advanced-brush" class="ui-panel hidden" style="width: 250px; z-index: 10005; max-height: 80vh; overflow-y: auto;">
+          <div id="handle-advanced-brush" class="panel-handle">
+            <span class="panel-title">ADVANCED BRUSH</span>
+            <button id="btn-close-advanced-brush" class="mini-btn">X</button>
+          </div>
+          <div class="panel-content">
+             <!-- PEN PRESSURE CATEGORY -->
+             <div class="settings-category" id="cat-pressure">
+               <div class="category-header">PEN PRESSURE</div>
+               <div class="category-content">
+                  <div class="settings-group">
+                     <div class="settings-row" style="margin-bottom: 8px;">
+                        <label class="settings-label">ENABLE PRESSURE</label>
+                        <div class="checkbox-wrapper">
+                           <input type="checkbox" id="settings-pressure-enable" checked class="settings-input-check">
+                           <span class="checkbox-custom"></span>
+                        </div>
+                     </div>
+                     <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <label class="settings-label">AFFECTED OPACITY</label>
+                        <span id="pressure-opacity-val" style="font-size: 9px; font-weight: 900;">1.0</span>
+                     </div>
+                     <input type="range" id="settings-pressure-opacity-influence" min="0" max="2" step="0.1" value="1.0" class="brutal-range" style="width: 100%;">
+
+                     <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 6px;">
+                        <label class="settings-label">AFFECTED SIZE</label>
+                        <span id="pressure-size-val" style="font-size: 9px; font-weight: 900;">1.0</span>
+                     </div>
+                     <input type="range" id="settings-pressure-size-influence" min="0" max="2" step="0.1" value="1.0" class="brutal-range" style="width: 100%;">
+                  </div>
+                  <div class="settings-group">
+                     <div style="display: flex; justify-content: space-between; align-items: center;">
+                         <label class="settings-label">BRUSH SPACING</label>
+                     </div>
+                     <input type="range" id="settings-brush-spacing" min="0.01" max="0.5" step="0.01" value="0.05" class="brutal-range" style="width: 100%;">
+                  </div>
+               </div>
+             </div>
+
+             <!-- SPEED CONFIG CATEGORY -->
+             <div class="settings-category" id="cat-speed-tuning">
+                <div class="category-header">SPEED CONFIG</div>
+                <div class="category-content">
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label" title="Max speed at which sensitivity caps out">LIMIT SPEED</label>
+                          <span id="adv-speed-max-val" style="font-size: 9px; font-weight: 900;">5.0</span>
+                      </div>
+                      <input type="range" id="adv-speed-max" min="1" max="10" step="0.5" value="5.0" class="brutal-range" style="width: 100%;">
+                   </div>
+                </div>
+             </div>
+
+             <!-- JITTER CATEGORY -->
+             <div class="settings-category" id="cat-jitter">
+                <div class="category-header">JITTER</div>
+                <div class="category-content">
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">SIZE JITTER</label>
+                          <span id="jitter-size-val" style="font-size: 9px; font-weight: 900;">0%</span>
+                      </div>
+                      <input type="range" id="settings-jitter-size" min="0" max="100" value="0" class="brutal-range" style="width: 100%;">
+                   </div>
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">ANGLE JITTER</label>
+                          <span id="jitter-angle-val" style="font-size: 9px; font-weight: 900;">0°</span>
+                      </div>
+                      <input type="range" id="settings-jitter-angle" min="0" max="180" value="0" class="brutal-range" style="width: 100%;">
+                   </div>
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">SCATTER (POS JITTER)</label>
+                          <span id="jitter-pos-val" style="font-size: 9px; font-weight: 900;">0%</span>
+                      </div>
+                      <input type="range" id="settings-jitter-pos" min="0" max="200" value="0" class="brutal-range" style="width: 100%;">
+                   </div>
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">HUE JITTER</label>
+                          <span id="jitter-hue-val" style="font-size: 9px; font-weight: 900;">0%</span>
+                      </div>
+                      <input type="range" id="settings-jitter-hue" min="0" max="100" value="0" class="brutal-range" style="width: 100%;">
+                   </div>
+                </div>
+             </div>
+
+             <!-- SMUDGE CATEGORY -->
+             <div class="settings-category" id="cat-smudge">
+               <div class="category-header">SMUDGE</div>
+               <div class="category-content">
+                  <div class="settings-group">
+                     <div style="display: flex; justify-content: space-between; align-items: center;">
+                         <label class="settings-label">FLOW BOOST</label>
+                         <span id="adv-smudge-flow-boost-val" style="font-size: 9px; font-weight: 900;">10.0</span>
+                     </div>
+                     <input type="range" id="adv-smudge-flow-boost" min="1" max="20" step="0.5" value="10.0" class="brutal-range" style="width: 100%;">
+                  </div>
+                  <div class="settings-group">
+                     <div style="display: flex; justify-content: space-between; align-items: center;">
+                         <label class="settings-label">PICKUP (WETNESS)</label>
+                         <span id="adv-smudge-pickup-val" style="font-size: 9px; font-weight: 900;">2.0</span>
+                     </div>
+                     <input type="range" id="adv-smudge-pickup" min="0" max="4" step="0.1" value="2.0" class="brutal-range" style="width: 100%;">
+                  </div>
+                  <div class="settings-group">
+                     <div style="display: flex; justify-content: space-between; align-items: center;">
+                         <label class="settings-label">SHARPENING</label>
+                         <span id="adv-brush-sharpen-val" style="font-size: 9px; font-weight: 900;">0</span>
+                     </div>
+                     <input type="range" id="adv-brush-sharpen" min="0" max="1" step="0.05" value="0" class="brutal-range" style="width: 100%;">
+                  </div>
+               </div>
+             </div>
+
+             <!-- WIREFRAME CATEGORY -->
+             <div class="settings-category" id="cat-wireframe">
+               <div class="category-header">WIREFRAME</div>
+               <div class="category-content">
+                  <div class="settings-group">
+                     <div style="display: flex; justify-content: space-between; align-items: center;">
+                         <label class="settings-label">LINE DENSITY</label>
+                         <span id="adv-wire-density-val" style="font-size: 9px; font-weight: 900;">30</span>
+                     </div>
+                     <input type="range" id="adv-wire-density" min="1" max="40" step="1" value="30" class="brutal-range" style="width: 100%;">
+                  </div>
+                  <div class="settings-group">
+                     <div style="display: flex; justify-content: space-between; align-items: center;">
+                         <label class="settings-label">CONNECTION RANGE</label>
+                         <span id="adv-wire-range-val" style="font-size: 9px; font-weight: 900;">4.0</span>
+                     </div>
+                     <input type="range" id="adv-wire-range" min="0.1" max="10" step="0.1" value="4.0" class="brutal-range" style="width: 100%;">
+                  </div>
+                  <div class="settings-group">
+                     <div style="display: flex; justify-content: space-between; align-items: center;">
+                         <label class="settings-label">MIN CONNECTION DIST</label>
+                         <span id="adv-wire-min-dist-val" style="font-size: 9px; font-weight: 900;">0.5</span>
+                     </div>
+                     <input type="range" id="adv-wire-min-dist" min="0" max="2" step="0.1" value="0.5" class="brutal-range" style="width: 100%;">
+                  </div>
+               </div>
+             </div>
+
+
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- NEW PROJECT MODAL -->
+    <div id="modal-new-project" class="ui-panel hidden" style="width: 230px; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 10000; box-shadow: 10px 10px 0 0 #000;">
+        <div id="handle-new-project" class="panel-handle">
+            <span class="panel-title">NEW CANVAS</span>
+            <button id="btn-close-new-project" class="mini-btn">X</button>
+        </div>
+        <div class="panel-content">
+             <div class="settings-divider"></div>
+             <div class="settings-group" style="margin-top: 8px;">
+                 <label class="settings-label">NAME</label>
+                 <input type="text" id="new-project-name" class="brutal-input full-width" value="SKETCH_01" style="border: 2px solid #000; padding: 2px 4px; font-family: inherit; font-size: 10px;">
+             </div>
+             <div class="settings-group" style="margin-top: 8px;">
+                 <label class="settings-label">CANVAS MODE</label>
+                 <select id="new-project-mode" class="full-width" style="border: 2px solid #000; font-family: inherit; font-size: 10px;">
+                     <option value="infinite" selected>INFINITE CANVAS</option>
+                     <option value="static">STATIC BOARD</option>
+                 </select>
+             </div>
+             <!-- Collapsible Custom static board attributes -->
+             <div id="new-project-static-dimensions" class="hidden" style="margin-top: 8px; border: 2px dashed #000; padding: 6px;">
+                 <div class="settings-group">
+                     <label class="settings-label" style="font-size: 8px;">WIDTH (PX)</label>
+                     <input type="number" id="new-project-width" class="brutal-input full-width" value="2400" style="border: 2px solid #000; padding: 2px 4px; font-family: inherit; font-size: 10px; width: 100%; box-sizing: border-box;">
+                 </div>
+                 <div class="settings-group" style="margin-top: 6px;">
+                     <label class="settings-label" style="font-size: 8px;">HEIGHT (PX)</label>
+                     <input type="number" id="new-project-height" class="brutal-input full-width" value="3600" style="border: 2px solid #000; padding: 2px 4px; font-family: inherit; font-size: 10px; width: 100%; box-sizing: border-box;">
+                 </div>
+                 <div class="settings-group" style="margin-top: 6px;">
+                     <label class="settings-label" style="font-size: 8px;">INITIAL DPI</label>
+                     <input type="number" id="new-project-dpi" class="brutal-input full-width" value="300" style="border: 2px solid #000; padding: 2px 4px; font-family: inherit; font-size: 10px; width: 100%; box-sizing: border-box;">
+                 </div>
+                 <div style="font-size: 8px; opacity: 0.6; margin-top: 6px; line-height: 1.2;">Default is 2400x3600 (ideal for painting). Default DPI is 300.</div>
+             </div>
+             <div class="settings-group" style="margin-top: 8px;">
+                 <label class="settings-label">CHUNK SIZE</label>
+                 <select id="new-project-chunk-size" class="full-width" style="border: 2px solid #000; font-family: inherit; font-size: 10px;">
+                     <option value="256">256 (TINY)</option>
+                     <option value="512" selected>512 (BALANCED)</option>
+                     <option value="1024">1024 (HD)</option>
+                 </select>
+             </div>
+             <div class="settings-group" style="margin-top: 8px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <label class="settings-label">WEBP QUALITY</label>
+                    <span id="new-quality-val" style="font-size: 9px; font-weight: 900;">0.5</span>
+                </div>
+                <input type="range" id="new-project-quality" min="0.1" max="1.0" step="0.1" value="0.5" class="minimal-range" style="width: 100%;">
+             </div>
+             <div style="height: 12px;"></div>
+             <button id="btn-create-project-final" class="brutal-btn full-width">CREATE</button>
+        </div>
+    </div>
+
+    <!--  EXPORT MODAL -->
+    <div id="modal-export" class="ui-panel hidden" style="width: 280px; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 10002; box-shadow: 12px 12px 0 0 #000; height: auto; max-height: 90vh; overflow-y: auto;">
+        <div id="handle-export" class="panel-handle">
+            <span class="panel-title">EXPORT SELECTION</span>
+            <button id="btn-close-export" class="mini-btn">X</button>
+        </div>
+        <div class="panel-content" style="padding: 12px; padding-top: 0; display: flex; flex-direction: column;">
+             <div class="settings-divider"></div>
+             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 8px;">
+                <div class="settings-group">
+                    <label class="settings-label">WIDTH</label>
+                    <input type="number" id="export-width" class="brutal-input full-width" style="border: 2px solid #000; padding: 4px; font-family: inherit; font-size: 11px; width: 100%; box-sizing: border-box;">
+                </div>
+                <div class="settings-group">
+                    <label class="settings-label">HEIGHT</label>
+                    <input type="number" id="export-height" class="brutal-input full-width" style="border: 2px solid #000; padding: 4px; font-family: inherit; font-size: 11px; width: 100%; box-sizing: border-box;">
+                </div>
+             </div>
+             <div class="settings-row" style="margin: 12px 0 8px 0;">
+                <label class="settings-label">KEEP RATIO</label>
+                <div class="checkbox-wrapper">
+                   <input type="checkbox" id="export-keep-ratio" checked class="settings-input-check">
+                   <span class="checkbox-custom"></span>
+                </div>
+             </div>
+             <div class="settings-divider"></div>
+             <div class="settings-row" style="margin: 12px 0 8px 0;">
+                <label class="settings-label">ALPHA CHANNEL</label>
+                <div class="checkbox-wrapper">
+                   <input type="checkbox" id="export-alpha" class="settings-input-check">
+                   <span class="checkbox-custom"></span>
+                </div>
+             </div>
+             <div class="settings-group" style="margin-top: 8px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <label class="settings-label">SCALE</label>
+                    <span id="export-scale-val" style="font-size: 10px; font-weight: 900;">100%</span>
+                </div>
+                <input type="range" id="export-scale" min="10" max="200" step="10" value="100" class="minimal-range" style="width: 100%; margin: 8px 0;">
+             </div>
+             <div style="height: 12px;"></div>
+             <button id="btn-export-final" class="brutal-btn full-width" style="padding: 10px; font-weight: 900; letter-spacing: 1px;">DOWNLOAD .PNG</button>
+        </div>
+    </div>
+
+    <!-- REFERENCE IMAGE UTILITIES MODAL -->
+    <div id="modal-ref-editor" class="ui-panel hidden" style="width: 85vw; max-width: 900px; height: 86vh; max-height: 640px; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 10005; box-shadow: 12px 12px 0 0 #000; overflow: hidden; display: flex; flex-direction: column;">
+        <div id="handle-ref-editor" class="panel-handle" style="display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: black; color: white;">
+            <span class="panel-title" style="font-weight: 950; letter-spacing: 1px; font-size: 11px;">EDIT REFERENCE IMAGE</span>
+            <button id="btn-close-ref-editor" class="mini-btn" style="background: white; border: 1px solid black; font-weight: 950; font-size: 10px; padding: 2px 6px; cursor: pointer;">X</button>
+        </div>
+        <div class="panel-content" style="display: flex; flex: 1; height: calc(100% - 28px); min-height: 0; box-sizing: border-box; overflow: hidden; background: #e5e5e5; padding: 0;">
+            
+            <!-- Left half: Interactive Canvas Area -->
+            <div id="ref-editor-workspace-col" style="flex: 1; display: flex; align-items: center; justify-content: center; padding: 16px; min-width: 0; overflow: hidden; position: relative; background: #222;">
+                <div id="ref-editor-canvas-container" style="position: relative; max-width: 100%; max-height: 100%; display: flex; align-items: center; justify-content: center; overflow: visible;">
+                    <canvas id="ref-editor-canvas" style="border: 2px solid #000; display: block; max-width: 100%; max-height: 100%; background: repeating-conic-gradient(#555 0% 25%, #666 0% 50%) 50% / 16px 16px; cursor: crosshair;"></canvas>
+                    <!-- Interactive handle overlay (for knife or crop region) -->
+                    <svg id="ref-editor-svg" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; z-index: 50;"></svg>
+                </div>
+            </div>
+
+            <!-- Right half: Sub-controls and tabs -->
+            <div id="ref-editor-controls-col" style="width: 320px; border-left: 2px solid black; background: white; display: flex; flex-direction: column; overflow-y: auto; padding: 12px; box-sizing: border-box;">
+                
+                <!-- Tabs Selection -->
+                <div class="ref-editor-tabs" style="display: flex; border: 2px solid black; margin-bottom: 12px; background: black; gap: 1px;">
+                    <button id="btn-tab-crop" class="brutal-btn" style="flex: 1; border: none; font-size: 9px; font-weight: 900; padding: 8px 4px; text-transform: uppercase;">CROP</button>
+                    <button id="btn-tab-knife" class="brutal-btn" style="flex: 1; border: none; font-size: 9px; font-weight: 900; padding: 8px 4px; text-transform: uppercase;">KNIFE</button>
+                    <button id="btn-tab-color" class="brutal-btn" style="flex: 1; border: none; font-size: 9px; font-weight: 900; padding: 8px 4px; text-transform: uppercase;">COLOR</button>
+                </div>
+
+                <!-- TAB CONTENT containers -->
+                <!-- 1. CROP VIEW -->
+                <div id="tab-content-crop" class="ref-tab-view hidden">
+                    <div style="font-size: 9px; font-weight: 900; text-transform: uppercase; margin-bottom: 6px;">Crop Selection</div>
+                    <div style="font-size: 8px; line-height: 1.3; opacity: 0.7; margin-bottom: 12px;">
+                        Slices pixels around the selected box. Click-and-drag directly on the image to select, or use the margins sliders below.
+                    </div>
+                    <div class="settings-group" style="margin-top: 8px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;">
+                            <label class="settings-label" style="font-size: 8px; margin: 0;">CROP LEFT</label>
+                            <span id="crop-val-left" style="font-size: 8px; font-weight: 900; font-family: monospace;">0%</span>
+                        </div>
+                        <input type="range" id="crop-slider-left" min="0" max="95" value="0" class="minimal-range" style="width:100%;">
+                    </div>
+                    <div class="settings-group" style="margin-top: 8px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;">
+                            <label class="settings-label" style="font-size: 8px; margin: 0;">CROP RIGHT</label>
+                            <span id="crop-val-right" style="font-size: 8px; font-weight: 900; font-family: monospace;">0%</span>
+                        </div>
+                        <input type="range" id="crop-slider-right" min="0" max="95" value="0" class="minimal-range" style="width:100%;">
+                    </div>
+                    <div class="settings-group" style="margin-top: 8px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;">
+                            <label class="settings-label" style="font-size: 8px; margin: 0;">CROP TOP</label>
+                            <span id="crop-val-top" style="font-size: 8px; font-weight: 900; font-family: monospace;">0%</span>
+                        </div>
+                        <input type="range" id="crop-slider-top" min="0" max="95" value="0" class="minimal-range" style="width:100%;">
+                    </div>
+                    <div class="settings-group" style="margin-top: 8px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;">
+                            <label class="settings-label" style="font-size: 8px; margin: 0;">CROP BOTTOM</label>
+                            <span id="crop-val-bottom" style="font-size: 8px; font-weight: 900; font-family: monospace;">0%</span>
+                        </div>
+                        <input type="range" id="crop-slider-bottom" min="0" max="95" value="0" class="minimal-range" style="width:100%;">
+                    </div>
+                    <button id="btn-crop-reset" class="brutal-btn full-width" style="margin-top: 12px; padding: 6px; font-size: 9px;">RESET BOUNDS</button>
+                </div>
+
+                <!-- 2. KNIFE VIEW -->
+                <div id="tab-content-knife" class="ref-tab-view hidden">
+                    <div style="font-size: 9px; font-weight: 900; text-transform: uppercase; margin-bottom: 6px;">Knife Cutter / Lasso</div>
+                    <div style="font-size: 8px; line-height: 1.3; opacity: 0.7; margin-bottom: 12px;">
+                        Click points on the image on the left to define a cutting contour path, then split your image into two separate reference layers (inside and outside of the path).
+                    </div>
+                    <div class="settings-group">
+                        <label class="settings-label">KNIFE MODE</label>
+                        <select id="knife-mode-select" class="full-width" style="border: 2px solid #000; font-family: inherit; font-size: 10px; padding: 4px; background: white;">
+                            <option value="slice">STRAIGHT LINE (2 POINTS)</option>
+                            <option value="lasso" selected>POLYGON LASSO (MULTIPLE POINTS)</option>
+                        </select>
+                    </div>
+                    <div id="knife-status" style="font-size: 8px; font-weight: 900; color: #d97706; margin-top: 8px; text-transform: uppercase;">
+                        0 POINTS PLACED
+                    </div>
+                    <div style="display: flex; gap: 6px; margin-top: 12px;">
+                        <button id="btn-knife-clear" class="brutal-btn" style="flex: 1; padding: 6px; font-size: 9px;">CLEAR</button>
+                        <button id="btn-knife-undo" class="brutal-btn" style="flex: 1; padding: 6px; font-size: 9px;">UNDO POINT</button>
+                    </div>
+                </div>
+
+                <!-- 3. COLOR VIEW -->
+                <div id="tab-content-color" class="ref-tab-view hidden">
+                    <div style="font-size: 9px; font-weight: 900; text-transform: uppercase; margin-bottom: 6px;">Color Tone & Adjust</div>
+                    <div style="font-size: 8px; line-height: 1.3; opacity: 0.7; margin-bottom: 8px;">
+                        Channels levels & tone lookup. Shift colors on R, G, B, or RGB Master.
+                    </div>
+                    <div class="settings-group" style="margin-bottom: 10px;">
+                        <label class="settings-label">ACTIVE CHANNEL</label>
+                        <select id="color-channel-select" class="full-width" style="border: 2px solid #000; font-family: inherit; font-size: 10px; padding: 4px; background: white;">
+                            <option value="all">ALL (RGB MASTER)</option>
+                            <option value="r">RED CHANNEL</option>
+                            <option value="g">GREEN CHANNEL</option>
+                            <option value="b">BLUE CHANNEL</option>
+                        </select>
+                    </div>
+
+                    <div class="settings-row" style="margin: 0 0 12px 0; display: flex; justify-content: space-between; align-items: center;">
+                        <label class="settings-label">BLACK & WHITE MODE</label>
+                        <div class="checkbox-wrapper">
+                           <input type="checkbox" id="color-bw-mode" class="settings-input-check">
+                           <span class="checkbox-custom"></span>
+                        </div>
+                    </div>
+                    
+                    <!-- Mini Channel Sliders -->
+                    <div class="settings-group">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <label class="settings-label" style="font-size: 8px;">INPUT BLACK</label>
+                            <span id="val-col-black" style="font-size: 8px; font-weight: 900;">0</span>
+                        </div>
+                        <input type="range" id="slider-col-black" min="0" max="255" value="0" class="minimal-range" style="width:100%;">
+                    </div>
+                    <div class="settings-group" style="margin-top: 8px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <label class="settings-label" style="font-size: 8px;">GAMMA (MIDTONES)</label>
+                            <span id="val-col-gamma" style="font-size: 8px; font-weight: 900;">1.00</span>
+                        </div>
+                        <input type="range" id="slider-col-gamma" min="5" max="500" value="100" class="minimal-range" style="width:100%;">
+                    </div>
+                    <div class="settings-group" style="margin-top: 8px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <label class="settings-label" style="font-size: 8px;">INPUT WHITE</label>
+                            <span id="val-col-white" style="font-size: 8px; font-weight: 900;">255</span>
+                        </div>
+                        <input type="range" id="slider-col-white" min="0" max="255" value="255" class="minimal-range" style="width:100%;">
+                    </div>
+                    <div class="settings-group" style="margin-top: 8px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <label class="settings-label" style="font-size: 8px;">OUTPUT BLACK</label>
+                            <span id="val-col-outblack" style="font-size: 8px; font-weight: 900;">0</span>
+                        </div>
+                        <input type="range" id="slider-col-outblack" min="0" max="255" value="0" class="minimal-range" style="width:100%;">
+                    </div>
+                    <div class="settings-group" style="margin-top: 8px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <label class="settings-label" style="font-size: 8px;">OUTPUT WHITE</label>
+                            <span id="val-col-outwhite" style="font-size: 8px; font-weight: 900;">255</span>
+                        </div>
+                        <input type="range" id="slider-col-outwhite" min="0" max="255" value="255" class="minimal-range" style="width:100%;">
+                    </div>
+                    <button id="btn-color-reset" class="brutal-btn full-width" style="margin-top: 10px; padding: 4px; font-size: 9px;">RESET CHANNEL</button>
+                </div>
+
+                <!-- Bottom Spacer and Actions -->
+                <div style="flex: 1; min-height: 16px;"></div>
+                <div style="display: flex; flex-direction: column; gap: 6px; margin-top: 12px; border-top: 2px solid black; padding-top: 12px;">
+                    <button id="btn-ref-editor-apply" class="brutal-btn full-width" style="background: black; color: white; padding: 10px; font-weight: 900; letter-spacing: 0.5px; font-size: 10px;">BAKE & APPLY CHANGES</button>
+                    <button id="btn-ref-editor-cancel" class="brutal-btn full-width" style="background: white; color: black; padding: 8px; font-size: 9px;">CANCEL</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="capture-reticle">
+      <div style="position:absolute; top: -4px; left: -4px; width: 8px; height: 8px; background: #3b82f6;"></div>
+    </div>
+
+    <!-- FLUID PAINTING PANEL -->
+    <div id="panel-fluid" class="ui-panel hidden" style="width: 180px; left: 20px; top: 120px; z-index: 10002;">
+      <div id="handle-fluid" class="panel-handle">
+        <span class="panel-title" style="letter-spacing: 0.05em; font-weight: 1000; font-size: 8px;">💧 FLUID TUNING</span>
+        <button id="btn-fluid-collapse" class="panel-toggle">_</button>
+      </div>
+      <div id="fluid-content" class="panel-content" style="padding: 10px; display: flex; flex-direction: column; gap: 8px;">
+        
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+          <!-- FLOW RATE -->
+          <div class="slider-container">
+            <div class="slider-header">
+              <label class="slider-label" style="font-size: 8px;">FLOW RATE (ADVECTION)</label>
+              <span id="val-fluid-flow" class="slider-value" style="font-size: 8px; font-weight: bold;">100%</span>
+            </div>
+            <input type="range" id="slider-fluid-flow" min="0" max="100" value="100" class="brutal-range">
+          </div>
+
+          <!-- VORTEX FORCE -->
+          <div class="slider-container">
+            <div class="slider-header">
+              <label class="slider-label" style="font-size: 8px;">VORTEX SWIRL FORCE</label>
+              <span id="val-fluid-vortex" class="slider-value" style="font-size: 8px; font-weight: bold;">50%</span>
+            </div>
+            <input type="range" id="slider-fluid-vortex" min="0" max="100" value="50" class="brutal-range">
+          </div>
+
+          <!-- TURBULENCE CHAOS -->
+          <div class="slider-container">
+            <div class="slider-header">
+              <label class="slider-label" style="font-size: 8px;">TURBULENCE (CHAOS)</label>
+              <span id="val-fluid-turb" class="slider-value" style="font-size: 8px; font-weight: bold;">50%</span>
+            </div>
+            <input type="range" id="slider-fluid-turb" min="0" max="100" value="50" class="brutal-range">
+          </div>
+
+          <!-- COLOR RETENTION -->
+          <div class="slider-container">
+            <div class="slider-header">
+              <label class="slider-label" style="font-size: 8px;">COLOUR RETENTION</label>
+              <span id="val-fluid-retention" class="slider-value" style="font-size: 8px; font-weight: bold;">0%</span>
+            </div>
+            <input type="range" id="slider-fluid-retention" min="0" max="100" value="0" class="brutal-range">
+          </div>
+
+          <!-- PAINT PICKUP -->
+          <div class="slider-container">
+            <div class="slider-header">
+              <label class="slider-label" style="font-size: 8px;">WET PAINT PICKUP</label>
+              <span id="val-fluid-pickup" class="slider-value" style="font-size: 8px; font-weight: bold;">75%</span>
+            </div>
+            <input type="range" id="slider-fluid-pickup" min="0" max="100" value="75" class="brutal-range">
+          </div>
+
+          <!-- IMPASTO THICKNESS -->
+          <div class="slider-container">
+            <div class="slider-header">
+              <label class="slider-label" style="font-size: 8px;">IMPASTO BUILD-UP</label>
+              <span id="val-fluid-depth" class="slider-value" style="font-size: 8px; font-weight: bold;">75%</span>
+            </div>
+            <input type="range" id="slider-fluid-depth" min="0" max="100" value="75" class="brutal-range">
+          </div>
+
+          <!-- SPECULAR GLOSS -->
+          <div class="slider-container">
+            <div class="slider-header">
+              <label class="slider-label" style="font-size: 8px;">3D SPECULAR GLOSS</label>
+              <span id="val-fluid-gloss" class="slider-value" style="font-size: 8px; font-weight: bold;">5%</span>
+            </div>
+            <input type="range" id="slider-fluid-gloss" min="0" max="100" value="5" class="brutal-range">
+          </div>
+
+          <!-- SURFACE SHADING CHECKBOX -->
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 4px; border: 1px solid black; padding: 6px; background: white; margin-top: 4px;">
+            <label for="chk-surface-shading" style="font-size: 8px; font-weight: bold; cursor: pointer; user-select: none;">SURFACE SHADING (3D IMPASTO)</label>
+            <input type="checkbox" id="chk-surface-shading" checked style="width: 14px; height: 14px; cursor: pointer; accent-color: black;">
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- AIR PAINTING PANEL -->
+    <div id="panel-air" class="ui-panel hidden" style="width: 180px; left: 20px; top: 120px; z-index: 10002;">
+      <div id="handle-air" class="panel-handle">
+        <span class="panel-title" style="letter-spacing: 0.05em; font-weight: 1000; font-size: 8px;">💨 AIR TUNING</span>
+        <button id="btn-air-collapse" class="panel-toggle">_</button>
+      </div>
+      <div id="air-content" class="panel-content" style="padding: 10px; display: flex; flex-direction: column; gap: 8px;">
+        
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+          <!-- TURBULENCE POWER -->
+          <div class="slider-container">
+            <div class="slider-header">
+              <label class="slider-label" style="font-size: 8px;">TURBULENCE POWER</label>
+              <span id="adv-air-turb-val" class="slider-value" style="font-size: 8px; font-weight: bold;">0%</span>
+            </div>
+            <input type="range" id="adv-air-turb" min="0" max="100" value="0" class="brutal-range">
+          </div>
+
+          <!-- SWIRL SCALE (FREQ) -->
+          <div class="slider-container">
+            <div class="slider-header">
+              <label class="slider-label" style="font-size: 8px;">SWIRL SCALE (FREQ)</label>
+              <span id="adv-air-scale-val" class="slider-value" style="font-size: 8px; font-weight: bold;">50px</span>
+            </div>
+            <input type="range" id="adv-air-scale" min="1" max="50" value="50" class="brutal-range">
+          </div>
+
+          <!-- PARTICLE FLOW DENSITY -->
+          <div class="slider-container">
+            <div class="slider-header">
+              <label class="slider-label" style="font-size: 8px;">PARTICLE FLOW DENSITY</label>
+              <span id="adv-air-density-val" class="slider-value" style="font-size: 8px; font-weight: bold;">1 streams</span>
+            </div>
+            <input type="range" id="adv-air-density" min="1" max="50" value="1" class="brutal-range">
+          </div>
+
+          <!-- WIND DRIFT FORCE -->
+          <div class="slider-container">
+            <div class="slider-header">
+              <label class="slider-label" style="font-size: 8px;">WIND DRIFT FORCE</label>
+              <span id="adv-air-drift-val" class="slider-value" style="font-size: 8px; font-weight: bold;">14%</span>
+            </div>
+            <input type="range" id="adv-air-drift" min="0" max="100" value="14" class="brutal-range">
+          </div>
+
+          <!-- PAINT DEPLETIION RATE -->
+          <div class="slider-container">
+            <div class="slider-header">
+              <label class="slider-label" style="font-size: 8px;">PAINT DEPLETIION (FALLOFF)</label>
+              <span id="adv-air-falloff-val" class="slider-value" style="font-size: 8px; font-weight: bold;">0%</span>
+            </div>
+            <input type="range" id="adv-air-falloff" min="0" max="100" value="0" class="brutal-range">
+          </div>
+
+          <!-- DRY SPUTTER (FRICTION) -->
+          <div class="slider-container">
+            <div class="slider-header">
+              <label class="slider-label" style="font-size: 8px;">DRY SPUTTER (FRICTION)</label>
+              <span id="adv-air-dry-friction-val" class="slider-value" style="font-size: 8px; font-weight: bold;">0%</span>
+            </div>
+            <input type="range" id="adv-air-dry-friction" min="0" max="100" value="0" class="brutal-range">
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- HIDDEN DUMMY CONTAINER FOR REFERENCE CODE EXPECTATIONS -->
+    <div id="fluid-paint-mocks" style="display: none !important;">
+      <div id="fluidity-slider"></div>
+      <div id="bristles-slider"></div>
+      <div id="size-slider"></div>
+      <div id="qualities"></div>
+      <div id="models"></div>
+      <button id="save-button"></button>
+      <button id="clear-button"></button>
+      <button id="undo-button"></button>
+      <button id="redo-button"></button>
+    </div>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>
