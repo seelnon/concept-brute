@@ -44,7 +44,7 @@ export class SketchStorage {
           if (raw) {
             const parsed = JSON.parse(raw);
             if (key.startsWith('p_') && key.includes('_s_')) {
-              if (key.includes('_s_0_') || key.includes('_s_1_') || key.includes('_s_2_') || key.includes('_s_3_') || key.includes('_s_minus_')) {
+              if (/_s_-?\d+_-?\d+$/.test(key) || key.includes('_s_minus_')) {
                 this.fallbackStore.sectors[key] = parsed;
               } else {
                 this.fallbackStore.settings[key] = parsed;

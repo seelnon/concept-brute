@@ -36,6 +36,181 @@ export function canvasToDataURLAsync(canvas, type = 'image/png', quality) {
   });
 }
 
+export function detectSectorChunkKeyFormat(chunksObj, sx = undefined, sy = undefined) {
+    if (!chunksObj || typeof chunksObj !== 'object') return 'l_cx_cy';
+    const keys = Object.keys(chunksObj);
+    if (keys.length === 0) return 'l_cx_cy';
+
+    let scoreLCXCY = 0;
+    let scoreCXYL = 0;
+
+    // Track layer occurrences per candidate chunk coordinate pair
+    const countsByN0N1 = new Map(); // Candidate (cx, cy) -> set of n2 (layers)
+    const countsByN1N2 = new Map(); // Candidate (cx, cy) -> set of n0 (layers)
+
+    for (const key of keys) {
+        if (!key || typeof key !== 'string') continue;
+        const normalized = key.replace(/minus/g, '-');
+        
+        // Keys with pipe '|' are self-describing
+        if (normalized.includes('|')) continue;
+
+        const rawParts = normalized.split(/[,_]/).filter(p => p !== '' && p !== 'chunk');
+        if (rawParts.length < 3) continue;
+
+        const n0 = parseInt(rawParts[rawParts.length - 3], 10);
+        const n1 = parseInt(rawParts[rawParts.length - 2], 10);
+        const n2 = parseInt(rawParts[rawParts.length - 1], 10);
+
+        if (isNaN(n0) || isNaN(n1) || isNaN(n2)) continue;
+
+        const n0IsDrawLayer = (n0 >= 1 && n0 < LAYERS_COUNT);
+        const n2IsDrawLayer = (n2 >= 1 && n2 < LAYERS_COUNT);
+
+        // Clue 1: Layer 0 is IMG REF and is never drawn on with brush tools
+        if (n0 === 0 && n2IsDrawLayer) {
+            scoreCXYL += 15;
+        } else if (n2 === 0 && n0IsDrawLayer) {
+            scoreLCXCY += 15;
+        }
+
+        // Clue 2: Out of layer bounds (<0 or >=LAYERS_COUNT)
+        if (!n0IsDrawLayer && n0 !== 0 && n2IsDrawLayer) {
+            scoreCXYL += 50; // n0 cannot be layer, so n2 must be layer
+        } else if (!n2IsDrawLayer && n2 !== 0 && n0IsDrawLayer) {
+            scoreLCXCY += 50; // n2 cannot be layer, so n0 must be layer
+        }
+
+        // Clue 3: Track multiple layers sharing the same chunk coordinate pair
+        if (n2IsDrawLayer) {
+            const pairKey = `${n0},${n1}`;
+            if (!countsByN0N1.has(pairKey)) countsByN0N1.set(pairKey, new Set());
+            countsByN0N1.get(pairKey).add(n2);
+        }
+        if (n0IsDrawLayer) {
+            const pairKey = `${n1},${n2}`;
+            if (!countsByN1N2.has(pairKey)) countsByN1N2.set(pairKey, new Set());
+            countsByN1N2.get(pairKey).add(n0);
+        }
+
+        // Clue 4: Sector matching when sx, sy are known
+        if (sx !== undefined && sy !== undefined && !isNaN(sx) && !isNaN(sy)) {
+            const inSectorA = (Math.floor(n1 / SECTOR_SIZE) === sx && Math.floor(n2 / SECTOR_SIZE) === sy);
+            const inSectorB = (Math.floor(n0 / SECTOR_SIZE) === sx && Math.floor(n1 / SECTOR_SIZE) === sy);
+
+            if (inSectorA && !inSectorB) scoreLCXCY += 25;
+            if (inSectorB && !inSectorA) scoreCXYL += 25;
+        }
+    }
+
+    // Award bonus scores if multiple distinct layers share identical (cx, cy) candidate coordinates
+    for (const layers of countsByN0N1.values()) {
+        if (layers.size > 1) {
+            scoreCXYL += (layers.size * 20);
+        }
+    }
+    for (const layers of countsByN1N2.values()) {
+        if (layers.size > 1) {
+            scoreLCXCY += (layers.size * 20);
+        }
+    }
+
+    return scoreCXYL > scoreLCXCY ? 'cx_cy_l' : 'l_cx_cy';
+}
+
+export function parseChunkKey(chunkKey, sx = undefined, sy = undefined, sectorFormatHint = null) {
+    if (!chunkKey || typeof chunkKey !== 'string') return null;
+
+    // Normalize any 'minus' string representation to '-'
+    const normalized = chunkKey.replace(/minus/g, '-');
+
+    let layerId = NaN, cx = NaN, cy = NaN;
+
+    if (normalized.includes('|')) {
+        // "cx,cy|layer" or "layer|cx,cy"
+        const [p1, p2] = normalized.split('|');
+        if (p1.includes(',')) {
+            const [xStr, yStr] = p1.split(',');
+            cx = parseInt(xStr, 10);
+            cy = parseInt(yStr, 10);
+            layerId = parseInt(p2, 10);
+        } else if (p2.includes(',')) {
+            layerId = parseInt(p1, 10);
+            const [xStr, yStr] = p2.split(',');
+            cx = parseInt(xStr, 10);
+            cy = parseInt(yStr, 10);
+        }
+        if (!isNaN(layerId) && !isNaN(cx) && !isNaN(cy) && layerId >= 0 && layerId < LAYERS_COUNT) {
+            return { layerId: Math.max(1, layerId), cx, cy };
+        }
+    }
+
+    const rawParts = normalized.split(/[,_]/).filter(p => p !== '' && p !== 'chunk');
+    const numParts = [];
+    for (const p of rawParts) {
+        const n = parseInt(p, 10);
+        if (!isNaN(n)) numParts.push(n);
+    }
+
+    if (numParts.length === 2) {
+        cx = numParts[0];
+        cy = numParts[1];
+        layerId = 1; // Default draw layer
+    } else if (numParts.length >= 3) {
+        const n0 = numParts[numParts.length - 3];
+        const n1 = numParts[numParts.length - 2];
+        const n2 = numParts[numParts.length - 1];
+
+        const n0IsDrawLayer = (n0 >= 1 && n0 < LAYERS_COUNT);
+        const n2IsDrawLayer = (n2 >= 1 && n2 < LAYERS_COUNT);
+
+        let determinedFormat = sectorFormatHint;
+
+        // Rule 1: Out-of-bounds layer values (<0 or >=LAYERS_COUNT)
+        if ((n0 < 0 || n0 >= LAYERS_COUNT) && (n2 >= 0 && n2 < LAYERS_COUNT)) {
+            determinedFormat = 'cx_cy_l';
+        } else if ((n2 < 0 || n2 >= LAYERS_COUNT) && (n0 >= 0 && n0 < LAYERS_COUNT)) {
+            determinedFormat = 'l_cx_cy';
+        }
+        // Rule 2: Layer 0 check (Paint chunks are NEVER drawn on Layer 0)
+        else if (n0 === 0 && n2IsDrawLayer) {
+            determinedFormat = 'cx_cy_l';
+        } else if (n2 === 0 && n0IsDrawLayer) {
+            determinedFormat = 'l_cx_cy';
+        }
+        // Rule 3: Sector matching when sx, sy are known
+        else if (sx !== undefined && sy !== undefined && !isNaN(sx) && !isNaN(sy)) {
+            const inSectorA = (Math.floor(n1 / SECTOR_SIZE) === sx && Math.floor(n2 / SECTOR_SIZE) === sy);
+            const inSectorB = (Math.floor(n0 / SECTOR_SIZE) === sx && Math.floor(n1 / SECTOR_SIZE) === sy);
+            if (inSectorB && !inSectorA) {
+                determinedFormat = 'cx_cy_l';
+            } else if (inSectorA && !inSectorB) {
+                determinedFormat = 'l_cx_cy';
+            }
+        }
+
+        if (determinedFormat === 'cx_cy_l') {
+            cx = n0;
+            cy = n1;
+            layerId = n2;
+        } else {
+            // Default to modern standard: l_cx_cy
+            layerId = n0;
+            cx = n1;
+            cy = n2;
+        }
+    }
+
+    if (isNaN(layerId) || isNaN(cx) || isNaN(cy)) return null;
+    if (layerId < 0 || layerId >= LAYERS_COUNT) return null;
+
+    // Paint chunks can never be on Layer 0 (which is reserved for references)
+    if (layerId === 0) layerId = 1;
+
+    return { layerId, cx, cy };
+}
+
+
 export async function decodeChunkData(chunkData) {
     if (!chunkData) return null;
     if (chunkData instanceof Blob) {
@@ -47,8 +222,9 @@ export async function decodeChunkData(chunkData) {
         return new Promise(resolve => {
             const url = URL.createObjectURL(chunkData);
             const img = new Image();
-            img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
-            img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+            const timer = setTimeout(() => { URL.revokeObjectURL(url); resolve(null); }, 20000);
+            img.onload = () => { clearTimeout(timer); URL.revokeObjectURL(url); resolve(img); };
+            img.onerror = () => { clearTimeout(timer); URL.revokeObjectURL(url); resolve(null); };
             img.src = url;
         });
     }
@@ -60,8 +236,9 @@ export async function decodeChunkData(chunkData) {
         return new Promise(resolve => {
             const url = URL.createObjectURL(blob);
             const img = new Image();
-            img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
-            img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+            const timer = setTimeout(() => { URL.revokeObjectURL(url); resolve(null); }, 20000);
+            img.onload = () => { clearTimeout(timer); URL.revokeObjectURL(url); resolve(img); };
+            img.onerror = () => { clearTimeout(timer); URL.revokeObjectURL(url); resolve(null); };
             img.src = url;
         });
     }
@@ -88,7 +265,7 @@ export async function decodeAndDrawChunk(chunkData, chunk, layerId) {
     if (!chunk || !chunk.ctxs[layerId] || !chunkData) return;
     const bmp = await decodeChunkData(chunkData);
     if (bmp) {
-        chunk.ctxs[layerId].drawImage(bmp, 0, 0);
+        chunk.ctxs[layerId].drawImage(bmp, 0, 0, chunk.width, chunk.height);
         if (chunk.isEmpty) chunk.isEmpty[layerId] = false;
         if (chunk.gpuDirty) chunk.gpuDirty[layerId] = true;
         if (bmp.close) bmp.close();
@@ -502,10 +679,11 @@ export async function loadProject(app, targetProjectId = null, switchToken = nul
             app._status('MIGRATING...');
             const legacyPromises = legacyKeys.map((key) => {
                 return () => (async () => {
-                    const parts = key.split('_');
-                    const cy = parseInt(parts[parts.length - 1]);
-                    const cx = parseInt(parts[parts.length - 2]);
-                    const layerId = parseInt(parts[parts.length - 3]);
+                    const normalizedKey = key.replace(/minus/g, '-');
+                    const parts = normalizedKey.split('_');
+                    const cy = parseInt(parts[parts.length - 1], 10);
+                    const cx = parseInt(parts[parts.length - 2], 10);
+                    const layerId = parseInt(parts[parts.length - 3], 10);
                     
                     if (isNaN(layerId) || layerId <= 0 || layerId >= LAYERS_COUNT) {
                         return;
@@ -547,40 +725,61 @@ export async function loadProject(app, targetProjectId = null, switchToken = nul
         const sectors = batchResults.map(({ key, sector }) => {
             if (!sector) return null;
             const parts = key.split('_'); 
-            const sy = parseInt(parts[parts.length - 1].replace('minus', '-'));
-            const sx = parseInt(parts[parts.length - 2].replace('minus', '-'));
+            const sy = parseInt(parts[parts.length - 1].replace('minus', '-'), 10);
+            const sx = parseInt(parts[parts.length - 2].replace('minus', '-'), 10);
             return { sx, sy, sector };
         }).filter(Boolean);
         console.log(`[PERF] Loading sector metadata took ${(performance.now() - tSectorsLoadStart).toFixed(2)}ms`);
 
         if (switchToken !== null && switchToken !== app._switchProjectGeneration) return;
 
+        // First pass: analyze project-wide chunk key format across all loaded sectors
+        let projectVotesLCXCY = 0;
+        let projectVotesCXYL = 0;
+        for (const { sx, sy, sector } of sectors) {
+            if (sector && sector.chunks) {
+                const sectorFmt = detectSectorChunkKeyFormat(sector.chunks, sx, sy);
+                if (sectorFmt === 'cx_cy_l') projectVotesCXYL++;
+                else if (sectorFmt === 'l_cx_cy') projectVotesLCXCY++;
+            }
+        }
+        const defaultProjectFormat = (projectVotesCXYL > projectVotesLCXCY) ? 'cx_cy_l' : 'l_cx_cy';
+        console.log(`[LOAD] Detected project chunk format: ${defaultProjectFormat} (cx_cy_l: ${projectVotesCXYL}, l_cx_cy: ${projectVotesLCXCY})`);
+
         // Map and load all chunk images concurrently with high-speed bitmap decoding
         const chunkLoadPromises = [];
-        for (const { sector } of sectors) {
+        const sectorsToMigrate = [];
+
+        for (const { sx, sy, sector } of sectors) {
             if (sector && sector.chunks) {
-                for (const chunkKey in sector.chunks) {
-                    let layerId, cx, cy;
-                    if (chunkKey.includes('|')) {
-                        const [coords, lStr] = chunkKey.split('|');
-                        const [xStr, yStr] = coords.split(',');
-                        layerId = parseInt(lStr);
-                        cx = parseInt(xStr);
-                        cy = parseInt(yStr);
-                    } else if (chunkKey.includes(',')) {
-                        const parts = chunkKey.split(',');
-                        layerId = parseInt(parts[0]);
-                        cx = parseInt(parts[1]);
-                        cy = parseInt(parts[2]);
-                    } else {
-                        const cParts = chunkKey.split('_');
-                        cy = parseInt(cParts[cParts.length - 1]);
-                        cx = parseInt(cParts[cParts.length - 2]);
-                        layerId = parseInt(cParts[cParts.length - 3]);
-                    }
+                const sectorFmt = detectSectorChunkKeyFormat(sector.chunks, sx, sy) || defaultProjectFormat;
+                
+                // Sort keys: process legacy/non-standard keys first, modern standardized keys (l_cx_cy) second
+                // so newer data takes precedence in case of duplicate chunk entries
+                const allKeys = Object.keys(sector.chunks);
+                allKeys.sort((a, b) => {
+                    const aIsModern = /^[1-3]_-?\d+_-?\d+$/.test(a);
+                    const bIsModern = /^[1-3]_-?\d+_-?\d+$/.test(b);
+                    if (aIsModern === bIsModern) return 0;
+                    return aIsModern ? 1 : -1;
+                });
+
+                let needsMigration = false;
+                const normalizedSectorChunks = {};
+
+                for (const chunkKey of allKeys) {
+                    const parsed = parseChunkKey(chunkKey, sx, sy, sectorFmt);
+                    if (!parsed) continue;
+                    const { layerId, cx, cy } = parsed;
                     const chunkData = sector.chunks[chunkKey];
                     
-                    if (chunkData && !isNaN(layerId) && !isNaN(cx) && !isNaN(cy) && layerId >= 0 && layerId < LAYERS_COUNT) {
+                    const modernKey = `${layerId}_${cx}_${cy}`;
+                    if (chunkKey !== modernKey) {
+                        needsMigration = true;
+                    }
+                    normalizedSectorChunks[modernKey] = chunkData;
+                    
+                    if (chunkData) {
                         chunkLoadPromises.push(() => (async () => {
                             if (switchToken !== null && switchToken !== app._switchProjectGeneration) return;
                             try {
@@ -592,7 +791,7 @@ export async function loadProject(app, targetProjectId = null, switchToken = nul
                                     }
                                     const chunk = app.engine._getChunk(cx, cy);
                                     if (chunk && chunk.ctxs[layerId]) {
-                                        chunk.ctxs[layerId].drawImage(bmp, 0, 0);
+                                        chunk.ctxs[layerId].drawImage(bmp, 0, 0, chunk.width, chunk.height);
                                         if (chunk.isEmpty) chunk.isEmpty[layerId] = false;
                                         if (chunk.gpuDirty) chunk.gpuDirty[layerId] = true;
                                         if (app.engine.gpuRenderer) {
@@ -607,6 +806,11 @@ export async function loadProject(app, targetProjectId = null, switchToken = nul
                         })());
                     }
                 }
+
+                if (needsMigration) {
+                    sector.chunks = normalizedSectorChunks;
+                    sectorsToMigrate.push({ sx, sy, sector });
+                }
             }
         }
         
@@ -619,6 +823,18 @@ export async function loadProject(app, targetProjectId = null, switchToken = nul
             });
         }
         console.log(`[PERF] runInBatches() completed in ${(performance.now() - tBatchRunStart).toFixed(2)}ms for ${chunkLoadPromises.length} chunks`);
+
+        // Proactively persist migrated sectors with normalized standard keys so future loads are instant
+        if (sectorsToMigrate.length > 0) {
+            (async () => {
+                try {
+                    await Promise.all(sectorsToMigrate.map(s => app.storage.saveSector(s.sx, s.sy, s.sector, projId)));
+                    console.log(`[LOAD] Migrated ${sectorsToMigrate.length} sectors to standard l_cx_cy format for ${projId}`);
+                } catch (e) {
+                    console.warn('[LOAD] Background sector migration save notice:', e);
+                }
+            })();
+        }
 
         if (switchToken !== null && switchToken !== app._switchProjectGeneration) return;
 
@@ -664,7 +880,7 @@ export async function saveProject(app, force = false, targetProjectId = null) {
         return;
     }
 
-    if (app._isSavingProject) {
+    while (app._isSavingProject) {
         try { await app._activeSavePromise; } catch (e) {}
     }
 
@@ -702,9 +918,9 @@ export async function saveProject(app, force = false, targetProjectId = null) {
 
         app.engine.compact();
 
-        // If force is true and dirtyChunks is empty (e.g. user clicked FORCE SAVE NOW or project switch),
-        // mark all non-empty chunk layers dirty so all chunks are guaranteed persisted
-        if (force && (!app.engine.dirtyChunks || app.engine.dirtyChunks.size === 0)) {
+        // When force is true (e.g. project switch or FORCE SAVE NOW),
+        // mark ALL resident non-empty chunks and layers dirty so nothing in memory is ever skipped or dropped!
+        if (force) {
             app.engine.chunks.forEach((chunk, chunkId) => {
                 for (let l = 1; l < LAYERS_COUNT; l++) {
                     const canv = chunk.canvases[l];
@@ -744,15 +960,20 @@ export async function saveProject(app, force = false, targetProjectId = null) {
             
             promises.push((async () => {
                 let sector = await app.storage.loadSector(sx, sy, projId);
-                if (!sector) {
+                if (!sector || !sector.chunks) {
                     sector = { chunks: {} };
                 }
 
                 for (const item of affectedItems) {
                     const [chunkId, layerStr] = item.split('|');
-                    const l = parseInt(layerStr);
+                    const l = parseInt(layerStr, 10);
                     const [cx, cy] = chunkId.split(',').map(Number);
                     const chunkKey = `${l}_${cx}_${cy}`;
+
+                    // Also remove any stale alternate representations of this chunk/layer
+                    delete sector.chunks[`${cx},${cy}|${l}`];
+                    delete sector.chunks[`${l},${cx},${cy}`];
+                    delete sector.chunks[`${cx}_${cy}_${l}`];
 
                     const chunk = app.engine.chunks.get(chunkId);
                     if (chunk && chunk.canvases && chunk.canvases[l]) {
