@@ -1000,7 +1000,7 @@ export function _paintOnChunks(from, to, size, opacity, color) {
   const dx = to.x - from.x;
   const dy = to.y - from.y;
   const dist = Math.sqrt(dx*dx + dy*dy);
-  const flow = this.brush.flow || 0.5;
+  const flow = (this.brush.flow !== undefined) ? this.brush.flow : 0.5;
   
   const isEraser = this.brush.type === TOOLS.ERASER;
   const tip = this.brush.tip;
@@ -1138,7 +1138,9 @@ export function _paintOnChunks(from, to, size, opacity, color) {
   const opacityBase = (isEraser || isSmudge) ? (opacity * flow * this.brush.opacity) : (opacity * flow);
 
   if (isSmudge) {
-      paintSmudgeOnChunks(this, stamps, affectedChunks, flow, opacity, tip);
+      const brushOpac = (this.brush.opacity !== undefined) ? this.brush.opacity : 1.0;
+      const brushFlow = (this.brush.flow !== undefined) ? this.brush.flow : 1.0;
+      paintSmudgeOnChunks(this, stamps, affectedChunks, brushFlow, opacity * brushOpac, tip);
       return;
   }
 
