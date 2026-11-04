@@ -441,13 +441,13 @@ export function _moveStroke(e) {
   if (dist < 0.1) return;
   
   // Clamp high instantaneous speed before running it through the low-pass filter
-  const rawVelocity = Math.min(120, dist / dt);
-  // Smoother velocity tracking across longer frame averages
-  this.smoothedVelocity = this.smoothedVelocity * 0.88 + rawVelocity * 0.12;
+  const rawVelocity = Math.min(60, dist / Math.max(1.0, dt));
+  // Smoother velocity tracking across frame averages (smooths out Windows Ink / tablet bursts)
+  this.smoothedVelocity = this.smoothedVelocity * 0.85 + rawVelocity * 0.15;
   if (!Number.isFinite(this.smoothedVelocity)) this.smoothedVelocity = rawVelocity;
   
-  // Clamp velocity more strictly to avoid giant "crashes"
-  const velocity = Math.min(this.smoothedVelocity, 120); 
+  // Velocity clamped
+  const velocity = Math.min(this.smoothedVelocity, 60); 
 
   const worldTo = {
     x: m.wx,
@@ -455,11 +455,11 @@ export function _moveStroke(e) {
   };
 
   // --- Brush Sensitivity ---
-  // Speed reference: ~2.2 px/ms represents a swift, natural hand stroke.
-  const speedRef = Math.max(0.5, (this.brush.speedMax || 5.0) * 0.45);
+  // Speed reference: ~7.5 px/ms represents a brisk, deliberate stroke.
+  const speedRef = Math.max(1.0, (this.brush.speedMax || 5.0) * 1.5);
   const normSpeed = Math.min(1.0, Math.max(0.0, velocity / speedRef));
-  // Smooth perceptual curve: immediate response right from gentle drawing speeds
-  const vFactor = Math.pow(normSpeed, 0.75);
+  // Smooth progressive ease-in curve: progressive ramp without sudden 0-to-100 jump
+  const vFactor = Math.pow(normSpeed, 1.5);
   
   // Size Modifier: -100% to +100%
   const speedSizeFactor = this.brush.speedSize || 0;
@@ -497,9 +497,9 @@ export function _moveStroke(e) {
   if (!Number.isFinite(opacMod)) opacMod = 1.0;
 
   let color = this.brush.color;
-  if ((this.brush.speedValue && this.brush.speedValue !== 0) || (this.brush.speedHue && this.brush.speedHue !== 0)) {
-      const hShift = vFactor * ((this.brush.speedHue || 0) / 100) * 90;
-      const lShift = vFactor * ((this.brush.speedValue || 0) / 100);
+  if (this.brush.type !== TOOLS.SMUDGE && ((this.brush.speedValue && this.brush.speedValue !== 0) || (this.brush.speedHue && this.brush.speedHue !== 0))) {
+      const hShift = vFactor * ((this.brush.speedHue || 0) / 100) * 36;
+      const lShift = vFactor * ((this.brush.speedValue || 0) / 100) * 0.4;
       color = this._shiftColor(color, hShift, lShift); 
   }
 

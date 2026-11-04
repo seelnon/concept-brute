@@ -169,9 +169,9 @@ class App {
                 this.engine.brush.speedMax = tipSettings.speedMax ?? 5.0;
                 
                 // Impasto
-                this.engine.brush.paintHeight = (tool === TOOLS.ERASER) ? 0 : (tipSettings.paintHeight || 0);
-                this.engine.brush.oiliness = (tool === TOOLS.ERASER) ? 0 : (tipSettings.oiliness ?? 0.5);
-                this.engine.brush.airbrush = (tool === TOOLS.ERASER) ? 0 : (tipSettings.airbrush || 0);
+                this.engine.brush.paintHeight = (tool === TOOLS.ERASER || tool === TOOLS.SMUDGE) ? 0 : (tipSettings.paintHeight || 0);
+                this.engine.brush.oiliness = (tool === TOOLS.ERASER || tool === TOOLS.SMUDGE) ? 0 : (tipSettings.oiliness ?? 0.5);
+                this.engine.brush.airbrush = (tool === TOOLS.ERASER || tool === TOOLS.SMUDGE) ? 0 : (tipSettings.airbrush || 0);
                 
                 // Spacing, Pressure, Jitter
                 this.engine.brush.spacing = tipSettings.spacing ?? 0.05;
@@ -1256,7 +1256,7 @@ class App {
         const advBtn = document.getElementById('btn-advanced-brush');
 
         if (heightCtrl) heightCtrl.style.display = (tool === TOOLS.BRUSH) ? 'block' : 'none';
-        if (oilCtrl) oilCtrl.style.display = (tool === TOOLS.BRUSH || tool === TOOLS.SMUDGE) ? 'block' : 'none';
+        if (oilCtrl) oilCtrl.style.display = (tool === TOOLS.BRUSH) ? 'block' : 'none';
         if (airCtrl) airCtrl.style.display = (tool === TOOLS.BRUSH) ? 'block' : 'none';
 
         const opacCtrl = document.getElementById('control-opacity');
