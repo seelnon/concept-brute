@@ -1,7 +1,7 @@
 import { TOOLS } from '../constants.js';
 import { paintWireframeIncrementally } from '../tools/wireframe.js';
 import { paintSmudgeOnChunks, startSmudgeStroke } from '../tools/smudge.js';
-import { paintFluidOnChunks, startFluidPaintStroke, endFluidPaintStroke } from '../tools/fluidPaint.js';
+import { paintFluidOnChunks, startFluidPaintStroke, endFluidPaintStroke, cancelFluidAfterEffect } from '../tools/fluidPaint.js';
 import { startLiquifyStroke, paintLiquifyStroke, endLiquifyStroke } from '../tools/liquify.js';
 import { paintAirIncrementally, clearAirParticles, startAirPaintStroke, endAirPaintStroke } from '../tools/airPaint.js';
 import { isMobileDevice } from '../colorUtils.js';
@@ -18,13 +18,10 @@ export function _startStroke(e) {
       return;
   }
 
-  // Ensure app understands it is active and listens to keyboard immediately upon painting
-  if (document.activeElement && document.activeElement !== document.body && document.activeElement !== this.container) {
-      if (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA' || document.activeElement.tagName === 'SELECT' || document.activeElement.tagName === 'BUTTON') {
-          document.activeElement.blur();
-      }
+  // Blur any active text input so keyboard shortcuts work immediately
+  if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) {
+      document.activeElement.blur();
   }
-  window.focus();
 
   // Check if we are panning (Space) or zooming (Z)
   if (this.keys[' '] || this.isPanningMode) {
@@ -146,6 +143,8 @@ export function _startStroke(e) {
   if (this.onDrawStart) this.onDrawStart();
   this.isDrawing = true;
   this._fluidBristles = null;
+  this.activeFluidBrush = null;
+  cancelFluidAfterEffect(this);
   const m = this._getMousePos(e);
   this.lastPos = { x: m.x, y: m.y };
   this.lastWorldPos = { x: m.wx, y: m.wy };
@@ -206,6 +205,34 @@ export function _startStroke(e) {
       startLiquifyStroke(this, worldPos);
   } else if (this.brush.type === TOOLS.AIR) {
       startAirPaintStroke(this);
+  } else if (this.brush.type === TOOLS.BRUSH || this.brush.type === TOOLS.ERASER) {
+      // Pre-warm tip cache for main brush so first drag move executes with 0 lag
+      if (this.brush.tip && this.brush.type === TOOLS.BRUSH) {
+          const bSize = Math.round(initSize);
+          const cacheSize = this._getCacheSize(bSize);
+          const airbrush = this.brush.airbrush || 0;
+          const sharpen = this.brush.brushSharpen || 0;
+          const cacheKey = `${airbrush}_${cacheSize}_${sharpen}`;
+          if (!this._tipColorCache || this._tipColorCache.key !== cacheKey || this._tipColorCache.color !== this.brush.color || this._tipColorCache.srcTip !== this.brush.tip) {
+              this._updateTipCache(cacheSize, airbrush, this.brush.color);
+          }
+      }
+      // Pre-backup initial chunk under cursor during pointerdown (0 lag during drag!)
+      const sCX = this.isStatic ? 0 : Math.floor(worldPos.x / this.chunkSize);
+      const sCY = this.isStatic ? 0 : Math.floor(worldPos.y / this.chunkSize);
+      const startChunk = this._getChunk(sCX, sCY);
+      if (startChunk) {
+          const id = `${sCX},${sCY}`;
+          if (!this.currentStrokeDirtyChunks.has(id)) {
+              const srcCanvas = startChunk.canvases[this.activeLayer];
+              const backup = document.createElement('canvas');
+              backup.width = srcCanvas.width;
+              backup.height = srcCanvas.height;
+              backup.getContext('2d').drawImage(srcCanvas, 0, 0);
+              this.currentStrokeDirtyChunks.set(id, { layer: this.activeLayer, canvas: backup });
+              this._markDirty(id, this.activeLayer);
+          }
+      }
   }
   this._clearStack(this.redoStack);
 }
@@ -428,45 +455,51 @@ export function _moveStroke(e) {
   };
 
   // --- Brush Sensitivity ---
-  // Deadzone from 0.0 to 0.7 px/ms. Max speed ranges from 1.0 to 10.0 px/ms.
-  const maxSpeed = this.brush.speedMax || 5.0;
-  let normSpeed = 0.0;
-  if (velocity > 0.7) {
-      normSpeed = Math.min((velocity - 0.7) / (Math.max(1.0, maxSpeed) - 0.7), 1.0);
-  }
-  const vFactor = normSpeed * normSpeed; // Pure quadratic ease-in
+  // Speed reference: ~2.2 px/ms represents a swift, natural hand stroke.
+  const speedRef = Math.max(0.5, (this.brush.speedMax || 5.0) * 0.45);
+  const normSpeed = Math.min(1.0, Math.max(0.0, velocity / speedRef));
+  // Smooth perceptual curve: immediate response right from gentle drawing speeds
+  const vFactor = Math.pow(normSpeed, 0.75);
   
-  // Size Modifier: -100% to +100% compounding on current value.
+  // Size Modifier: -100% to +100%
   const speedSizeFactor = this.brush.speedSize || 0;
-  const k_sz = speedSizeFactor / 100;
-  const sizeMod = 1.0 + vFactor * k_sz;
+  let sizeMod = 1.0;
+  if (speedSizeFactor > 0) {
+      sizeMod = 1.0 + vFactor * (speedSizeFactor / 100) * 1.5;
+  } else if (speedSizeFactor < 0) {
+      const shrink = vFactor * (-speedSizeFactor / 100) * 0.85;
+      sizeMod = Math.max(0.12, 1.0 - shrink);
+  }
   let dynamicSize = this.brush.size * sizeMod;
   
   if (this.brush.pressureEnabled && (e.pointerType === 'pen' || e.pointerType === 'touch')) {
       const inf = this.brush.pressureSizeInfluence !== undefined ? this.brush.pressureSizeInfluence : (this.brush.pressureInfluence ?? 1.0);
-      dynamicSize *= ( (1 - inf) + this.lastPressure * inf );
+      dynamicSize *= ((1 - inf) + this.lastPressure * inf);
   }
-  // Final clamp to prevent "crashed chunks" (e.g. 1500px stamps)
+  // Final clamp to prevent crashed chunks
   dynamicSize = Math.max(0.1, Math.min(1500, dynamicSize));
   if (!Number.isFinite(dynamicSize)) dynamicSize = this.brush.size;
   
-  // Opacity Modifier: -100% to +100% compounding on current value.
+  // Opacity Modifier: -100% to +100%
   const speedOpacityFactor = this.brush.speedOpacity || 0;
-  const k_op = speedOpacityFactor / 100;
-  let opacMod = 1.0 + vFactor * k_op;
+  let opacMod = 1.0;
+  if (speedOpacityFactor > 0) {
+      opacMod = 1.0 + vFactor * (speedOpacityFactor / 100);
+  } else if (speedOpacityFactor < 0) {
+      opacMod = Math.max(0.05, 1.0 + vFactor * (speedOpacityFactor / 100) * 0.9);
+  }
   
   if (this.brush.pressureEnabled && (e.pointerType === 'pen' || e.pointerType === 'touch')) {
       const inf = this.brush.pressureOpacityInfluence !== undefined ? this.brush.pressureOpacityInfluence : (this.brush.pressureInfluence ?? 1.0);
-      opacMod *= ( (1 - inf) + this.lastPressure * inf );
+      opacMod *= ((1 - inf) + this.lastPressure * inf);
   }
   opacMod = Math.max(0.005, Math.min(1.0, opacMod));
   if (!Number.isFinite(opacMod)) opacMod = 1.0;
 
   let color = this.brush.color;
-  if (this.brush.speedValue !== 0 || this.brush.speedHue !== 0) {
-      // Speed-based color shift: gradual and beautiful
-      const hShift = vFactor * (this.brush.speedHue / 100) * 90; // S-HUE ranges from -100 to 100
-      const lShift = vFactor * (this.brush.speedValue / 100);    // S-VAL ranges from -100 to 100
+  if ((this.brush.speedValue && this.brush.speedValue !== 0) || (this.brush.speedHue && this.brush.speedHue !== 0)) {
+      const hShift = vFactor * ((this.brush.speedHue || 0) / 100) * 90;
+      const lShift = vFactor * ((this.brush.speedValue || 0) / 100);
       color = this._shiftColor(color, hShift, lShift); 
   }
 
@@ -493,8 +526,9 @@ export function _moveStroke(e) {
   } else if (this.brush.type === TOOLS.FLUID) {
       const lastP = this.strokePoints[this.strokePoints.length - 1];
       const dist = Math.hypot(worldTo.x - lastP.x, worldTo.y - lastP.y);
-      if (dist >= 0.8) {
-          paintFluidOnChunks(this, lastP, worldTo, dynamicSize, opacMod, color, pressure);
+      const minFluidDist = Math.max(1.0, Math.min(10.0, dynamicSize * 0.04));
+      if (dist >= minFluidDist) {
+          paintFluidOnChunks(this, lastP, worldTo, dynamicSize, opacMod, color, pressure, currentTime);
           this.strokePoints.push(worldPos);
       }
   } else if (this.brush.type === TOOLS.AIR) {
@@ -570,6 +604,9 @@ export function _endStroke(e = null) {
       const p_prev = this.strokePoints[this.strokePoints.length - 2];
       const mid = { x: (p_last.x + p_prev.x) / 2, y: (p_last.y + p_prev.y) / 2 };
       this._paintOnChunks(mid, p_last, p_last.size, p_last.opacity, p_last.color);
+  } else if (this.isDrawing && this.brush.type !== TOOLS.LASSO && this.strokePoints.length === 1 && this.brush.type !== TOOLS.WIREFRAME && this.brush.type !== TOOLS.LIQUIFY && this.brush.type !== TOOLS.FLUID && this.brush.type !== TOOLS.AIR) {
+      const p = this.strokePoints[0];
+      this._paintOnChunks(p, p, p.size, p.opacity, p.color);
   }
 
   // 1. Calculate bounding box of this stroke based on actual generated/scattered stamp bounds

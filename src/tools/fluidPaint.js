@@ -1,38 +1,28 @@
 import { TOOLS } from '../constants.js';
 
 /**
- * David Li Style Viscous Fluid Oil Paint Engine
+ * Viscous Physical Oil Paint Engine
  * Features:
- * - Isotropic Circular Bristle Tuft (Vogel's spiral disc distribution):
- *   Eliminates all turnaround blocks, Mobius twists, and loop artifacts in any direction!
- * - Bounded Sub-Stepping: Prevents segment explosion on fast movements or window focus return.
- * - Zero-Lag Pointerdown Initialization: 0 DOM queries, 0 synchronous readbacks.
- * - Physical multi-bristle spring dynamics with viscous drag.
- * - Throttled single-pass wet paint pickup & color blending.
- * - Stable, consistent 3D specular impasto surface lighting.
+ * - Authentic Viscous Oil Body: Thick, rich oil paint with physical multi-filament bristle dynamics.
+ * - Dynamic Vortex Swirl & Turbulence: Fluid rotational eddies and natural paint folding.
+ * - 3D Impasto Surface Shading: Directional relief groove shadows, lit diffuse ridge edges, and Blinn-Phong specular gloss.
+ * - Chunk-Safe Execution: Strict chunk boundary clipping with zero chunk corruption or sector desync.
+ * - 100% Reliable Persistence: Seamless IndexedDB sector saving and undo/redo support.
  */
 
 // Module-level cached tuning settings (0 DOM lookups during drawing)
 export const fluidSettings = {
-  engineMode: 'texture',
   flow: 100,
   vortex: 45,
   turb: 30,
   retention: 20,
-  pickup: 65,
+  pickup: 0, // Default 0: pure clean oil paint
   depth: 75,
   gloss: 35,
   fluidity: 80,
   bristles: 40,
   shading: true
 };
-
-export function setFluidEngineMode(mode) {
-  if (mode === 'texture' || mode === 'tuft' || mode === 'wasm') {
-    fluidSettings.engineMode = mode;
-  }
-}
-
 
 export function initFluidPaint(app) {
   const panelFluid = document.getElementById('panel-fluid');
@@ -116,26 +106,34 @@ export function initFluidPaint(app) {
     }
   };
 
+  // Bind checkboxes with memory caching & localStorage
+  const setupCheckbox = (chkId, settingKey, defaultVal) => {
+    const chk = document.getElementById(chkId);
+    if (chk) {
+      const saved = localStorage.getItem('fluid_setting_' + chkId);
+      if (saved !== null) {
+        chk.checked = saved === 'true';
+        fluidSettings[settingKey] = chk.checked;
+      } else {
+        chk.checked = defaultVal;
+        fluidSettings[settingKey] = defaultVal;
+      }
+      chk.onchange = () => {
+        fluidSettings[settingKey] = chk.checked;
+        localStorage.setItem('fluid_setting_' + chkId, chk.checked);
+      };
+    }
+  };
+
   setupSlider('slider-fluid-flow', 'val-fluid-flow', 'flow', 100);
   setupSlider('slider-fluid-vortex', 'val-fluid-vortex', 'vortex', 45);
   setupSlider('slider-fluid-turb', 'val-fluid-turb', 'turb', 30);
   setupSlider('slider-fluid-retention', 'val-fluid-retention', 'retention', 20);
-  setupSlider('slider-fluid-pickup', 'val-fluid-pickup', 'pickup', 65);
+  setupSlider('slider-fluid-pickup', 'val-fluid-pickup', 'pickup', 0);
   setupSlider('slider-fluid-depth', 'val-fluid-depth', 'depth', 75);
   setupSlider('slider-fluid-gloss', 'val-fluid-gloss', 'gloss', 35);
 
-  const chkShading = document.getElementById('chk-surface-shading');
-  if (chkShading) {
-    const savedShading = localStorage.getItem('fluid_setting_chk-surface-shading');
-    if (savedShading !== null) {
-      chkShading.checked = savedShading === 'true';
-      fluidSettings.shading = chkShading.checked;
-    }
-    chkShading.onchange = () => {
-      fluidSettings.shading = chkShading.checked;
-      localStorage.setItem('fluid_setting_chk-surface-shading', chkShading.checked);
-    };
-  }
+  setupCheckbox('chk-surface-shading', 'shading', true);
 }
 
 export function activateFluidPaint(app) {
@@ -148,10 +146,7 @@ export function activateFluidPaint(app) {
   const ctrlBristles = document.getElementById('control-bristles');
   if (ctrlBristles) ctrlBristles.style.display = 'flex';
 
-  const canvas = document.getElementById('fluid-canvas');
-  if (canvas) canvas.classList.add('hidden');
-
-  app._status('FLUID VISCOUS OIL PAINT ACTIVE');
+  app._status('VISCOUS OIL PAINT ACTIVE');
 }
 
 export function deactivateFluidPaint(app) {
@@ -165,17 +160,18 @@ export function deactivateFluidPaint(app) {
   if (ctrlBristles) ctrlBristles.style.display = 'none';
 
   if (app.engine) {
+    cancelFluidAfterEffect(app.engine);
     app.engine.activeFluidBrush = null;
   }
 
-  app._status('FLUID PAINT DEACTIVATED');
+  app._status('OIL PAINT DEACTIVATED');
 }
 
 // ----------------------------------------------------
 // COLOR & PARAMETER HELPERS
 // ----------------------------------------------------
 function parseColor(c) {
-  if (!c) return { r: 230, g: 30, b: 30 };
+  if (!c) return { r: 215, g: 35, b: 35 };
   if (typeof c === 'object' && c.r !== undefined) {
     return { r: c.r, g: c.g, b: c.b };
   }
@@ -200,260 +196,22 @@ function parseColor(c) {
       return { r: parseInt(m[1], 10), g: parseInt(m[2], 10), b: parseInt(m[3], 10) };
     }
   }
-  return { r: 230, g: 30, b: 30 };
+  return { r: 215, g: 35, b: 35 };
 }
 
 function clampByte(v) {
   return Math.max(0, Math.min(255, Math.round(v)));
 }
 
-// ----------------------------------------------------
-// BRUSH TIP ALPHA EXTRACTION & BRISTLE DISTRIBUTION
-// ----------------------------------------------------
 /**
- * Extracts and caches normalized float alpha map [0.0..1.0] for any brush tip canvas.
- * Handles both RGBA masks (transparent PNGs/canvas drawings) and opaque grayscale shapes.
- */
-function extractTipAlpha(tipCanvas) {
-  if (!tipCanvas || !tipCanvas.width || !tipCanvas.height) return null;
-
-  if (tipCanvas._fluidAlphaData) {
-    return tipCanvas._fluidAlphaData;
-  }
-
-  const w = tipCanvas.width;
-  const h = tipCanvas.height;
-  let ctx;
-  try {
-    ctx = tipCanvas.getContext('2d', { willReadFrequently: true });
-    if (!ctx) return null;
-  } catch (e) {
-    return null;
-  }
-
-  const imgData = ctx.getImageData(0, 0, w, h);
-  const data = imgData.data;
-  const len = w * h;
-  const alphaMap = new Float32Array(len);
-
-  let hasAlphaTransparency = false;
-  for (let i = 0; i < len; i++) {
-    if (data[i * 4 + 3] < 250) {
-      hasAlphaTransparency = true;
-      break;
-    }
-  }
-
-  let totalAlpha = 0;
-  let nonZeroCount = 0;
-
-  for (let i = 0; i < len; i++) {
-    const idx = i * 4;
-    let a;
-    if (hasAlphaTransparency) {
-      a = data[idx + 3] / 255.0;
-    } else {
-      // Invert luminance for opaque RGB (dark pixels are foreground tip, white is background)
-      const lum = (0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2]) / 255.0;
-      a = Math.max(0.0, 1.0 - lum);
-    }
-    alphaMap[i] = a;
-    if (a > 0.03) {
-      totalAlpha += a;
-      nonZeroCount++;
-    }
-  }
-
-  const res = {
-    w,
-    h,
-    alphaMap,
-    totalAlpha,
-    nonZeroCount,
-    isEmpty: nonZeroCount < 4
-  };
-
-  tipCanvas._fluidAlphaData = res;
-  return res;
-}
-
-/**
- * Bilinear sampling of tip alpha at normalized coordinate (u, v) in [-1.0, 1.0].
- */
-function sampleTipAlpha(tipData, u, v) {
-  if (!tipData || tipData.isEmpty) return 1.0;
-  const { w, h, alphaMap } = tipData;
-
-  const px = (u * 0.5 + 0.5) * (w - 1);
-  const py = (v * 0.5 + 0.5) * (h - 1);
-
-  if (px < 0 || px > w - 1 || py < 0 || py > h - 1) return 0.0;
-
-  const x0 = Math.floor(px);
-  const y0 = Math.floor(py);
-  const x1 = Math.min(w - 1, x0 + 1);
-  const y1 = Math.min(h - 1, y0 + 1);
-
-  const fx = px - x0;
-  const fy = py - y0;
-
-  const a00 = alphaMap[y0 * w + x0];
-  const a10 = alphaMap[y0 * w + x1];
-  const a01 = alphaMap[y1 * w + x0];
-  const a11 = alphaMap[y1 * w + x1];
-
-  const top = a00 * (1 - fx) + a10 * fx;
-  const btm = a01 * (1 - fx) + a11 * fx;
-
-  return top * (1 - fy) + btm * fy;
-}
-
-/**
- * Generates an organic, non-repetitive bristle tuft that:
- * 1. Strictly conforms to the active brush tip shape & alpha distribution.
- * 2. Modulates individual bristle size and thickness by the tip alpha.
- * 3. Introduces a multi-tiered natural hair size distribution (fine, medium, thick bristles).
+ * Initializes physical oil bristle tuft with Vogel spiral disc distribution.
  */
 function initBristles(centerX, centerY, radius, count, baseColor, tipCanvas = null, engine = null) {
   const bristles = [];
-  const tipData = extractTipAlpha(tipCanvas);
-
   const rotAngle = (engine?.rotation || 0) + (engine?.brush?.jitterAngle ? (Math.random() - 0.5) * engine.brush.jitterAngle * 2 : 0);
   const cosA = Math.cos(rotAngle);
   const sinA = Math.sin(rotAngle);
 
-  if (tipData && !tipData.isEmpty) {
-    // Generate jittered candidate points covering the [-1, 1] x [-1, 1] tip bounds
-    const gridSize = 25;
-    const candidates = [];
-    for (let gy = 0; gy < gridSize; gy++) {
-      for (let gx = 0; gx < gridSize; gx++) {
-        const u = ((gx + 0.2 + Math.random() * 0.6) / gridSize) * 2.0 - 1.0;
-        const v = ((gy + 0.2 + Math.random() * 0.6) / gridSize) * 2.0 - 1.0;
-        const alpha = sampleTipAlpha(tipData, u, v);
-        if (alpha > 0.04) {
-          candidates.push({ u, v, alpha });
-        }
-      }
-    }
-
-    if (candidates.length > 0) {
-      // Shuffle candidate order
-      for (let i = candidates.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        const tmp = candidates[i];
-        candidates[i] = candidates[j];
-        candidates[j] = tmp;
-      }
-
-      const accepted = [];
-      const targetCount = Math.min(count, Math.max(14, Math.round(candidates.length * 0.45)));
-      let minDist = 1.6 / Math.sqrt(targetCount);
-
-      // Multi-pass Poisson rejection to produce even spatial distribution
-      for (let pass = 0; pass < 3 && accepted.length < targetCount; pass++) {
-        const curMinDistSq = minDist * minDist;
-        for (let c = 0; c < candidates.length; c++) {
-          const cand = candidates[c];
-          if (Math.random() > cand.alpha) continue;
-
-          let tooClose = false;
-          for (let a = 0; a < accepted.length; a++) {
-            const du = cand.u - accepted[a].u;
-            const dv = cand.v - accepted[a].v;
-            if (du * du + dv * dv < curMinDistSq) {
-              tooClose = true;
-              break;
-            }
-          }
-          if (!tooClose) {
-            accepted.push(cand);
-            if (accepted.length >= targetCount) break;
-          }
-        }
-        minDist *= 0.68;
-      }
-
-      // Fill remaining if needed
-      if (accepted.length < Math.min(targetCount, 16)) {
-        for (let c = 0; c < candidates.length; c++) {
-          const cand = candidates[c];
-          if (!accepted.includes(cand)) {
-            accepted.push(cand);
-            if (accepted.length >= targetCount) break;
-          }
-        }
-      }
-
-      for (let i = 0; i < accepted.length; i++) {
-        const cand = accepted[i];
-        const localAlpha = cand.alpha;
-
-        // Bristle size scales with tip alpha (opaque core is thicker, soft edge is thinner)
-        const alphaFactor = 0.40 + 0.85 * Math.pow(localAlpha, 0.85);
-
-        // Natural filament variety: 22% fine accent hairs, 53% standard body, 25% thick core bristles
-        const rand = Math.random();
-        let tierFactor;
-        if (rand < 0.22) {
-          tierFactor = 0.45 + 0.25 * Math.random();
-        } else if (rand < 0.75) {
-          tierFactor = 0.80 + 0.40 * Math.random();
-        } else {
-          tierFactor = 1.30 + 0.55 * Math.random();
-        }
-
-        const widthScale = alphaFactor * tierFactor;
-        const flowScale = Math.max(0.25, Math.min(1.0, (0.30 + 0.70 * localAlpha) * (0.85 + 0.30 * tierFactor)));
-        const followRate = Math.max(0.18, Math.min(0.62, (0.24 + 0.16 / Math.max(0.5, widthScale)) * (0.85 + 0.30 * Math.random())));
-
-        // Subtle organic color nuance across bristles
-        const nuance = (Math.random() - 0.5) * 12;
-        const bristleColor = {
-          r: clampByte(baseColor.r + nuance),
-          g: clampByte(baseColor.g + nuance * 0.8),
-          b: clampByte(baseColor.b + nuance * 0.6)
-        };
-
-        // Rotate anchor if canvas is rotated or angle jittered
-        let rotU = cand.u;
-        let rotV = cand.v;
-        if (rotAngle !== 0) {
-          rotU = cand.u * cosA - cand.v * sinA;
-          rotV = cand.u * sinA + cand.v * cosA;
-        }
-
-        const tipX = centerX + rotU * radius;
-        const tipY = centerY + rotV * radius;
-
-        bristles.push({
-          u: rotU,
-          v: rotV,
-          origU: cand.u,
-          origV: cand.v,
-          curX: tipX,
-          curY: tipY,
-          prevX: tipX,
-          prevY: tipY,
-          followRate,
-          color: bristleColor,
-          widthScale,
-          flowScale,
-          tipAlpha: localAlpha,
-          tierFactor,
-          bnx: 0,
-          bny: 1,
-          points: []
-        });
-      }
-
-      if (bristles.length > 0) {
-        return bristles;
-      }
-    }
-  }
-
-  // Fallback to circular Vogel disc with varied bristle sizes & radial falloff
   const goldenAngle = 2.3999632;
   for (let i = 0; i < count; i++) {
     const r = Math.sqrt((i + 0.5) / count);
@@ -468,18 +226,20 @@ function initBristles(centerX, centerY, radius, count, baseColor, tipCanvas = nu
       v = rv;
     }
 
-    const discAlpha = Math.max(0.2, 1.0 - r * 0.45);
-    const alphaFactor = 0.45 + 0.80 * discAlpha;
+    const discAlpha = Math.max(0.3, 1.0 - r * 0.35);
+    const alphaFactor = 0.55 + 0.70 * discAlpha;
 
+    // Organic filament tiers: 20% fine hairs, 55% body, 25% core impasto ridge
     const rand = Math.random();
-    const tierFactor = rand < 0.22 ? (0.50 + 0.25 * Math.random()) :
-                       rand < 0.75 ? (0.85 + 0.35 * Math.random()) :
-                                     (1.30 + 0.50 * Math.random());
+    const tierFactor = rand < 0.20 ? (0.65 + 0.25 * Math.random()) :
+                       rand < 0.75 ? (0.95 + 0.30 * Math.random()) :
+                                     (1.35 + 0.45 * Math.random());
     const widthScale = alphaFactor * tierFactor;
-    const flowScale = Math.max(0.25, Math.min(1.0, discAlpha * (0.85 + 0.30 * tierFactor)));
-    const followRate = Math.max(0.20, Math.min(0.60, (0.24 + 0.16 / Math.max(0.5, widthScale)) * (0.85 + 0.30 * Math.random())));
+    const flowScale = Math.max(0.4, Math.min(1.0, discAlpha * (0.90 + 0.25 * tierFactor)));
+    const followRate = Math.max(0.22, Math.min(0.65, (0.26 + 0.14 / Math.max(0.5, widthScale)) * (0.85 + 0.30 * Math.random())));
 
-    const nuance = (Math.random() - 0.5) * 12;
+    // Subtle oil pigment nuance across bristles (authentic oil paint look)
+    const nuance = (Math.random() - 0.5) * 16;
     const bristleColor = {
       r: clampByte(baseColor.r + nuance),
       g: clampByte(baseColor.g + nuance * 0.8),
@@ -498,12 +258,17 @@ function initBristles(centerX, centerY, radius, count, baseColor, tipCanvas = nu
       curY: tipY,
       prevX: tipX,
       prevY: tipY,
+      vx: 0,
+      vy: 0,
       followRate,
       color: bristleColor,
+      baseColor: { ...bristleColor },
       widthScale,
       flowScale,
       tipAlpha: discAlpha,
       tierFactor,
+      orbitSpeed: (Math.random() > 0.5 ? 1 : -1) * (0.5 + Math.random() * 0.8),
+      seed: Math.random() * 100,
       bnx: 0,
       bny: 1,
       points: []
@@ -513,16 +278,17 @@ function initBristles(centerX, centerY, radius, count, baseColor, tipCanvas = nu
 }
 
 /**
- * Pre-warms the fluid paint stroke on pointerdown.
- * Pre-allocates active bristle tuft and initial chunk backup with ZERO DOM queries and ZERO lag!
+ * Pre-warms the oil paint stroke on pointerdown.
  */
 export function startFluidPaintStroke(engine, worldPos) {
+  cancelFluidAfterEffect(engine);
+
   const rawSize = worldPos.size || engine.brush.size || 35;
   const radius = Math.max(2.0, rawSize * 0.5);
   const baseColor = parseColor(worldPos.color || engine.brush.color);
 
   const userCount = fluidSettings.bristles || 40;
-  const count = Math.max(16, Math.min(64, Math.round(userCount * (radius < 15 ? 0.6 : radius > 80 ? 1.3 : 1.0))));
+  const count = Math.max(16, Math.min(64, Math.round(userCount * (radius < 15 ? 0.65 : radius > 80 ? 1.30 : 1.0))));
 
   const tipCanvas = engine.brush ? engine.brush.tip : null;
   const bristles = initBristles(worldPos.x, worldPos.y, radius, count, baseColor, tipCanvas, engine);
@@ -533,10 +299,10 @@ export function startFluidPaintStroke(engine, worldPos) {
     radius,
     baseColor,
     hasPainted: false,
-    lastPickupTime: 0
+    time: 0
   };
 
-  // Pre-backup the starting chunk in background during pointerdown (Instantaneous, 0 lag!)
+  // Pre-backup the starting chunk in background during pointerdown
   const cx = engine.isStatic ? 0 : Math.floor(worldPos.x / engine.chunkSize);
   const cy = engine.isStatic ? 0 : Math.floor(worldPos.y / engine.chunkSize);
   const chunk = engine._getChunk(cx, cy);
@@ -555,15 +321,11 @@ export function startFluidPaintStroke(engine, worldPos) {
 }
 
 /**
- * Continuous Fluid Paint Stroke Handler.
- * Features:
- * - Overdamped viscous relaxation dynamics: mathematically eliminates all harmonic oscillator loops!
- * - Inextensible bristle length constraint: bristles never diverge or fly far away from ferrule anchor.
- * - Seamless non-truncating sub-stepping: zero pointer desync between frames.
- * - Batched continuous polyline rendering: 30x faster canvas draw calls for solid 60+ FPS!
- * - Throttled non-stalling wet paint pickup: eliminates GPU pipeline readback stalls.
+ * Continuous Viscous Oil Paint Stroke Handler.
+ * Delivers authentic oil paint feel with physical bristle dynamics, 3D specular impasto,
+ * vortex swirl and turbulence, without chunk corruption or sector glitches.
  */
-export function paintFluidOnChunks(engine, from, to, size, opacity, color, pressure = 1.0) {
+export function paintFluidOnChunks(engine, from, to, size, opacity, color, pressure = 1.0, currentTime = performance.now()) {
   if (!engine.activeFluidBrush) {
     startFluidPaintStroke(engine, from);
   }
@@ -573,15 +335,14 @@ export function paintFluidOnChunks(engine, from, to, size, opacity, color, press
 
   const rawDx = to.x - from.x;
   const rawDy = to.y - from.y;
-  const dist = Math.hypot(rawDx, rawDy);
+  const dist = Math.hypot(rawDx, rawDy) || 0.001;
 
   const radius = Math.max(2.0, (size || engine.brush.size || 35) * 0.5);
   fb.radius = radius;
   const baseColor = parseColor(color || engine.brush.color);
   fb.baseColor = baseColor;
 
-  // Teleportation protection: if distance is huge (e.g. user clicked far away on a 4K canvas after typing),
-  // resynchronize bristles directly to the destination without generating thousands of steps.
+  // Teleportation protection: if distance is huge, resync bristles directly
   if (dist > 500.0) {
     for (let i = 0; i < fb.bristles.length; i++) {
       const b = fb.bristles[i];
@@ -589,6 +350,8 @@ export function paintFluidOnChunks(engine, from, to, size, opacity, color, press
       b.curY = to.y + b.v * radius;
       b.prevX = b.curX;
       b.prevY = b.curY;
+      b.vx = 0;
+      b.vy = 0;
       b.points = [{ x: b.curX, y: b.curY }];
     }
     fb.lastPos = { x: to.x, y: to.y };
@@ -599,30 +362,33 @@ export function paintFluidOnChunks(engine, from, to, size, opacity, color, press
   const valFlow = fluidSettings.flow;
   const valVortex = fluidSettings.vortex;
   const valTurb = fluidSettings.turb;
-  const valRetention = fluidSettings.retention;
-  const valPickup = fluidSettings.pickup;
   const valDepth = fluidSettings.depth;
   const valGloss = fluidSettings.gloss;
   const valFluidity = fluidSettings.fluidity;
   const isShading = fluidSettings.shading;
 
-  // Bounded sub-step count: ensures smooth unbroken ribbons without truncating stroke endpoint
-  const stepDist = Math.max(3.0, radius * 0.20);
+  // Bounded sub-step count: ensures unbroken, smooth paint strokes
+  const stepDist = Math.max(2.5, radius * 0.18);
   const numSteps = Math.min(8, Math.max(1, Math.ceil(dist / stepDist)));
 
-  const flowFactor = (valFlow / 100) * (opacity || 1.0) * (0.35 + pressure * 0.65);
-  const vortexForce = (valVortex / 100) * 0.20;
-  const turbForce = (valTurb / 100) * 0.15;
-  const fluidityFactor = 0.85 + (valFluidity / 100) * 0.35;
-  const pickupRate = (valPickup / 100) * (1.0 - (valRetention / 100) * 0.85) * 0.12;
+  const flowFactor = (valFlow / 100) * (opacity || 1.0) * (0.45 + pressure * 0.55);
+  const vortexForce = (valVortex / 100) * 0.55;
+  const turbForce = (valTurb / 100) * 0.40;
+  const fluidityFactor = 0.85 + (valFluidity / 100) * 0.45;
 
-  const bristleRibbonWidth = Math.max(1.8, (radius * 2.2 / fb.bristles.length) * 1.35);
+  const bristleRibbonWidth = Math.max(2.0, (radius * 2.2 / fb.bristles.length) * 1.40);
 
   // Initialize polyline path collection for this frame
   for (let i = 0; i < fb.bristles.length; i++) {
     const b = fb.bristles[i];
     b.points = [{ x: b.curX, y: b.curY }];
   }
+
+  fb.time += 0.05 * (dist / 10.0 + 1.0);
+  const time = fb.time;
+
+  const dirX = rawDx / dist;
+  const dirY = rawDy / dist;
 
   // Physical simulation steps: strictly moving from `from` all the way to `to`
   for (let s = 1; s <= numSteps; s++) {
@@ -633,33 +399,38 @@ export function paintFluidOnChunks(engine, from, to, size, opacity, color, press
     for (let i = 0; i < fb.bristles.length; i++) {
       const b = fb.bristles[i];
 
-      // Isotropic circular anchor: anchored at (u, v) on the brush ferrule disc
       let targetX = centerX + b.u * radius;
       let targetY = centerY + b.v * radius;
 
-      // Organic fluid vortex curl around the disc
-      if (vortexForce > 0) {
-        const swirl = vortexForce * radius * 0.18;
-        targetX += -b.v * swirl;
-        targetY += b.u * swirl;
+      // Vortex swirl force (fluid rotational drag)
+      if (vortexForce > 0.01) {
+        const swirlMag = vortexForce * radius * 0.25 * b.orbitSpeed;
+        targetX += -b.v * swirlMag;
+        targetY += b.u * swirlMag;
       }
 
-      // Micro turbulence
-      if (turbForce > 0) {
-        const chaos = turbForce * radius * 0.12;
-        targetX += Math.sin(centerY * 0.05 + b.u * 3.0) * chaos;
-        targetY += Math.cos(centerX * 0.05 + b.v * 3.0) * chaos;
+      // Continuous turbulence field
+      if (turbForce > 0.01) {
+        const scale = 0.04;
+        const fX = (targetX + b.seed) * scale;
+        const fY = (targetY + b.seed) * scale;
+        const turbX = Math.sin(fY * 1.3 + time * 1.5) * Math.cos(fX * 0.7) + Math.cos(fY * 0.4 - time * 0.8);
+        const turbY = Math.cos(fX * 1.3 - time * 1.5) * Math.sin(fY * 0.7) + Math.sin(fX * 0.4 + time * 0.8);
+        const chaos = turbForce * radius * 0.18;
+        targetX += turbX * chaos;
+        targetY += turbY * chaos;
       }
 
-      // Overdamped viscous relaxation: bristle tip naturally drags behind the anchor.
-      // High fluid viscosity means zero inertial oscillation and ZERO loops!
-      const follow = Math.max(0.20, Math.min(0.65, b.followRate * fluidityFactor));
-      b.curX += (targetX - b.curX) * follow;
-      b.curY += (targetY - b.curY) * follow;
+      // Overdamped viscous relaxation with directional drag
+      const follow = Math.max(0.20, Math.min(0.70, b.followRate * fluidityFactor));
+      b.vx = b.vx * 0.80 + (targetX - b.curX) * follow * 0.20 + dirX * Math.min(2.5, dist * 0.10);
+      b.vy = b.vy * 0.80 + (targetY - b.curY) * follow * 0.20 + dirY * Math.min(2.5, dist * 0.10);
 
-      // Inextensible physical bristle constraint:
-      // Bristle tip can never stretch beyond maxLen from its ferrule anchor!
-      const maxLen = radius * 0.85;
+      b.curX += (targetX - b.curX) * follow + b.vx * 0.35;
+      b.curY += (targetY - b.curY) * follow + b.vy * 0.35;
+
+      // Inextensible physical constraint
+      const maxLen = radius * 1.10;
       const offX = b.curX - targetX;
       const offY = b.curY - targetY;
       const offDist = Math.hypot(offX, offY);
@@ -673,7 +444,7 @@ export function paintFluidOnChunks(engine, from, to, size, opacity, color, press
     }
   }
 
-  // Compute direction normal for 3D impasto lighting
+  // Compute normal direction for 3D impasto lighting
   for (let i = 0; i < fb.bristles.length; i++) {
     const b = fb.bristles[i];
     const dispX = b.curX - b.points[0].x;
@@ -687,48 +458,7 @@ export function paintFluidOnChunks(engine, from, to, size, opacity, color, press
 
   fb.lastPos = { x: to.x, y: to.y };
 
-  // Throttled wet paint pickup (once per 160ms, tiny 8x8 box, 0 GPU stall)
-  const now = performance.now();
-  if (pickupRate > 0.01 && now - fb.lastPickupTime > 160) {
-    fb.lastPickupTime = now;
-    const midX = (from.x + to.x) * 0.5;
-    const midY = (from.y + to.y) * 0.5;
-    const sampleCX = engine.isStatic ? 0 : Math.floor(midX / engine.chunkSize);
-    const sampleCY = engine.isStatic ? 0 : Math.floor(midY / engine.chunkSize);
-    const sampleChunk = engine._getChunk(sampleCX, sampleCY);
-
-    if (sampleChunk && sampleChunk.ctxs[engine.activeLayer]) {
-      const lx = engine.isStatic ? -engine.staticWidth / 2 : sampleCX * engine.chunkSize;
-      const ly = engine.isStatic ? -engine.staticHeight / 2 : sampleCY * engine.chunkSize;
-      const sCtx = sampleChunk.ctxs[engine.activeLayer];
-
-      const boxR = 4;
-      const srcBoxX = Math.floor(midX - lx - boxR);
-      const srcBoxY = Math.floor(midY - ly - boxR);
-      const clampX = Math.max(0, Math.min(sampleChunk.width - boxR * 2, srcBoxX));
-      const clampY = Math.max(0, Math.min(sampleChunk.height - boxR * 2, srcBoxY));
-
-      try {
-        const boxData = sCtx.getImageData(clampX, clampY, boxR * 2, boxR * 2).data;
-        const bW = boxR * 2;
-        for (let i = 0; i < fb.bristles.length; i += 4) {
-          const b = fb.bristles[i];
-          const px = Math.floor(b.curX - lx - clampX);
-          const py = Math.floor(b.curY - ly - clampY);
-          if (px >= 0 && px < bW && py >= 0 && py < bW) {
-            const idx = (py * bW + px) * 4;
-            if (boxData[idx + 3] > 20) {
-              b.color.r = Math.round(b.color.r * (1 - pickupRate) + boxData[idx] * pickupRate);
-              b.color.g = Math.round(b.color.g * (1 - pickupRate) + boxData[idx + 1] * pickupRate);
-              b.color.b = Math.round(b.color.b * (1 - pickupRate) + boxData[idx + 2] * pickupRate);
-            }
-          }
-        }
-      } catch (e) {}
-    }
-  }
-
-  // Strictly bounded bounding box: guaranteed to never explode or touch phantom chunks
+  // Strictly bounded bounding box
   const pad = radius * 2.5 + 24;
   const strokeMinX = Math.min(from.x, to.x) - pad;
   const strokeMaxX = Math.max(from.x, to.x) + pad;
@@ -769,6 +499,12 @@ export function paintFluidOnChunks(engine, from, to, size, opacity, color, press
 
       const ctx = chunk.ctxs[engine.activeLayer];
       ctx.save();
+
+      // Chunk boundary clipping ensures painting strictly stays inside the chunk
+      ctx.beginPath();
+      ctx.rect(0, 0, chunk.width, chunk.height);
+      ctx.clip();
+
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
 
@@ -778,16 +514,16 @@ export function paintFluidOnChunks(engine, from, to, size, opacity, color, press
       }
 
       if (isShading) {
-        // Pass 1: Individual Soft Groove Shadow scaled by bristle thickness & tip alpha
-        const shadowFactor = Math.max(0.38, 1.0 - depthRatio * 0.32);
+        // Pass 1: Soft Groove Shadows between bristle ridges
+        const shadowFactor = Math.max(0.35, 1.0 - depthRatio * 0.35);
         for (let i = 0; i < fb.bristles.length; i++) {
           const b = fb.bristles[i];
-          const bFlow = (b.flowScale || 1.0) * flowFactor * 0.62;
+          const bFlow = (b.flowScale || 1.0) * flowFactor * 0.65;
           ctx.strokeStyle = `rgba(${clampByte(cr * shadowFactor)}, ${clampByte(cg * shadowFactor)}, ${clampByte(cb * shadowFactor)}, ${bFlow})`;
-          ctx.lineWidth = Math.max(0.75, w * b.widthScale * 1.25);
+          ctx.lineWidth = Math.max(0.85, w * b.widthScale * 1.30);
           const shadowSign = (-b.bnx * 0.707 - b.bny * 0.707) >= 0 ? 1 : -1;
-          const offX = b.bnx * w * b.widthScale * 0.22 * shadowSign;
-          const offY = b.bny * w * b.widthScale * 0.22 * shadowSign;
+          const offX = b.bnx * w * b.widthScale * 0.25 * shadowSign;
+          const offY = b.bny * w * b.widthScale * 0.25 * shadowSign;
           const pts = b.points;
           ctx.beginPath();
           ctx.moveTo(pts[0].x - lx + offX, pts[0].y - ly + offY);
@@ -797,12 +533,12 @@ export function paintFluidOnChunks(engine, from, to, size, opacity, color, press
           ctx.stroke();
         }
 
-        // Pass 2: Rich Core Pigment with individual bristle color blending and width
+        // Pass 2: Rich Core Oil Pigment Ribbons
         for (let i = 0; i < fb.bristles.length; i++) {
           const b = fb.bristles[i];
           const bFlow = Math.min(1.0, flowFactor * (b.flowScale || 1.0));
           ctx.strokeStyle = `rgba(${b.color.r}, ${b.color.g}, ${b.color.b}, ${bFlow})`;
-          ctx.lineWidth = Math.max(0.5, w * b.widthScale);
+          ctx.lineWidth = Math.max(0.7, w * b.widthScale * 1.05);
           ctx.beginPath();
           const pts = b.points;
           ctx.moveTo(pts[0].x - lx, pts[0].y - ly);
@@ -812,16 +548,16 @@ export function paintFluidOnChunks(engine, from, to, size, opacity, color, press
           ctx.stroke();
         }
 
-        // Pass 3: Lit Diffuse Edge facing key light scaled by bristle thickness
-        const litFactor = Math.min(1.45, 1.0 + depthRatio * 0.25);
+        // Pass 3: Lit Diffuse Ridge Highlights facing key light
+        const litFactor = Math.min(1.50, 1.0 + depthRatio * 0.30);
         for (let i = 0; i < fb.bristles.length; i++) {
           const b = fb.bristles[i];
-          const bFlow = (b.flowScale || 1.0) * flowFactor * 0.50;
+          const bFlow = (b.flowScale || 1.0) * flowFactor * 0.55;
           ctx.strokeStyle = `rgba(${clampByte(cr * litFactor)}, ${clampByte(cg * litFactor)}, ${clampByte(cb * litFactor)}, ${bFlow})`;
-          ctx.lineWidth = Math.max(0.45, w * b.widthScale * 0.70);
+          ctx.lineWidth = Math.max(0.55, w * b.widthScale * 0.75);
           const shadowSign = (-b.bnx * 0.707 - b.bny * 0.707) >= 0 ? 1 : -1;
-          const offX = -b.bnx * w * b.widthScale * 0.20 * shadowSign;
-          const offY = -b.bny * w * b.widthScale * 0.20 * shadowSign;
+          const offX = -b.bnx * w * b.widthScale * 0.22 * shadowSign;
+          const offY = -b.bny * w * b.widthScale * 0.22 * shadowSign;
           const pts = b.points;
           ctx.beginPath();
           ctx.moveTo(pts[0].x - lx + offX, pts[0].y - ly + offY);
@@ -831,13 +567,13 @@ export function paintFluidOnChunks(engine, from, to, size, opacity, color, press
           ctx.stroke();
         }
 
-        // Pass 4: Batched Wet 3D Blinn-Phong Specular Gloss along bristle crest
+        // Pass 4: 3D Specular Gloss Sheen along bristle crest
         if (glossRatio > 0.01) {
           for (let i = 0; i < fb.bristles.length; i++) {
             const b = fb.bristles[i];
-            const specAlpha = Math.min(0.65, glossRatio * 0.45 * flowFactor * (b.flowScale || 1.0));
+            const specAlpha = Math.min(0.75, glossRatio * 0.55 * flowFactor * (b.flowScale || 1.0));
             ctx.strokeStyle = `rgba(255, 255, 255, ${specAlpha})`;
-            ctx.lineWidth = Math.max(0.35, w * b.widthScale * 0.28);
+            ctx.lineWidth = Math.max(0.40, w * b.widthScale * 0.32);
             const pts = b.points;
             ctx.beginPath();
             ctx.moveTo(pts[0].x - lx, pts[0].y - ly);
@@ -853,7 +589,7 @@ export function paintFluidOnChunks(engine, from, to, size, opacity, color, press
           const b = fb.bristles[i];
           const bFlow = Math.min(1.0, flowFactor * (b.flowScale || 1.0));
           ctx.strokeStyle = `rgba(${b.color.r}, ${b.color.g}, ${b.color.b}, ${bFlow})`;
-          ctx.lineWidth = Math.max(0.5, w * b.widthScale);
+          ctx.lineWidth = Math.max(0.6, w * b.widthScale);
           ctx.beginPath();
           const pts = b.points;
           ctx.moveTo(pts[0].x - lx, pts[0].y - ly);
@@ -881,7 +617,6 @@ export function paintFluidOnChunks(engine, from, to, size, opacity, color, press
 
 /**
  * Finalizes fluid paint stroke on pointerup.
- * If user performed a single tap without moving, deposits a rich 3D oil paint dab.
  */
 export function endFluidPaintStroke(engine) {
   if (engine.activeFluidBrush) {
@@ -896,24 +631,17 @@ export function endFluidPaintStroke(engine) {
 }
 
 /**
- * Cancels any active fluid paint stroke state, animation, or brush timers on the engine.
+ * Cancels active fluid stroke state.
  */
 export function cancelFluidAfterEffect(engine) {
   if (!engine) return;
-  if (engine._fluidAfterEffectRaf) {
-    cancelAnimationFrame(engine._fluidAfterEffectRaf);
-    engine._fluidAfterEffectRaf = null;
-  }
-  if (engine._fluidTimer) {
-    clearTimeout(engine._fluidTimer);
-    engine._fluidTimer = null;
-  }
   if (engine.activeFluidBrush) {
     engine.activeFluidBrush = null;
   }
-  engine._fluidBristles = null;
 }
 
-
-
+export let fluidEngineMode = 'oil';
+export function setFluidEngineMode(mode) {
+  fluidEngineMode = mode;
+}
 
