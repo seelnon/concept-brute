@@ -99,6 +99,23 @@ export function paintSmudgeOnChunks(engine, stamps, affectedChunks, flow, opacit
     ensureSmudgeBuffers(engine);
     const mask = getBrushTipMask(tip);
 
+    const brushOpacity = Math.max(0, Math.min(1.0, (opacity !== undefined ? opacity : (engine.brush.opacity ?? 1.0))));
+    const brushFlow = Math.max(0, Math.min(1.0, (flow !== undefined ? flow : (engine.brush.flow ?? 1.0))));
+    const flowBoost = (engine.brush.smudgeFlowBoost !== undefined) ? engine.brush.smudgeFlowBoost : 1.0;
+    const wetness = (engine.brush.oiliness !== undefined) ? engine.brush.oiliness : 0.5;
+    const pickupSetting = (engine.brush.smudgePickup !== undefined) ? engine.brush.smudgePickup : 1.0;
+
+    // Strict deadzone: if opacity or flow is 0, smudge does nothing
+    if (brushOpacity <= 0.001 || brushFlow <= 0.001 || !engine.smudgeDirty) {
+        return;
+    }
+
+    // Compound strength normalized to [0, 1]
+    const strength = Math.max(0, Math.min(1.0, brushOpacity * brushFlow * (flowBoost / 2.0)));
+    if (strength <= 0.001) {
+        return;
+    }
+
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const s of stamps) {
         const sR = s.size / 2;
@@ -138,16 +155,26 @@ export function paintSmudgeOnChunks(engine, stamps, affectedChunks, flow, opacit
         const sCtx = engine.segmentCtx;
         const pCtx = engine.smudgePickupCtx;
 
+        // Calibrated stamp alpha compounding over ~10 stamps per brush radius
+        const stampAlpha = Math.max(0, Math.min(0.85, 1.0 - Math.pow(Math.max(0.0001, 1.0 - strength), 0.1)));
+
+        // Effective wetness / pickup rate
+        const effectiveWetness = Math.max(0, Math.min(1.0, wetness * (pickupSetting / 2.0)));
+        const pickupAlpha = Math.max(0, Math.min(0.35, effectiveWetness * 0.15 * (brushFlow * 0.5 + 0.5)));
+
+        // Retention: at wetness = 1.0, retention is 1.0 (no decay). At wetness = 0.0, retention is 0.88 (~15-20 stamps fade)
+        const retention = Math.min(1.0, 0.88 + effectiveWetness * 0.12);
+
         for (const s of stamps) {
             const px = s.x - minX, py = s.y - minY;
             const sSz = Math.max(4, s.size), sR = sSz / 2;
             
             // 1. Stamp the masked smudge buffer onto the segment canvas
-            if (engine.smudgeDirty) {
+            if (engine.smudgeDirty && stampAlpha > 0.0005) {
                 sCtx.save();
                 sCtx.translate(px, py);
                 sCtx.rotate(s.angle);
-                sCtx.globalAlpha = Math.min(1.0, (flow || 0.5) * (engine.brush.smudgeFlowBoost ?? 4.0));
+                sCtx.globalAlpha = stampAlpha;
                 sCtx.drawImage(engine.smudgeCanvas, -sR, -sR, sSz, sSz);
                 sCtx.restore();
             }
@@ -163,27 +190,29 @@ export function paintSmudgeOnChunks(engine, stamps, affectedChunks, flow, opacit
             }
             pCtx.restore();
 
-            // 3. Blend new pickup into smudge canvas
-            engine.smudgeCtx.save();
-            const pickupMul = engine.brush.smudgePickup ?? 1.5;
-            const pickUpAlpha = Math.max(0.15, Math.min(0.95, (0.25 + (flow || 0.5) * 0.5 * pickupMul) * (1.1 - (opacity || 1.0) * 0.7)));
-            
-            if (engine.smudgeDirty) {
-                engine.smudgeCtx.globalAlpha = pickUpAlpha;
+            // 3. Blend new pickup into smudge canvas (if wetness/pickup allows)
+            if (pickupAlpha > 0.001) {
+                engine.smudgeCtx.save();
+                engine.smudgeCtx.globalAlpha = pickupAlpha;
                 engine.smudgeCtx.drawImage(engine.smudgePickupCanvas, 0, 0);
-            } else {
-                engine.smudgeCtx.clearRect(0, 0, 128, 128);
+
+                // Enforce mask boundary on smudgeCanvas so corners stay 100% transparent
+                engine.smudgeCtx.globalCompositeOperation = 'destination-in';
                 engine.smudgeCtx.globalAlpha = 1.0;
-                engine.smudgeCtx.drawImage(engine.smudgePickupCanvas, 0, 0);
+                if (mask) {
+                    engine.smudgeCtx.drawImage(mask, 0, 0, 128, 128);
+                }
+                engine.smudgeCtx.restore();
             }
 
-            // Always enforce mask boundary on smudgeCanvas so corners are 100% transparent
-            engine.smudgeCtx.globalCompositeOperation = 'destination-in';
-            engine.smudgeCtx.globalAlpha = 1.0;
-            if (mask) {
-                engine.smudgeCtx.drawImage(mask, 0, 0, 128, 128);
+            // 4. Decay carried paint if dry / low wetness (runs out of paint)
+            if (retention < 0.999) {
+                engine.smudgeCtx.save();
+                engine.smudgeCtx.globalCompositeOperation = 'destination-out';
+                engine.smudgeCtx.fillStyle = `rgba(0, 0, 0, ${+(1.0 - retention).toFixed(3)})`;
+                engine.smudgeCtx.fillRect(0, 0, 128, 128);
+                engine.smudgeCtx.restore();
             }
-            engine.smudgeCtx.restore();
 
             engine.smudgeDirty = true;
         }
@@ -227,6 +256,13 @@ export function paintSmudgeOnChunks(engine, stamps, affectedChunks, flow, opacit
  */
 export function startSmudgeStroke(engine, worldPos) {
     ensureSmudgeBuffers(engine);
+    const brushOpacity = (engine.brush.opacity !== undefined) ? engine.brush.opacity : 1.0;
+    const brushFlow = (engine.brush.flow !== undefined) ? engine.brush.flow : 1.0;
+    if (brushOpacity <= 0.001 || brushFlow <= 0.001) {
+        engine.smudgeDirty = false;
+        return;
+    }
+
     const sz = engine.brush.size || 50;
     const sR = sz / 2;
     const cx = engine.isStatic ? 0 : Math.floor(worldPos.x / engine.chunkSize);

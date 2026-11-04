@@ -88,7 +88,7 @@ export class Engine {
       paintHeight: 0,
       oiliness: 0.5,
       airbrush: 0.0,
-      smudgeFlowBoost: 4.5,
+      smudgeFlowBoost: 1.0,
       smudgePickup: 1.0,
       brushSharpen: 0,
       wireDensity: 30,
