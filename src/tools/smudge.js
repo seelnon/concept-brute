@@ -173,6 +173,19 @@ export function startSmudgeStroke(engine, worldPos) {
         engine.smudgeCtx.save();
         engine.smudgeCtx.clearRect(0, 0, 128, 128);
         engine.smudgeCtx.drawImage(chunk.canvases[engine.activeLayer], px - sR, py - sR, sz, sz, 0, 0, 128, 128);
+
+        // Apply tip mask on start so the very first stamp is correctly shaped
+        const tip = engine.brush.tip;
+        engine.smudgeCtx.globalCompositeOperation = 'destination-in';
+        engine.smudgeCtx.globalAlpha = 1.0;
+        if (tip) {
+            engine.smudgeCtx.drawImage(tip, 0, 0, 128, 128);
+        } else {
+            engine.smudgeCtx.beginPath();
+            engine.smudgeCtx.arc(64, 64, 64, 0, Math.PI * 2);
+            engine.smudgeCtx.fill();
+        }
+
         engine.smudgeCtx.restore();
         engine.smudgeDirty = true;
     }
