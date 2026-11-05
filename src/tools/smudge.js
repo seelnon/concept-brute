@@ -148,7 +148,7 @@ export function paintSmudgeOnChunks(engine, stamps, affectedChunks, flow, opacit
  */
 export function startSmudgeStroke(engine, worldPos) {
     ensureSmudgeBuffers(engine);
-    const sz = engine.brush.size || 50;
+    const sz = worldPos.size || engine.brush.size || 50;
     const sR = sz / 2;
     const cx = engine.isStatic ? 0 : Math.floor(worldPos.x / engine.chunkSize);
     const cy = engine.isStatic ? 0 : Math.floor(worldPos.y / engine.chunkSize);

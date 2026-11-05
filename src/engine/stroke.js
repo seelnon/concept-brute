@@ -498,8 +498,8 @@ export function _moveStroke(e) {
 
   let color = this.brush.color;
   if (this.brush.type !== TOOLS.SMUDGE && ((this.brush.speedValue && this.brush.speedValue !== 0) || (this.brush.speedHue && this.brush.speedHue !== 0))) {
-      const hShift = vFactor * ((this.brush.speedHue || 0) / 100) * 36;
-      const lShift = vFactor * ((this.brush.speedValue || 0) / 100) * 0.4;
+      const hShift = vFactor * ((this.brush.speedHue || 0) / 100) * 108;
+      const lShift = vFactor * ((this.brush.speedValue || 0) / 100) * 1.2;
       color = this._shiftColor(color, hShift, lShift); 
   }
 
