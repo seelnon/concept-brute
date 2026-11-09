@@ -71,8 +71,6 @@ export function updateSelectionPreview(engine) {
         engine.selectionOverlay.style.boxShadow = '0 0 0 1px #000000, 0 0 0 2px #ffffff';
         engine.uiLayer.appendChild(engine.selectionOverlay);
     }
-
-    const rect = engine.container.getBoundingClientRect();
     
     engine.selectionOverlay.style.width = `${selW}px`;
     engine.selectionOverlay.style.height = `${selH}px`;

@@ -376,6 +376,7 @@ export class Engine {
 
     this.container.addEventListener('pointerdown', (e) => {
         this._containerRect = null;
+        if (this.perfMonitor) this.perfMonitor.markInteraction();
         if (e.pointerType === 'pen' || e.pointerType === 'touch') {
             this.lastPenTouchTime = performance.now();
         }
@@ -499,6 +500,7 @@ export class Engine {
     window.addEventListener('pointermove', (e) => {
       // Stop browser gestures (zoom/pan) especially for Windows Ink/Stylus
       if (e.cancelable && e.target === this.container) e.preventDefault();
+      if (this.perfMonitor) this.perfMonitor.markInteraction();
 
       if (e.pointerType === 'pen' || e.pointerType === 'touch') {
           this.lastPenTouchTime = performance.now();
@@ -2843,79 +2845,24 @@ export class Engine {
                                 ctx.arc(0, 0, curR, 0, Math.PI * 2);
                                 ctx.fill();
                             } else {
-                                // Relief / Impasto effect
-                                if ((oil > 0.005 || height > 0.005) && dist < 500 && !isEraser) {
-                                    // Sync color for tip if jittered
-                                    if (jHue > 0) {
-                                        if (!this.scratchCanvas) {
-                                            this.scratchCanvas = document.createElement('canvas');
-                                            this.scratchCtx = this.scratchCanvas.getContext('2d', { alpha: true });
-                                        }
-                                        if (this.scratchCanvas.width < curSize || this.scratchCanvas.height < curSize) {
-                                            this.scratchCanvas.width = Math.max(this.scratchCanvas.width, curSize);
-                                            this.scratchCanvas.height = Math.max(this.scratchCanvas.height, curSize);
-                                        }
-                                        this.scratchCtx.globalCompositeOperation = 'source-over'; // Reset first!
-                                        this.scratchCtx.clearRect(0, 0, curSize, curSize);
-                                        this.scratchCtx.drawImage(useTip, 0, 0, curSize, curSize);
-                                        this.scratchCtx.globalCompositeOperation = 'source-in';
-                                        this.scratchCtx.fillStyle = s.color || color || '#000000';
-                                        this.scratchCtx.fillRect(0, 0, curSize, curSize);
-                                        ctx.drawImage(this.scratchCanvas, 0, 0, curSize, curSize, -curR, -curR, curSize, curSize);
-                                    } else {
-                                        ctx.drawImage(useTip, -curR, -curR, curSize, curSize);
+                                if (jHue > 0) {
+                                    if (!this.scratchCanvas) {
+                                        this.scratchCanvas = document.createElement('canvas');
+                                        this.scratchCtx = this.scratchCanvas.getContext('2d', { alpha: true });
                                     }
-
-                                    const origAlpha = ctx.globalAlpha;
-                                    const origGCO = ctx.globalCompositeOperation;
-
-                                    // 1. Shadow Pass (Multiply) - Strictly reserved for Impasto (Paint Height)
-                                    if (height > 0.005 && !(this.smoothedVelocity > 35) && this._reliefCache) {
-                                        ctx.globalCompositeOperation = 'multiply';
-                                        ctx.globalAlpha = origAlpha * height * 0.22;
-                                        ctx.drawImage(this._reliefCache.shadow, -curR, -curR, curSize, curSize);
+                                    if (this.scratchCanvas.width < curSize || this.scratchCanvas.height < curSize) {
+                                        this.scratchCanvas.width = Math.max(this.scratchCanvas.width, curSize);
+                                        this.scratchCanvas.height = Math.max(this.scratchCanvas.height, curSize);
                                     }
-
-                                    // 2. Base Highlight Pass - Using screen for volumetric height stability
-                                    const baseHighlightOpacity = height * 0.15;
-                                    const oilOpacity = oil * 0.35;
-                                    const skipBaseHighlight = (this.smoothedVelocity > 15);
-                                    if (baseHighlightOpacity > 0.005 && (!skipBaseHighlight || oilOpacity <= 0.005) && this._reliefCache) {
-                                        ctx.globalCompositeOperation = 'screen';
-                                        ctx.globalAlpha = origAlpha * Math.min(1.0, baseHighlightOpacity);
-                                        ctx.drawImage(this._reliefCache.highlight, -curR, -curR, curSize, curSize);
-                                    }
-
-                                    // 3. Wet/Oil Pass - Using overlay or dodge for that high-specular shiny look
-                                    if (oilOpacity > 0.005 && this._reliefCache) {
-                                        ctx.globalCompositeOperation = 'screen';
-                                        ctx.globalAlpha = origAlpha * Math.min(0.95, oilOpacity * 1.25);
-                                        ctx.drawImage(this._reliefCache.highlight, -curR, -curR, curSize, curSize);
-                                    }
-
-                                    // Restore original properties directly
-                                    ctx.globalAlpha = origAlpha;
-                                    ctx.globalCompositeOperation = origGCO;
+                                    this.scratchCtx.globalCompositeOperation = 'source-over'; // Reset first!
+                                    this.scratchCtx.clearRect(0, 0, curSize, curSize);
+                                    this.scratchCtx.drawImage(useTip, 0, 0, curSize, curSize);
+                                    this.scratchCtx.globalCompositeOperation = 'source-in';
+                                    this.scratchCtx.fillStyle = s.color || color || '#000000';
+                                    this.scratchCtx.fillRect(0, 0, curSize, curSize);
+                                    ctx.drawImage(this.scratchCanvas, 0, 0, curSize, curSize, -curR, -curR, curSize, curSize);
                                 } else {
-                                    if (jHue > 0) {
-                                        if (!this.scratchCanvas) {
-                                            this.scratchCanvas = document.createElement('canvas');
-                                            this.scratchCtx = this.scratchCanvas.getContext('2d', { alpha: true });
-                                        }
-                                        if (this.scratchCanvas.width < curSize || this.scratchCanvas.height < curSize) {
-                                            this.scratchCanvas.width = Math.max(this.scratchCanvas.width, curSize);
-                                            this.scratchCanvas.height = Math.max(this.scratchCanvas.height, curSize);
-                                        }
-                                        this.scratchCtx.globalCompositeOperation = 'source-over'; // Reset first!
-                                        this.scratchCtx.clearRect(0, 0, curSize, curSize);
-                                        this.scratchCtx.drawImage(useTip, 0, 0, curSize, curSize);
-                                        this.scratchCtx.globalCompositeOperation = 'source-in';
-                                        this.scratchCtx.fillStyle = s.color || color || '#000000';
-                                        this.scratchCtx.fillRect(0, 0, curSize, curSize);
-                                        ctx.drawImage(this.scratchCanvas, 0, 0, curSize, curSize, -curR, -curR, curSize, curSize);
-                                    } else {
-                                        ctx.drawImage(useTip, -curR, -curR, curSize, curSize);
-                                    }
+                                    ctx.drawImage(useTip, -curR, -curR, curSize, curSize);
                                 }
                             }
                         } else {
@@ -2928,6 +2875,57 @@ export class Engine {
                 }
             } catch (err) {
                 console.error("Stamp sub-draw error:", err);
+            }
+        }
+
+        // Batched 3D Oil Relief & Impasto Passes
+        if ((oil > 0.005 || height > 0.005) && dist < 500 && !isEraser && this._reliefCache) {
+            if (height > 0.005 && !(this.smoothedVelocity > 35)) {
+                ctx.globalCompositeOperation = 'multiply';
+                ctx.globalAlpha = opacityBase * height * 0.22;
+                for (const s of group.stamps) {
+                    const px = Math.round(s.x - lx);
+                    const py = Math.round(s.y - ly);
+                    const curSize = Math.round(s.size);
+                    if (curSize < 1) continue;
+                    const curR = curSize / 2;
+                    if (s.angle !== 0) {
+                        ctx.save();
+                        ctx.translate(px, py);
+                        ctx.rotate(s.angle);
+                        ctx.drawImage(this._reliefCache.shadow, -curR, -curR, curSize, curSize);
+                        ctx.restore();
+                    } else {
+                        ctx.drawImage(this._reliefCache.shadow, px - curR, py - curR, curSize, curSize);
+                    }
+                }
+            }
+
+            const baseHighlightOpacity = height * 0.15;
+            const oilOpacity = oil * 0.35;
+            const skipBaseHighlight = (this.smoothedVelocity > 15);
+            const hasBaseHigh = baseHighlightOpacity > 0.005 && (!skipBaseHighlight || oilOpacity <= 0.005);
+            const combinedHighAlpha = (hasBaseHigh ? baseHighlightOpacity : 0) + (oilOpacity > 0.005 ? oilOpacity * 1.25 : 0);
+
+            if (combinedHighAlpha > 0.005) {
+                ctx.globalCompositeOperation = 'screen';
+                ctx.globalAlpha = opacityBase * Math.min(0.95, combinedHighAlpha);
+                for (const s of group.stamps) {
+                    const px = Math.round(s.x - lx);
+                    const py = Math.round(s.y - ly);
+                    const curSize = Math.round(s.size);
+                    if (curSize < 1) continue;
+                    const curR = curSize / 2;
+                    if (s.angle !== 0) {
+                        ctx.save();
+                        ctx.translate(px, py);
+                        ctx.rotate(s.angle);
+                        ctx.drawImage(this._reliefCache.highlight, -curR, -curR, curSize, curSize);
+                        ctx.restore();
+                    } else {
+                        ctx.drawImage(this._reliefCache.highlight, px - curR, py - curR, curSize, curSize);
+                    }
+                }
             }
         }
         ctx.restore();
@@ -3108,10 +3106,13 @@ export class Engine {
   _updateReliefCache(s, blur) {
     if (!this.brush.tip || this.brush.tip.width === 0 || s < 1) return;
 
-    const M = 256;
+    // Use 128x128 for normal/emboss map generation: 16,384 pixels vs 65,536 (4x faster, zero frame drop)
+    const M = 128;
     const nominalSize = Math.max(1, this.brush.size || 100);
     let masterBlur = blur * (M / nominalSize);
-    masterBlur = Math.min(Math.max(0.1, masterBlur), 30);
+    masterBlur = Math.min(Math.max(0.1, masterBlur), 20);
+    // Quantize blur to 0.25 steps to avoid re-generating Sobel normal convolution on microscopic changes
+    masterBlur = Math.round(masterBlur * 4) / 4;
 
     const masterKey = `${masterBlur.toFixed(2)}_${this.brush.brushSharpen || 0}`;
 
@@ -3231,15 +3232,13 @@ export class Engine {
         };
     }
 
-    const shad = document.createElement('canvas'); shad.width = s; shad.height = s;
-    const hshadCtx = shad.getContext('2d');
-    hshadCtx.drawImage(this._masterReliefCache.shadow, 0, 0, s, s);
-
-    const high = document.createElement('canvas'); high.width = s; high.height = s;
-    const hhighCtx = high.getContext('2d');
-    hhighCtx.drawImage(this._masterReliefCache.highlight, 0, 0, s, s);
-
-    this._reliefCache = { shadow: shad, highlight: high, key: `${s}_${blur}`, srcTip: this.brush.tip };
+    // Directly reuse master relief textures - GPU scales them during drawImage with 0 CPU allocation
+    this._reliefCache = {
+        shadow: this._masterReliefCache.shadow,
+        highlight: this._masterReliefCache.highlight,
+        key: `${s}_${blur}`,
+        srcTip: this.brush.tip
+    };
   }
 
   addReferenceImage(img, name, x = null, y = null, config = {}, autoSelect = true, pushHistory = true) {

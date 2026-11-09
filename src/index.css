@@ -1325,3 +1325,42 @@ button, input, select {
     transform-style: preserve-3d;
 }
 
+/* PERFORMANCE PROFILER STYLES */
+.perf-log-card {
+    background: #fff;
+    border: 1px solid #000;
+    box-shadow: 2px 2px 0 #000;
+    padding: 6px;
+    transition: transform 0.1s ease;
+}
+
+.perf-log-card:hover {
+    transform: translate(-1px, -1px);
+    box-shadow: 3px 3px 0 #000;
+}
+
+.perf-empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 30px 10px;
+    text-align: center;
+    opacity: 0.85;
+}
+
+.perf-pulse-dot {
+    width: 10px;
+    height: 10px;
+    background: #00cc44;
+    border-radius: 50%;
+    margin-bottom: 8px;
+    animation: perfPulse 1.6s infinite ease-in-out;
+}
+
+@keyframes perfPulse {
+    0% { transform: scale(0.9); opacity: 0.7; box-shadow: 0 0 0 0 rgba(0, 204, 68, 0.7); }
+    70% { transform: scale(1.15); opacity: 1; box-shadow: 0 0 0 8px rgba(0, 204, 68, 0); }
+    100% { transform: scale(0.9); opacity: 0.7; box-shadow: 0 0 0 0 rgba(0, 204, 68, 0); }
+}
+

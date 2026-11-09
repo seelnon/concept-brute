@@ -15,6 +15,7 @@ export function ensureSmudgeBuffers(engine) {
 }
 
 export function paintSmudgeOnChunks(engine, stamps, affectedChunks, flow, opacity, tip) {
+    if (engine.perfMonitor) engine.perfMonitor.markPhase('smudge_step', { stamps: stamps.length, chunks: affectedChunks ? affectedChunks.size : 1 });
     ensureSmudgeBuffers(engine);
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const s of stamps) {

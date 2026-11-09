@@ -870,6 +870,51 @@ export function setupUI(app) {
     app._makeDraggable(document.getElementById('modal-export'), document.getElementById('handle-export'));
     app._makeDraggable(document.getElementById('modal-ref-editor'), document.getElementById('handle-ref-editor'));
 
+    // Draggable Perf Monitor
+    const perfPanel = document.getElementById('panel-perf-monitor');
+    const perfHandle = document.getElementById('handle-perf-monitor');
+    if (perfPanel && perfHandle) {
+        app._makeDraggable(perfPanel, perfHandle);
+    }
+
+    // Perf Monitor settings panel wiring
+    const btnQuickPerf = document.getElementById('btn-quick-open-perf');
+    if (btnQuickPerf) btnQuickPerf.onclick = () => app.perfMonitor?.show();
+
+    const btnOpenPerfFromSettings = document.getElementById('btn-open-perf-from-settings');
+    if (btnOpenPerfFromSettings) btnOpenPerfFromSettings.onclick = () => app.perfMonitor?.show();
+
+    const selPerfThresh = document.getElementById('settings-perf-thresh-select');
+    if (selPerfThresh) {
+        selPerfThresh.onchange = (e) => {
+            const val = parseFloat(e.target.value) || 16.95;
+            if (app.perfMonitor) app.perfMonitor.thresholdMs = val;
+            const lbl = document.getElementById('settings-perf-thresh-label');
+            if (lbl) lbl.innerText = `${val.toFixed(1)}ms`;
+            const panelSelect = document.getElementById('perf-threshold-select');
+            if (panelSelect) panelSelect.value = String(val);
+        };
+    }
+
+    const checkPerfAutoOpen = document.getElementById('settings-perf-auto-open');
+    if (checkPerfAutoOpen) {
+        checkPerfAutoOpen.onchange = (e) => {
+            if (app.perfMonitor) app.perfMonitor.autoOpenOnDrop = e.target.checked;
+        };
+    }
+
+    const checkPerfPaintOnly = document.getElementById('settings-perf-paint-only');
+    if (checkPerfPaintOnly) {
+        checkPerfPaintOnly.onchange = (e) => {
+            if (app.perfMonitor) app.perfMonitor.paintOnly = e.target.checked;
+        };
+    }
+
+    const btnPerfTestDrop = document.getElementById('btn-perf-test-drop-settings');
+    if (btnPerfTestDrop) {
+        btnPerfTestDrop.onclick = () => app.perfMonitor?.simulateTestDrop();
+    }
+
     // Toggle Touch Shortcuts Panel
     const toggleShortcutsBtn = document.getElementById('btn-toggle-shortcuts');
     const touchShortcutsPanel = document.getElementById('panel-touch-shortcuts');

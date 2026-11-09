@@ -23,11 +23,14 @@ import { initFluidPaint, activateFluidPaint, deactivateFluidPaint } from './tool
 import { initAirPaint, activateAirPaint, deactivateAirPaint } from './tools/airPaint.js';
 import { ensureSmudgeBuffers } from './tools/smudge.js';
 import { wasmCore } from './wasm/wasmBridge.js';
+import { PerfMonitor } from './perfMonitor.js';
 
 class App {
   constructor() {
     this.engine = new Engine(document.getElementById('canvas-container'));
     this.engine.app = this;
+    this.perfMonitor = new PerfMonitor(this);
+    this.engine.perfMonitor = this.perfMonitor;
     setupIgnoreSystem(this.engine);
     this.engine.onColorPicked = (color) => {
         this.setColor(color);
@@ -1668,6 +1671,7 @@ class App {
     if (this.activeTool === tool && !force) return;
     this.prevTool = this.activeTool;
     this.activeTool = tool;
+    if (this.perfMonitor) this.perfMonitor.markToolChange(tool, this.prevTool);
     
     // Deselect reference image when switching to anything that isn't generic move, only if one was selected
     if (tool !== TOOLS.REF_MOVE && this.engine.selectedRefIndex !== -1) {

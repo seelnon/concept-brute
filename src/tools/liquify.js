@@ -138,6 +138,7 @@ export function startLiquifyStroke(engine, worldPos) {
  * the original pristine stroke backup (Zero loss in image quality).
  */
 export function paintLiquifyStroke(engine, from, to, dynamicSize, pressure) {
+    if (engine.perfMonitor) engine.perfMonitor.markPhase('liquify_step');
     if (engine.activeLayer === 0) return;
     if (engine.layerSettings[engine.activeLayer]?.locked) return;
 

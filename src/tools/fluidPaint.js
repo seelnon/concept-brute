@@ -326,6 +326,7 @@ export function startFluidPaintStroke(engine, worldPos) {
  * vortex swirl and turbulence, without chunk corruption or sector glitches.
  */
 export function paintFluidOnChunks(engine, from, to, size, opacity, color, pressure = 1.0, currentTime = performance.now()) {
+  if (engine.perfMonitor) engine.perfMonitor.markPhase('fluid_step');
   if (!engine.activeFluidBrush) {
     startFluidPaintStroke(engine, from);
   }

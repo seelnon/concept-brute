@@ -537,12 +537,19 @@
             <button class="settings-tab active" data-tab="general">GEN</button>
             <button class="settings-tab" data-tab="projects">PRJ</button>
             <button class="settings-tab" data-tab="data">DATA</button>
+            <button class="settings-tab" data-tab="perf">PERF</button>
             <button class="settings-tab" data-tab="info">INFO</button>
           </div>
 
           <div class="panel-content settings-main" style="flex-grow: 1; overflow-y: auto;">
              <!-- GENERAL TAB -->
               <div id="tab-general" class="tab-pane active">
+                  <div style="margin-bottom: 8px;">
+                     <button id="btn-quick-open-perf" class="brutal-btn full-width" style="font-size: 9px; padding: 5px; font-weight: 900; background: #000; color: #fff; cursor: pointer;">
+                        ⚡ OPEN PERF MONITOR (60 FPS WATCHDOG)
+                     </button>
+                  </div>
+                  <div class="settings-divider"></div>
                   <div class="settings-group">
                      <label class="settings-label">CANVAS BACKGROUND</label>
                      <input type="color" id="settings-bg-color" value="#ffffff" class="settings-input-color">
@@ -665,6 +672,48 @@
                  <div class="settings-divider"></div>
                  <button id="btn-clear-storage" class="brutal-btn full-width" style="background: #ff4444; color: white;">RESET SYSTEM</button>
                  <p style="font-size: 8px; margin-top: 8px; opacity: 0.6; line-height: 1.2;">WARNING: Reset deletes all projects and data forever.</p>
+             </div>
+
+             <!-- PERF TAB -->
+             <div id="tab-perf" class="tab-pane">
+                 <label class="settings-label">PERFORMANCE PROFILER</label>
+                 <p style="font-size: 8px; line-height: 1.35; opacity: 0.8; margin-bottom: 8px;">
+                     Active watchdog monitoring frame times during painting. Catches any drop below 60 FPS (even 59 FPS) and diagnoses what code was running.
+                 </p>
+                 <button id="btn-open-perf-from-settings" class="brutal-btn full-width" style="font-size: 10px; padding: 7px; font-weight: 900; background: #000; color: #fff; cursor: pointer; margin-bottom: 10px;">
+                     ⚡ OPEN PROFILER WINDOW
+                 </button>
+                 <div class="settings-divider"></div>
+                 <div class="settings-group">
+                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;">
+                         <label class="settings-label">DROP SENSITIVITY</label>
+                         <span id="settings-perf-thresh-label" style="font-size: 8px; font-weight: 900; font-family: monospace;">16.9ms</span>
+                     </div>
+                     <select id="settings-perf-thresh-select" class="full-width" style="border: 2px solid #000; font-family: inherit; font-size: 9px; padding: 4px; background: white;">
+                         <option value="16.95" selected>STRICT: 59 FPS (&gt;16.9ms)</option>
+                         <option value="18.2">MEDIUM: 55 FPS (&gt;18.2ms)</option>
+                         <option value="20.0">RELAXED: 50 FPS (&gt;20.0ms)</option>
+                         <option value="33.3">LOOSE: 30 FPS (&gt;33.3ms)</option>
+                     </select>
+                 </div>
+                 <div class="settings-row" style="margin-top: 8px; display: flex; justify-content: space-between; align-items: center;">
+                     <label class="settings-label">AUTO-OPEN ON DROP</label>
+                     <div class="checkbox-wrapper">
+                         <input type="checkbox" id="settings-perf-auto-open" class="settings-input-check">
+                         <span class="checkbox-custom"></span>
+                     </div>
+                 </div>
+                 <div class="settings-row" style="margin-top: 8px; display: flex; justify-content: space-between; align-items: center;">
+                     <label class="settings-label">MONITOR PAINTING ONLY</label>
+                     <div class="checkbox-wrapper">
+                         <input type="checkbox" id="settings-perf-paint-only" checked class="settings-input-check">
+                         <span class="checkbox-custom"></span>
+                     </div>
+                 </div>
+                 <div class="settings-divider" style="margin: 10px 0;"></div>
+                 <button id="btn-perf-test-drop-settings" class="brutal-btn full-width" style="font-size: 9px; padding: 5px; font-weight: 900;">
+                     SIMULATE TEST DROP
+                 </button>
              </div>
 
              <div id="tab-info" class="tab-pane">

@@ -260,6 +260,7 @@ export function endAirPaintStroke(engine) {
 }
 
 export function paintAirIncrementally(engine, j) {
+  if (engine.perfMonitor) engine.perfMonitor.markPhase('air_step');
   if (!engine.isDrawing) return;
   const points = engine.strokePoints;
   if (j < 1 || j >= points.length) return;
