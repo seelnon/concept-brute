@@ -960,7 +960,7 @@ export class Engine {
 
     this._updateChunkTransform(chunk);
     
-    const rect = this.container.getBoundingClientRect();
+    const rect = this.getContainerRect();
     if (rect.width && rect.height) {
         const cxCenter = rect.width / 2;
         const cyCenter = rect.height / 2;
@@ -2703,7 +2703,11 @@ export class Engine {
         if ((oil > 0.005 || height > 0.005) && dist < 500) {
             // Oiliness now produces sharper highlights for a "wet" look, while impasto stays soft
             const reliefBlur = Math.max(0.2, (height * 0.1 + oil * 0.02)) * 4 * (1 - airbrush * 0.4);
-            const reliefKey = `${cacheSize}_${reliefBlur}`;
+            const nominalSize = Math.max(1, this.brush.size || 100);
+            let masterBlur = reliefBlur * (128 / nominalSize);
+            masterBlur = Math.min(Math.max(0.1, masterBlur), 20);
+            masterBlur = Math.round(masterBlur * 4) / 4;
+            const reliefKey = `${masterBlur.toFixed(2)}_${this.brush.brushSharpen || 0}`;
             if (!this._reliefCache || this._reliefCache.key !== reliefKey || this._reliefCache.srcTip !== this.brush.tip) {
                 this._updateReliefCache(cacheSize, reliefBlur);
             }
@@ -2769,7 +2773,10 @@ export class Engine {
 
         if (!isEraser) {
             this._ensureStrokeCanvas(chunk);
-            chunk.strokeCanvas.style.opacity = this.brush.opacity;
+            const opStr = String(this.brush.opacity);
+            if (chunk.strokeCanvas && chunk.strokeCanvas.style.opacity !== opStr) {
+                chunk.strokeCanvas.style.opacity = opStr;
+            }
         }
         const ctx = isEraser ? chunk.ctxs[this.activeLayer] : chunk.strokeCtx;
 
@@ -3236,7 +3243,7 @@ export class Engine {
     this._reliefCache = {
         shadow: this._masterReliefCache.shadow,
         highlight: this._masterReliefCache.highlight,
-        key: `${s}_${blur}`,
+        key: masterKey,
         srcTip: this.brush.tip
     };
   }

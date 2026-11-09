@@ -207,8 +207,8 @@ export function _startStroke(e) {
       startLiquifyStroke(this, worldPos);
   } else if (this.brush.type === TOOLS.AIR) {
       startAirPaintStroke(this);
-  } else if (this.brush.type === TOOLS.BRUSH || this.brush.type === TOOLS.ERASER || this.brush.type === TOOLS.WIREFRAME) {
-      // Pre-warm tip and 3D relief caches so the very first drag move event has 0 CPU calculation overhead
+  } else if (this.brush.type === TOOLS.BRUSH || this.brush.type === TOOLS.ERASER) {
+      // Pre-warm tip cache for main brush so first drag move executes with 0 lag
       if (this.brush.tip && this.brush.type === TOOLS.BRUSH) {
           const bSize = Math.round(initSize);
           const cacheSize = this._getCacheSize(bSize);
@@ -218,46 +218,21 @@ export function _startStroke(e) {
           if (!this._tipColorCache || this._tipColorCache.key !== cacheKey || this._tipColorCache.color !== this.brush.color || this._tipColorCache.srcTip !== this.brush.tip) {
               this._updateTipCache(cacheSize, airbrush, this.brush.color);
           }
-          const oil = this.brush.oiliness || 0;
-          const height = this.brush.paintHeight || 0;
-          if (oil > 0.005 || height > 0.005) {
-              const reliefBlur = Math.max(0.2, (height * 0.1 + oil * 0.02)) * 4 * (1 - airbrush * 0.4);
-              const reliefKey = `${cacheSize}_${reliefBlur}`;
-              if (!this._reliefCache || this._reliefCache.key !== reliefKey || this._reliefCache.srcTip !== this.brush.tip) {
-                  this._updateReliefCache(cacheSize, reliefBlur);
-              }
-          }
       }
-
-      // Pre-backup and pre-mount strokeCanvas for all chunks overlapping initial stamp area
-      // Doing this synchronously on pointerdown guarantees 0 DOM mutations and 0 context allocations during pointermove!
-      const radius = Math.max(initSize, this.brush.size || 50) + 15;
-      const minCX = this.isStatic ? 0 : Math.floor((worldPos.x - radius) / this.chunkSize);
-      const maxCX = this.isStatic ? 0 : Math.floor((worldPos.x + radius) / this.chunkSize);
-      const minCY = this.isStatic ? 0 : Math.floor((worldPos.y - radius) / this.chunkSize);
-      const maxCY = this.isStatic ? 0 : Math.floor((worldPos.y + radius) / this.chunkSize);
-
-      for (let cx = minCX; cx <= maxCX; cx++) {
-          for (let cy = minCY; cy <= maxCY; cy++) {
-              const chunk = this._getChunk(cx, cy);
-              if (chunk) {
-                  const id = `${cx},${cy}`;
-                  if (!this.currentStrokeDirtyChunks.has(id)) {
-                      const srcCanvas = chunk.canvases[this.activeLayer];
-                      const backup = document.createElement('canvas');
-                      backup.width = srcCanvas.width;
-                      backup.height = srcCanvas.height;
-                      backup.getContext('2d').drawImage(srcCanvas, 0, 0);
-                      this.currentStrokeDirtyChunks.set(id, { layer: this.activeLayer, canvas: backup });
-                      this._markDirty(id, this.activeLayer);
-                  }
-                  if (this.brush.type !== TOOLS.ERASER) {
-                      this._ensureStrokeCanvas(chunk);
-                      if (chunk.strokeCanvas) {
-                          chunk.strokeCanvas.style.opacity = this.brush.opacity;
-                      }
-                  }
-              }
+      // Pre-backup initial chunk under cursor during pointerdown (0 lag during drag!)
+      const sCX = this.isStatic ? 0 : Math.floor(worldPos.x / this.chunkSize);
+      const sCY = this.isStatic ? 0 : Math.floor(worldPos.y / this.chunkSize);
+      const startChunk = this._getChunk(sCX, sCY);
+      if (startChunk) {
+          const id = `${sCX},${sCY}`;
+          if (!this.currentStrokeDirtyChunks.has(id)) {
+              const srcCanvas = startChunk.canvases[this.activeLayer];
+              const backup = document.createElement('canvas');
+              backup.width = srcCanvas.width;
+              backup.height = srcCanvas.height;
+              backup.getContext('2d').drawImage(srcCanvas, 0, 0);
+              this.currentStrokeDirtyChunks.set(id, { layer: this.activeLayer, canvas: backup });
+              this._markDirty(id, this.activeLayer);
           }
       }
   }
@@ -974,7 +949,7 @@ export function _endStroke(e = null) {
   this.shiftLockAxis = null;
   this._status('READY');
   this._updateCursor();
-  if (this.perfMonitor) this.perfMonitor.markStrokeEnd();
+  if (this.perfMonitor) this.perfMonitor.markPhase('idle');
   
   if (e) {
       if (e.pointerType === 'touch') {
@@ -1272,24 +1247,73 @@ export function _paintOnChunks(from, to, size, opacity, color) {
                               ctx.arc(0, 0, curR, 0, Math.PI * 2);
                               ctx.fill();
                           } else {
-                              if (jHue > 0) {
-                                  if (!this.scratchCanvas) {
-                                      this.scratchCanvas = document.createElement('canvas');
-                                      this.scratchCtx = this.scratchCanvas.getContext('2d', { alpha: true });
+                              if ((oil > 0.005 || height > 0.005) && dist < 500 && !isEraser) {
+                                  if (jHue > 0) {
+                                      if (!this.scratchCanvas) {
+                                          this.scratchCanvas = document.createElement('canvas');
+                                          this.scratchCtx = this.scratchCanvas.getContext('2d', { alpha: true });
+                                      }
+                                      if (this.scratchCanvas.width < curSize || this.scratchCanvas.height < curSize) {
+                                          this.scratchCanvas.width = Math.max(this.scratchCanvas.width, curSize);
+                                          this.scratchCanvas.height = Math.max(this.scratchCanvas.height, curSize);
+                                      }
+                                      this.scratchCtx.globalCompositeOperation = 'source-over'; 
+                                      this.scratchCtx.clearRect(0, 0, curSize, curSize);
+                                      this.scratchCtx.drawImage(useTip, 0, 0, curSize, curSize);
+                                      this.scratchCtx.globalCompositeOperation = 'source-in';
+                                      this.scratchCtx.fillStyle = s.color || color || '#000000';
+                                      this.scratchCtx.fillRect(0, 0, curSize, curSize);
+                                      ctx.drawImage(this.scratchCanvas, 0, 0, curSize, curSize, -curR, -curR, curSize, curSize);
+                                  } else {
+                                      ctx.drawImage(useTip, -curR, -curR, curSize, curSize);
                                   }
-                                  if (this.scratchCanvas.width < curSize || this.scratchCanvas.height < curSize) {
-                                      this.scratchCanvas.width = Math.max(this.scratchCanvas.width, curSize);
-                                      this.scratchCanvas.height = Math.max(this.scratchCanvas.height, curSize);
+
+                                  const origAlpha = ctx.globalAlpha;
+                                  const origGCO = ctx.globalCompositeOperation;
+
+                                  if (height > 0.005 && !(this.smoothedVelocity > 35) && this._reliefCache) {
+                                      ctx.globalCompositeOperation = 'multiply';
+                                      ctx.globalAlpha = origAlpha * height * 0.22;
+                                      ctx.drawImage(this._reliefCache.shadow, -curR, -curR, curSize, curSize);
                                   }
-                                  this.scratchCtx.globalCompositeOperation = 'source-over'; 
-                                  this.scratchCtx.clearRect(0, 0, curSize, curSize);
-                                  this.scratchCtx.drawImage(useTip, 0, 0, curSize, curSize);
-                                  this.scratchCtx.globalCompositeOperation = 'source-in';
-                                  this.scratchCtx.fillStyle = s.color || color || '#000000';
-                                  this.scratchCtx.fillRect(0, 0, curSize, curSize);
-                                  ctx.drawImage(this.scratchCanvas, 0, 0, curSize, curSize, -curR, -curR, curSize, curSize);
+
+                                  const baseHighlightOpacity = height * 0.15;
+                                  const oilOpacity = oil * 0.35;
+                                  const skipBaseHighlight = (this.smoothedVelocity > 15);
+                                  if (baseHighlightOpacity > 0.005 && (!skipBaseHighlight || oilOpacity <= 0.005) && this._reliefCache) {
+                                      ctx.globalCompositeOperation = 'screen';
+                                      ctx.globalAlpha = origAlpha * Math.min(1.0, baseHighlightOpacity);
+                                      ctx.drawImage(this._reliefCache.highlight, -curR, -curR, curSize, curSize);
+                                  }
+
+                                  if (oilOpacity > 0.005 && this._reliefCache) {
+                                      ctx.globalCompositeOperation = 'screen';
+                                      ctx.globalAlpha = origAlpha * Math.min(0.95, oilOpacity * 1.25);
+                                      ctx.drawImage(this._reliefCache.highlight, -curR, -curR, curSize, curSize);
+                                  }
+
+                                  ctx.globalAlpha = origAlpha;
+                                  ctx.globalCompositeOperation = origGCO;
                               } else {
-                                  ctx.drawImage(useTip, -curR, -curR, curSize, curSize);
+                                  if (jHue > 0) {
+                                      if (!this.scratchCanvas) {
+                                          this.scratchCanvas = document.createElement('canvas');
+                                          this.scratchCtx = this.scratchCanvas.getContext('2d', { alpha: true });
+                                      }
+                                      if (this.scratchCanvas.width < curSize || this.scratchCanvas.height < curSize) {
+                                          this.scratchCanvas.width = Math.max(this.scratchCanvas.width, curSize);
+                                          this.scratchCanvas.height = Math.max(this.scratchCanvas.height, curSize);
+                                      }
+                                      this.scratchCtx.globalCompositeOperation = 'source-over'; 
+                                      this.scratchCtx.clearRect(0, 0, curSize, curSize);
+                                      this.scratchCtx.drawImage(useTip, 0, 0, curSize, curSize);
+                                      this.scratchCtx.globalCompositeOperation = 'source-in';
+                                      this.scratchCtx.fillStyle = s.color || color || '#000000';
+                                      this.scratchCtx.fillRect(0, 0, curSize, curSize);
+                                      ctx.drawImage(this.scratchCanvas, 0, 0, curSize, curSize, -curR, -curR, curSize, curSize);
+                                  } else {
+                                      ctx.drawImage(useTip, -curR, -curR, curSize, curSize);
+                                  }
                               }
                           }
                       } else {
@@ -1302,59 +1326,6 @@ export function _paintOnChunks(from, to, size, opacity, color) {
               }
           } catch (err) {
               console.error("Stamp sub-draw error:", err);
-          }
-      }
-
-      // Batched 3D Oil Relief & Impasto Passes
-      // Single multiply pass for shadows + single screen pass for specular highlights across all stamps in chunk.
-      // Prevents 30+ GPU command buffer flushes and maintains smooth 60 FPS without frame drops.
-      if ((oil > 0.005 || height > 0.005) && dist < 500 && !isEraser && this._reliefCache) {
-          if (height > 0.005 && !(this.smoothedVelocity > 35)) {
-              ctx.globalCompositeOperation = 'multiply';
-              ctx.globalAlpha = opacityBase * height * 0.22;
-              for (const s of group.stamps) {
-                  const px = Math.round(s.x - lx);
-                  const py = Math.round(s.y - ly);
-                  const curSize = Math.round(s.size);
-                  if (curSize < 1) continue;
-                  const curR = curSize / 2;
-                  if (s.angle !== 0) {
-                      ctx.save();
-                      ctx.translate(px, py);
-                      ctx.rotate(s.angle);
-                      ctx.drawImage(this._reliefCache.shadow, -curR, -curR, curSize, curSize);
-                      ctx.restore();
-                  } else {
-                      ctx.drawImage(this._reliefCache.shadow, px - curR, py - curR, curSize, curSize);
-                  }
-              }
-          }
-
-          const baseHighlightOpacity = height * 0.15;
-          const oilOpacity = oil * 0.35;
-          const skipBaseHighlight = (this.smoothedVelocity > 15);
-          const hasBaseHigh = baseHighlightOpacity > 0.005 && (!skipBaseHighlight || oilOpacity <= 0.005);
-          const combinedHighAlpha = (hasBaseHigh ? baseHighlightOpacity : 0) + (oilOpacity > 0.005 ? oilOpacity * 1.25 : 0);
-
-          if (combinedHighAlpha > 0.005) {
-              ctx.globalCompositeOperation = 'screen';
-              ctx.globalAlpha = opacityBase * Math.min(0.95, combinedHighAlpha);
-              for (const s of group.stamps) {
-                  const px = Math.round(s.x - lx);
-                  const py = Math.round(s.y - ly);
-                  const curSize = Math.round(s.size);
-                  if (curSize < 1) continue;
-                  const curR = curSize / 2;
-                  if (s.angle !== 0) {
-                      ctx.save();
-                      ctx.translate(px, py);
-                      ctx.rotate(s.angle);
-                      ctx.drawImage(this._reliefCache.highlight, -curR, -curR, curSize, curSize);
-                      ctx.restore();
-                  } else {
-                      ctx.drawImage(this._reliefCache.highlight, px - curR, py - curR, curSize, curSize);
-                  }
-              }
           }
       }
       ctx.restore();

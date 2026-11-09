@@ -558,6 +558,18 @@ export async function switchProject(app, id) {
 
         if (switchToken !== app._switchProjectGeneration) return;
 
+        // Ensure viewport chunk and stroke buffers are pre-warmed before setting status to READY
+        if (app.engine) {
+            try {
+                const initChunk = app.engine._getChunk(0, 0);
+                if (initChunk) {
+                    app.engine._ensureStrokeCanvas(initChunk);
+                }
+            } catch (err) {
+                console.warn('[SWITCH] Chunk pre-warming notice:', err);
+            }
+        }
+
         app._updateRefImageList();
         await renderProjectList(app);
 
@@ -854,6 +866,23 @@ export async function loadProject(app, targetProjectId = null, switchToken = nul
         if (app.engine && app.engine.loadHistoryStackFromStorage) {
             await app.engine.loadHistoryStackFromStorage(projId);
         }
+
+        // Pre-warm initial viewport chunk (0, 0) and strokeCanvas so the first user stroke
+        // never suffers a multi-canvas VRAM allocation freeze (e.g. 183ms on new project)
+        if (app.engine) {
+            try {
+                if (app.engine.setupBoard) {
+                    app.engine.setupBoard();
+                }
+                const initChunk = app.engine._getChunk(0, 0);
+                if (initChunk) {
+                    app.engine._ensureStrokeCanvas(initChunk);
+                }
+            } catch (err) {
+                console.warn('[LOAD] Chunk pre-warming notice:', err);
+            }
+        }
+
         app._status('READY');
         console.log(`[PERF] loadProject(${projId}) completed in ${(performance.now() - tLoadStart).toFixed(2)}ms`);
     } catch (e) {
