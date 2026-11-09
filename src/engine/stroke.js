@@ -946,7 +946,7 @@ export function _endStroke(e = null) {
   this._updateCursor();
   
   if (e) {
-      if (e.pointerType !== 'mouse') {
+      if (e.pointerType === 'touch') {
           if (this.brushCursor) this.brushCursor.style.display = 'none';
           if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
       } else {

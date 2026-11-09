@@ -371,7 +371,7 @@ export class Engine {
 
   _initEvents() {
     this.container.addEventListener('pointerenter', () => {
-        window.focus();
+        // Do not force focus or window jump on hover enter
     });
 
     this.container.addEventListener('pointerdown', (e) => {
@@ -385,9 +385,8 @@ export class Engine {
             if (document.activeElement && document.activeElement !== document.body && document.activeElement !== this.container) {
                 document.activeElement.blur();
             }
-            window.focus();
             if (typeof this.container.focus === 'function') {
-                this.container.focus();
+                this.container.focus({ preventScroll: true });
             }
         }
 
@@ -437,7 +436,6 @@ export class Engine {
 
         const currentPointers = Array.from(this.activePointers.values());
         const hasPen = currentPointers.some(p => p.pointerType === 'pen');
-        const hasTouch = currentPointers.some(p => p.pointerType === 'touch');
 
         // IF we have a pen, IGNORE ALL touch pointers in the map (and from event)
         if (hasPen && e.pointerType === 'touch') {
@@ -445,7 +443,14 @@ export class Engine {
             return;
         }
 
-        if (this.activePointers.size > 1) {
+        if (hasPen) {
+            // Pen always takes full priority over gestures and touches
+            this.isGesture = false;
+            for (const [id, p] of this.activePointers) {
+                if (p.pointerType !== 'pen') this.activePointers.delete(id);
+            }
+            if (e.pointerType !== 'pen') return;
+        } else if (this.activePointers.size > 1) {
             // Only allow gestures if ALL active pointers are touch (no pen interfering)
             const allTouch = currentPointers.every(p => p.pointerType === 'touch');
             if (allTouch) {
@@ -455,13 +460,8 @@ export class Engine {
                 }
                 this.isGesture = true;
                 this._initGesture();
-            } else if (hasPen) {
-                // If we have a pen and something else, keep only the pen
-                for (const [id, p] of this.activePointers) {
-                    if (p.pointerType !== 'pen') this.activePointers.delete(id);
-                }
+                return;
             }
-            return;
         }
 
         if (this.isExportMode) {
@@ -505,7 +505,7 @@ export class Engine {
       }
 
       // Ignore simulated mouse events right after pen/touch interaction to prevent cursor teleportation at stroke start/end
-      if (e.pointerType === 'mouse' && this.lastPenTouchTime && (performance.now() - this.lastPenTouchTime < 1000)) {
+      if (e.pointerType === 'mouse' && this.lastPenTouchTime && (performance.now() - this.lastPenTouchTime < 100)) {
           return;
       }
 
@@ -515,19 +515,35 @@ export class Engine {
       if (hasNonMouse && e.pointerType === 'mouse' && e.target === this.container) return;
 
       const pointers = Array.from(this.activePointers.values());
-      const hasPen = pointers.some(p => p.pointerType === 'pen');
+      const hasPen = pointers.some(p => p.pointerType === 'pen') || e.pointerType === 'pen';
       if (hasPen && e.pointerType === 'touch') {
           this.activePointers.delete(e.pointerId);
           return;
       }
 
-      this.activePointers.set(e.pointerId, e);
+      if (e.pointerType === 'pen') {
+          // Stylus pen active - cancel any gesture lock and remove touch pointers
+          this.isGesture = false;
+          for (const [id, p] of this.activePointers) {
+              if (p.pointerType !== 'pen') this.activePointers.delete(id);
+          }
+      }
+
+      // Only track activePointers when pressed (buttons > 0 or touch event), not passive hovering
+      if (e.buttons === 0 && e.pointerType !== 'touch') {
+          this.activePointers.delete(e.pointerId);
+          if (this.activePointers.size === 0) {
+              this.isGesture = false;
+          }
+      } else {
+          this.activePointers.set(e.pointerId, e);
+      }
 
       // Filter pointers list again after set
       const currentPointers = Array.from(this.activePointers.values());
       const nonMouseCount = currentPointers.filter(p => p.pointerType !== 'mouse').length;
       
-      if (this.isGesture && nonMouseCount > 1) {
+      if (this.isGesture && nonMouseCount > 1 && !hasPen) {
           this._handleGesture();
           return;
       }
@@ -622,14 +638,14 @@ export class Engine {
     window.addEventListener('pointercancel', endHandler);
     window.addEventListener('pointerout', (e) => {
         this.activePointers.delete(e.pointerId);
-        if (e.pointerType !== 'mouse') {
+        if (e.pointerType === 'touch') {
             if (this.brushCursor) this.brushCursor.style.display = 'none';
             if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
         }
     });
     window.addEventListener('pointerleave', (e) => {
         this.activePointers.delete(e.pointerId);
-        if (e.pointerType !== 'mouse') {
+        if (e.pointerType === 'touch') {
             if (this.brushCursor) this.brushCursor.style.display = 'none';
             if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
         }
@@ -1853,7 +1869,7 @@ export class Engine {
 
     this._updateCursor();
 
-    if (e && e.pointerType === 'mouse' && this.lastPenTouchTime && (performance.now() - this.lastPenTouchTime < 1000)) {
+    if (e && e.pointerType === 'mouse' && this.lastPenTouchTime && (performance.now() - this.lastPenTouchTime < 100)) {
         return;
     }
 
@@ -1865,8 +1881,8 @@ export class Engine {
     const mouseX = (e && e.clientX !== undefined) ? e.clientX : this.lastMousePos.x;
     const mouseY = (e && e.clientY !== undefined) ? e.clientY : this.lastMousePos.y;
 
-    // Clear cursor on touch if no pointers are touching
-    if (this.activePointers.size === 0 && e && (e.pointerType === 'touch' || e.pointerType === 'pen')) {
+    // Clear cursor on pure touch if no pointers are touching (touch devices do not have hovering cursors)
+    if (this.activePointers.size === 0 && e && e.pointerType === 'touch') {
         this.brushCursor.style.display = 'none';
         if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
         return;

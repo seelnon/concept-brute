@@ -21,6 +21,7 @@ import { setupIgnoreSystem } from './ignore.js';
 import { TimelapseRecorder } from './recording.js';
 import { initFluidPaint, activateFluidPaint, deactivateFluidPaint } from './tools/fluidPaint.js';
 import { initAirPaint, activateAirPaint, deactivateAirPaint } from './tools/airPaint.js';
+import { ensureSmudgeBuffers } from './tools/smudge.js';
 import { wasmCore } from './wasm/wasmBridge.js';
 
 class App {
@@ -132,7 +133,7 @@ class App {
     this.brushSettings[TOOLS.AIR].opacity = 0.40;
     this.brushSettings[TOOLS.AIR].flow = 0.50;
 
-    this.tipManager = new TipManager(document.getElementById('panel-brush-tips'), (tip, height, oiliness, airbrush) => {
+    this.tipManager = new TipManager(document.getElementById('panel-brush-tips'), (tip, height, oiliness, airbrush, skipStorage = false) => {
         const tool = this.activeTool;
         if (!tool) return;
         
@@ -198,7 +199,9 @@ class App {
         }
 
         this._updateBrushSettingsUI(tool);
-        this._saveBrushSettings();
+        if (!skipStorage) {
+            this._saveBrushSettings();
+        }
     }, this.storage);
 
     this.hsv = { h: 0, s: 70, v: 70 };
@@ -1666,8 +1669,8 @@ class App {
     this.prevTool = this.activeTool;
     this.activeTool = tool;
     
-    // Deselect reference image when switching to anything that isn't generic move
-    if (tool !== TOOLS.REF_MOVE) {
+    // Deselect reference image when switching to anything that isn't generic move, only if one was selected
+    if (tool !== TOOLS.REF_MOVE && this.engine.selectedRefIndex !== -1) {
         this.engine.selectedRefIndex = -1;
         this.engine.refresh();
     }
@@ -1701,22 +1704,19 @@ class App {
     const settings = this.brushSettings[tool];
     this.engine.brush.type = tool;
 
-    // Instant tool pre-warming (zero-lag initialization)
+    // Instant tool pre-warming (zero-lag initialization, keep tools hot)
     if (tool === TOOLS.LIQUIFY) {
         wasmCore.liquifyPrewarm();
     } else if (tool === TOOLS.SMUDGE || tool === TOOLS.FLUID) {
-        if (!this.engine.segmentCanvas) {
-            this.engine.segmentCanvas = document.createElement('canvas');
-            this.engine.segmentCtx = this.engine.segmentCanvas.getContext('2d', { willReadFrequently: true });
-        }
+        ensureSmudgeBuffers(this.engine);
     }
 
     // Restore this tool's specific active tip in the panel
     if (this.tipManager && (tool === TOOLS.BRUSH || tool === TOOLS.WIREFRAME || tool === TOOLS.ERASER || tool === TOOLS.SMUDGE || tool === TOOLS.FLUID)) {
         this.tipManager.activeBankIndex = settings.activeBankIndex !== undefined ? settings.activeBankIndex : 0;
         this.tipManager.activeGeneratedIndex = settings.activeGeneratedIndex !== undefined ? settings.activeGeneratedIndex : -1;
-        this.tipManager._renderPalette();
-        this.tipManager.refreshTip();
+        this.tipManager._renderPalette(false);
+        this.tipManager.refreshTip(true);
     } else {
         this.engine.brush.size = settings.size;
         this.engine.brush.opacity = settings.opacity;

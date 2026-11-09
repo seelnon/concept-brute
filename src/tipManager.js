@@ -393,62 +393,80 @@ export class TipManager {
     this._saveToStorage();
   }
 
-  _renderPalette() {
+  _renderPalette(forceRedraw = false) {
     const mainGrid = document.getElementById('tip-main-slots');
-    mainGrid.innerHTML = '';
-    this.tips.forEach((tip, i) => {
-      const slot = document.createElement('div');
-      slot.className = 'tip-swatch';
-      if (this.activeBankIndex === i) slot.classList.add('active-swatch');
-      
-      const thumb = document.createElement('canvas');
-      thumb.width = 64; thumb.height = 64;
-      thumb.getContext('2d').drawImage(tip.canvas, 0, 0, 64, 64);
-      slot.appendChild(thumb);
-      
-      slot.onclick = () => {
-        this.activeBankIndex = i;
-        this.activeGeneratedIndex = -1;
-        this.selectedTipCanvas = tip.canvas;
-        this.editorCtx.save();
-        this.editorCtx.globalCompositeOperation = 'source-over';
-        this.editorCtx.clearRect(0,0,128,128);
-        this.editorCtx.drawImage(tip.canvas, 0, 0);
-        this.editorCtx.restore();
-        this._renderPalette();
-        this._updateActiveTip();
-        this._saveToStorage();
-      };
-      mainGrid.appendChild(slot);
-    });
-
-    const genGrid = document.getElementById('tip-generated-slots');
-    genGrid.innerHTML = '';
-    this.generatedTips.forEach((tip, i) => {
-        const slot = document.createElement('div');
-        slot.className = 'tip-swatch';
-        if (this.activeGeneratedIndex === i) slot.classList.add('active-swatch');
-        const thumb = document.createElement('canvas');
-        thumb.width = 64; thumb.height = 64;
-        thumb.getContext('2d').drawImage(tip.canvas, 0, 0, 64, 64);
-        slot.appendChild(thumb);
-        
-        slot.onclick = () => {
-            this.activeGeneratedIndex = i;
-            this.activeBankIndex = -1;
+    if (mainGrid) {
+      const existingMain = mainGrid.querySelectorAll('.tip-swatch');
+      if (!forceRedraw && existingMain.length === this.tips.length) {
+        existingMain.forEach((slot, i) => {
+          slot.classList.toggle('active-swatch', this.activeBankIndex === i);
+        });
+      } else {
+        mainGrid.innerHTML = '';
+        this.tips.forEach((tip, i) => {
+          const slot = document.createElement('div');
+          slot.className = 'tip-swatch';
+          if (this.activeBankIndex === i) slot.classList.add('active-swatch');
+          
+          const thumb = document.createElement('canvas');
+          thumb.width = 64; thumb.height = 64;
+          thumb.getContext('2d').drawImage(tip.canvas, 0, 0, 64, 64);
+          slot.appendChild(thumb);
+          
+          slot.onclick = () => {
+            this.activeBankIndex = i;
+            this.activeGeneratedIndex = -1;
             this.selectedTipCanvas = tip.canvas;
             this.editorCtx.save();
             this.editorCtx.globalCompositeOperation = 'source-over';
             this.editorCtx.clearRect(0,0,128,128);
             this.editorCtx.drawImage(tip.canvas, 0, 0);
             this.editorCtx.restore();
-            
-            this._renderPalette();
+            this._renderPalette(false);
             this._updateActiveTip();
             this._saveToStorage();
-        };
-        genGrid.appendChild(slot);
-    });
+          };
+          mainGrid.appendChild(slot);
+        });
+      }
+    }
+
+    const genGrid = document.getElementById('tip-generated-slots');
+    if (genGrid) {
+      const existingGen = genGrid.querySelectorAll('.tip-swatch');
+      if (!forceRedraw && existingGen.length === this.generatedTips.length) {
+        existingGen.forEach((slot, i) => {
+          slot.classList.toggle('active-swatch', this.activeGeneratedIndex === i);
+        });
+      } else {
+        genGrid.innerHTML = '';
+        this.generatedTips.forEach((tip, i) => {
+            const slot = document.createElement('div');
+            slot.className = 'tip-swatch';
+            if (this.activeGeneratedIndex === i) slot.classList.add('active-swatch');
+            const thumb = document.createElement('canvas');
+            thumb.width = 64; thumb.height = 64;
+            thumb.getContext('2d').drawImage(tip.canvas, 0, 0, 64, 64);
+            slot.appendChild(thumb);
+            
+            slot.onclick = () => {
+                this.activeGeneratedIndex = i;
+                this.activeBankIndex = -1;
+                this.selectedTipCanvas = tip.canvas;
+                this.editorCtx.save();
+                this.editorCtx.globalCompositeOperation = 'source-over';
+                this.editorCtx.clearRect(0,0,128,128);
+                this.editorCtx.drawImage(tip.canvas, 0, 0);
+                this.editorCtx.restore();
+                
+                this._renderPalette(false);
+                this._updateActiveTip();
+                this._saveToStorage();
+            };
+            genGrid.appendChild(slot);
+        });
+      }
+    }
   }
 
   updateActiveTipSettings(height, oiliness, airbrush) {
@@ -488,7 +506,7 @@ export class TipManager {
     this.refreshTip();
   }
 
-  refreshTip() {
+  refreshTip(skipStorage = false) {
     let tip = null;
     if (this.activeBankIndex >= 0) {
         tip = this.tips[this.activeBankIndex];
@@ -510,7 +528,7 @@ export class TipManager {
     }
 
     if (this.onTipChange) {
-      this.onTipChange(tip.canvas, tip.paintHeight, tip.oiliness, tip.airbrush);
+      this.onTipChange(tip.canvas, tip.paintHeight, tip.oiliness, tip.airbrush, skipStorage);
     }
   }
 
