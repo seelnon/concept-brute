@@ -1673,6 +1673,18 @@ class App {
     this.activeTool = tool;
     if (this.perfMonitor) this.perfMonitor.markToolChange(tool, this.prevTool);
     
+    // Reset any stuck stroke or pointing states from previous tool
+    if (this.engine) {
+        if (this.engine.isDrawing) {
+            try { this.engine._endStroke(); } catch (e) { this.engine.isDrawing = false; }
+        }
+        this.engine.activePointers.clear();
+        this.engine.isMouseDown = false;
+        this.engine.isPanning = false;
+        this.engine.isGesture = false;
+        this.engine._updateCursor();
+    }
+
     // Deselect reference image when switching to anything that isn't generic move, only if one was selected
     if (tool !== TOOLS.REF_MOVE && this.engine.selectedRefIndex !== -1) {
         this.engine.selectedRefIndex = -1;
