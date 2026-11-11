@@ -368,6 +368,34 @@ export class GPURenderer {
     this.requestRender();
   }
 
+  updateChunkTextureSubRegion(chunk, layer, x, y, width, height, dataOrImageData) {
+    if (!this.gl || !chunk || !this.supported || width <= 0 || height <= 0) return false;
+    const gl = this.gl;
+    if (!chunk.gpuTextures) {
+      chunk.gpuTextures = new Array(LAYERS_COUNT).fill(null);
+    }
+    let tex = chunk.gpuTextures[layer];
+    if (!tex) {
+      tex = this._createOrUpdateTexture(null, chunk.canvases[layer], true);
+      chunk.gpuTextures[layer] = tex;
+      if (chunk.gpuDirty) chunk.gpuDirty[layer] = false;
+      return true;
+    }
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+    if (dataOrImageData instanceof ImageData) {
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, width, height, gl.RGBA, gl.UNSIGNED_BYTE, dataOrImageData.data);
+    } else if (dataOrImageData instanceof Uint8Array || dataOrImageData instanceof Uint8ClampedArray) {
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, width, height, gl.RGBA, gl.UNSIGNED_BYTE, dataOrImageData);
+    } else {
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, gl.RGBA, gl.UNSIGNED_BYTE, dataOrImageData);
+    }
+    if (chunk.gpuDirty) {
+      chunk.gpuDirty[layer] = false;
+    }
+    return true;
+  }
+
   markChunkStrokeDirty(chunk, active = true) {
     if (!chunk) return;
     chunk.gpuStrokeDirty = true;

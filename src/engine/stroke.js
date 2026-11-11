@@ -544,26 +544,12 @@ export function _moveStroke(e) {
       }
   } else if (this.brush.type === TOOLS.LIQUIFY) {
       const lastP = this.strokePoints[this.strokePoints.length - 1];
-      const dist = Math.sqrt((worldTo.x - lastP.x)**2 + (worldTo.y - lastP.y)**2);
+      const dist = Math.hypot(worldTo.x - lastP.x, worldTo.y - lastP.y);
       
-      const minWarpDist = Math.max(1.0, Math.min(20.0, dynamicSize * 0.02));
+      // Immediate response on first move with zero deadzone
+      const minWarpDist = 0.2;
       if (dist >= minWarpDist) {
-          const maxStepDist = Math.max(16.0, dynamicSize * 0.25);
-          if (dist > maxStepDist) {
-              const steps = Math.min(4, Math.ceil(dist / maxStepDist));
-              let prev = lastP;
-              for (let s = 1; s <= steps; s++) {
-                  const t = s / steps;
-                  const subTo = {
-                      x: lastP.x + (worldTo.x - lastP.x) * t,
-                      y: lastP.y + (worldTo.y - lastP.y) * t
-                  };
-                  paintLiquifyStroke(this, prev, subTo, dynamicSize, pressure);
-                  prev = subTo;
-              }
-          } else {
-              paintLiquifyStroke(this, lastP, worldTo, dynamicSize, pressure);
-          }
+          paintLiquifyStroke(this, lastP, worldTo, dynamicSize, pressure);
           this.strokePoints.push(worldPos);
       }
   } else {

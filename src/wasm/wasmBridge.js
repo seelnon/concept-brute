@@ -471,6 +471,17 @@ class WasmCanvasCore {
     return res === 1;
   }
 
+  liquifySessionGetGridPtr() {
+    if (!this.ready) return 0;
+    const ex = this.exports;
+    const srcPtr = ex.liquify_session_get_src_ptr ? (ex.liquify_session_get_src_ptr() >>> 0) : 0;
+    const sessW = ex.liquify_session_get_w ? ex.liquify_session_get_w() : 2048;
+    const sessH = ex.liquify_session_get_h ? ex.liquify_session_get_h() : 2048;
+    const imgBytes = sessW * sessH * 4;
+    const allocImg = imgBytes < 16 * 1024 * 1024 ? 16 * 1024 * 1024 : imgBytes;
+    return srcPtr + allocImg;
+  }
+
   liquifySessionStampSrc(chunkU8, chunkW, chunkH, dstX, dstY) {
     if (!this.ready || !chunkU8 || chunkW <= 0 || chunkH <= 0) return false;
     const ex = this.exports;
@@ -489,14 +500,16 @@ class WasmCanvasCore {
       const copyW = x1 - x0;
       const copyBytes = copyW * 4;
       const buf = this.getMemBuffer();
+      const memU8 = new Uint8Array(buf);
 
       for (let y = y0; y < y1; y++) {
         const cy = y - dstY;
         const cx = x0 - dstX;
         const srcOffset = (cy * chunkW + cx) * 4;
         const dstOffset = srcPtr + ((y * sessW + x0) * 4);
-        new Uint8Array(buf, dstOffset, copyBytes).set(
-          new Uint8Array(chunkU8.buffer, chunkU8.byteOffset + srcOffset, copyBytes)
+        memU8.set(
+          chunkU8.subarray(srcOffset, srcOffset + copyBytes),
+          dstOffset
         );
       }
       return true;

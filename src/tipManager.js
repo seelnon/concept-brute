@@ -217,7 +217,7 @@ export class TipManager {
                         clearTimeout(timer);
                         reject(new Error('Error loading default brush tip'));
                     };
-                    img.src = './src/_main_brushtip.png'; 
+                    img.src = './_main_brushtip.png'; 
                 });
             } catch (e) {
                 canvas = this._createShape(type);

@@ -1274,11 +1274,6 @@ class App {
         if (falloffCtrl) {
             falloffCtrl.style.display = (tool === TOOLS.LIQUIFY) ? 'block' : 'none';
         }
-        
-        const qCtrl = document.getElementById('control-liquify-quality');
-        if (qCtrl) {
-            qCtrl.style.display = (tool === TOOLS.LIQUIFY) ? 'block' : 'none';
-        }
 
         const fluidityCtrl = document.getElementById('control-fluidity');
         const bristlesCtrl = document.getElementById('control-bristles');
@@ -1328,16 +1323,6 @@ class App {
             if (fValDisplay) fValDisplay.innerText = `${Math.round(fValue * 100)}%`;
         }
 
-        const qualityEl = document.getElementById('brush-liquify-quality');
-        if (qualityEl) {
-            const qValue = tipSettings.liquifyQuality ?? 2;
-            qualityEl.value = qValue;
-            const qValDisplay = document.getElementById('liquify-quality-val');
-            if (qValDisplay) {
-                const labels = { 1: 'FAST', 2: 'RESOLVE', 3: 'ULTRA' };
-                qValDisplay.innerText = labels[qValue] || 'RESOLVE';
-            }
-        }
 
         const heightEl = document.getElementById('brush-height');
         if (heightEl) {
