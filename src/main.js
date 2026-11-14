@@ -213,10 +213,15 @@ class App {
     this.autosaveEnabled = true;
     
     this.projects = [];
+    this._projectSlotStates = new Map();
     this.currentProjectId = 'default';
     this._switchProjectGeneration = 0;
     this._isSwitchingProject = false;
+    this._activeSwitchTargetId = null;
+    this._slotReadyTimer = null;
+    this._projectLoadedCompletely = true;
     this._queuedSwitchId = null;
+    this._queuedSwitchOptions = null;
     this._isSavingProject = false;
     this._activeSavePromise = null;
 
@@ -301,8 +306,8 @@ class App {
     await renderProjectList(this);
   }
 
-  async switchProject(id) {
-    await switchProject(this, id);
+  async switchProject(id, options = {}) {
+    await switchProject(this, id, options);
   }
 
   async deleteProject(id) {
@@ -488,7 +493,7 @@ class App {
     }
   }
 
-  async loadProjectSettings(targetProjectId = null) {
+  async loadProjectSettings(targetProjectId = null, options = {}) {
     const pid = targetProjectId || this.currentProjectId;
     let settings = {};
     try {
@@ -508,7 +513,9 @@ class App {
             'lastColor'
         ];
         
-        settings = await this.storage.loadSettingsBatch(keys, pid);
+        if (!options.isNewProject) {
+            settings = await this.storage.loadSettingsBatch(keys, pid);
+        }
 
         // Load autosave settings
         const savedAutosaveSlider = settings['autosaveDelaySlider'];
@@ -627,7 +634,6 @@ class App {
         
         // Refresh grid textures & application styles based on settings loaded
         this.engine.setupBoard();
-        this.engine.refreshGrid();
 
         // BRUSH SETTINGS
         let savedBrushes = null;

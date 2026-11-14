@@ -346,27 +346,157 @@ export async function initProjectSystem(app) {
     }
 }
 
+function _updateTransitionBanner(state) {
+    const banner = document.getElementById('project-transition-banner');
+    if (!banner) return;
+    if (!state) {
+        banner.classList.add('hidden');
+        return;
+    }
+    banner.classList.remove('hidden');
+    const labelEl = document.getElementById('project-transition-label');
+    const pctEl = document.getElementById('project-transition-pct');
+    const fillEl = document.getElementById('project-transition-fill');
+    const pct = Math.max(0, Math.min(100, Math.round(state.progress || 0)));
+    if (labelEl) labelEl.innerText = state.badge || 'LOADING...';
+    if (pctEl) pctEl.innerText = `${pct}%`;
+    if (fillEl) {
+        fillEl.style.width = `${pct}%`;
+        fillEl.style.background = state.mode === 'ready' ? '#00ff66' : '#ffffff';
+    }
+}
+
+function _applySlotOverlayToElement(itemEl, state) {
+    if (!itemEl) return;
+    const thumbWrap = itemEl.querySelector('.project-thumb-wrap');
+    if (!state) {
+        itemEl.classList.remove('switching', 'creating');
+        if (thumbWrap) {
+            const existing = thumbWrap.querySelector('.project-slot-overlay');
+            if (existing) existing.remove();
+        }
+        return;
+    }
+
+    itemEl.classList.add('active');
+    itemEl.classList.toggle('creating', state.mode === 'creating');
+    itemEl.classList.toggle('switching', state.mode !== 'creating');
+
+    if (!thumbWrap) return;
+    let overlay = thumbWrap.querySelector('.project-slot-overlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.className = 'project-slot-overlay';
+        overlay.innerHTML = `
+            <div class="project-slot-badge"></div>
+            <div class="project-slot-sub"></div>
+            <div class="project-slot-progress"><div class="project-slot-progress-bar"></div></div>
+        `;
+        thumbWrap.appendChild(overlay);
+    }
+
+    overlay.classList.toggle('is-ready', state.mode === 'ready');
+    const badgeEl = overlay.querySelector('.project-slot-badge');
+    const subEl = overlay.querySelector('.project-slot-sub');
+    const barEl = overlay.querySelector('.project-slot-progress-bar');
+
+    if (badgeEl) badgeEl.innerText = state.badge || 'LOADING...';
+    if (subEl) {
+        subEl.innerText = state.sub || '';
+        subEl.style.display = state.sub ? 'block' : 'none';
+    }
+    if (barEl) {
+        const pct = Math.max(0, Math.min(100, Math.round(state.progress || 0)));
+        barEl.style.width = `${pct}%`;
+    }
+}
+
+export function setProjectSlotVisual(app, id, state) {
+    if (!app._projectSlotStates) {
+        app._projectSlotStates = new Map();
+    }
+
+    if (!state) {
+        if (id) {
+            app._projectSlotStates.delete(id);
+        } else {
+            app._projectSlotStates.clear();
+        }
+    } else {
+        if (!id) return;
+        // Cancel any previous READY auto-clear timer whenever a new transition state starts
+        if (state.mode !== 'ready' && app._slotReadyTimer) {
+            clearTimeout(app._slotReadyTimer);
+            app._slotReadyTimer = null;
+        }
+        // Single-active-slot invariant: only one project slot can own transition/ready UI at a time
+        app._projectSlotStates.clear();
+        app._projectSlotStates.set(id, state);
+    }
+
+    let bannerState = null;
+    if (app._projectSlotStates.size > 0) {
+        for (const v of app._projectSlotStates.values()) {
+            bannerState = v;
+        }
+    }
+    _updateTransitionBanner(bannerState);
+
+    const container = document.getElementById('project-list');
+    if (!container) return;
+
+    let itemEl = id ? container.querySelector(`.project-item[data-proj-id="${id}"]`) : null;
+    if (!itemEl && state) {
+        renderProjectList(app);
+        itemEl = container.querySelector(`.project-item[data-proj-id="${id}"]`);
+    }
+
+    const activeTargetId = app._projectSlotStates.size > 0
+        ? Array.from(app._projectSlotStates.keys())[0]
+        : app.currentProjectId;
+
+    container.querySelectorAll('.project-item').forEach(el => {
+        const elId = el.dataset.projId;
+        const slotState = app._projectSlotStates.get(elId) || null;
+        _applySlotOverlayToElement(el, slotState);
+        el.classList.toggle('active', elId === activeTargetId);
+    });
+
+    if (itemEl && state && state.scrollIntoView) {
+        try {
+            itemEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        } catch (e) {
+            itemEl.scrollIntoView({ block: 'nearest' });
+        }
+    }
+}
+
 export async function renderProjectList(app) {
     const container = document.getElementById('project-list');
     if (!container) return;
+    const prevScrollTop = container.scrollTop;
     container.innerHTML = '';
+
+    const activeTargetId = (app._projectSlotStates && app._projectSlotStates.size > 0)
+        ? Array.from(app._projectSlotStates.keys())[0]
+        : app.currentProjectId;
+
+    let bannerState = null;
+    if (app._projectSlotStates && app._projectSlotStates.size > 0) {
+        for (const v of app._projectSlotStates.values()) {
+            bannerState = v;
+        }
+    }
+    _updateTransitionBanner(bannerState);
 
     app.projects.forEach(proj => {
         const item = document.createElement('div');
         item.className = 'project-item';
         item.dataset.projId = proj.id;
-        if (proj.id === app.currentProjectId) item.classList.add('active');
+        if (proj.id === activeTargetId) item.classList.add('active');
 
         const thumbContainer = document.createElement('div');
-        thumbContainer.style.width = '100%';
-        thumbContainer.style.aspectRatio = '1';
-        thumbContainer.style.background = '#eee';
-        thumbContainer.style.border = '1px solid #000';
-        thumbContainer.style.marginBottom = '4px';
-        thumbContainer.style.overflow = 'hidden';
-        thumbContainer.style.display = 'flex';
-        thumbContainer.style.alignItems = 'center';
-        thumbContainer.style.justifyContent = 'center';
+        thumbContainer.className = 'project-thumb-wrap';
 
         if (proj.thumbnail) {
             const thumb = document.createElement('img');
@@ -375,6 +505,8 @@ export async function renderProjectList(app) {
             thumb.style.width = '100%';
             thumb.style.height = '100%';
             thumb.style.objectFit = 'cover';
+            thumb.style.marginBottom = '0';
+            thumb.style.border = 'none';
             thumbContainer.appendChild(thumb);
         } else {
             const placeholder = document.createElement('div');
@@ -398,6 +530,7 @@ export async function renderProjectList(app) {
             delBtn.title = 'DELETE PROJECT';
             delBtn.onclick = (e) => {
                 e.stopPropagation();
+                if (item.classList.contains('switching') || item.classList.contains('creating')) return;
                 if (delBtn.innerText === 'X') {
                     delBtn.innerText = '?';
                     delBtn.style.background = '#000';
@@ -420,11 +553,30 @@ export async function renderProjectList(app) {
             item.appendChild(delBtn);
         }
 
-        // Instant visual tactile touch/click feedback on pointerdown
+        // Instant visual tactile touch/click feedback on pointerdown without shifting layout
         item.addEventListener('pointerdown', (e) => {
             if (e.target.closest('.btn-delete-proj')) return;
-            if (proj.id !== app.currentProjectId) {
-                item.classList.add('active', 'switching');
+            if (e.button !== undefined && e.button !== 0 && e.pointerType === 'mouse') return;
+            if (proj.id !== app.currentProjectId && !app._isSwitchingProject) {
+                setProjectSlotVisual(app, proj.id, {
+                    mode: 'loading',
+                    badge: 'LOADING...',
+                    sub: proj.settings?.isStatic ? `${proj.settings.width}x${proj.settings.height}` : 'INFINITE',
+                    progress: 10
+                });
+
+                const cleanupIfAborted = () => {
+                    setTimeout(() => {
+                        if (!app._isSwitchingProject && app.currentProjectId !== proj.id) {
+                            const activeState = app._projectSlotStates?.get(proj.id);
+                            if (activeState && activeState.progress === 10 && activeState.badge === 'LOADING...') {
+                                setProjectSlotVisual(app, null, null);
+                            }
+                        }
+                    }, 120);
+                };
+                window.addEventListener('pointerup', cleanupIfAborted, { once: true });
+                window.addEventListener('pointercancel', cleanupIfAborted, { once: true });
             }
         });
 
@@ -432,45 +584,68 @@ export async function renderProjectList(app) {
             e.stopPropagation();
             switchProject(app, proj.id);
         };
+
+        const activeState = app._projectSlotStates ? app._projectSlotStates.get(proj.id) : null;
+        if (activeState) {
+            _applySlotOverlayToElement(item, activeState);
+        }
+
         container.appendChild(item);
     });
+    container.scrollTop = prevScrollTop;
 }
 
-export async function switchProject(app, id) {
-    if (!id || (id === app.currentProjectId && !app._isSwitchingProject)) return;
+export async function switchProject(app, id, options = {}) {
+    const isNewProject = !!options.isNewProject;
+    if (!id) return;
+    if (!app._isSwitchingProject && id === app.currentProjectId && !isNewProject) return;
 
-    // STEP 1: INSTANT VISUAL FEEDBACK (0 ms)
-    // Update the project-list DOM immediately so the clicked card displays the active & switching state!
-    const container = document.getElementById('project-list');
-    if (container) {
-        const items = container.querySelectorAll('.project-item');
-        items.forEach(el => {
-            if (el.dataset.projId === id) {
-                el.classList.add('active', 'switching');
-            } else {
-                el.classList.remove('active', 'switching');
-            }
-        });
+    // If user clicks the exact project currently mid-switch and nothing else is queued, avoid restarting it
+    if (app._isSwitchingProject && id === app._activeSwitchTargetId && !isNewProject && !app._queuedSwitchId) {
+        return;
     }
+
+    if (app._slotReadyTimer) {
+        clearTimeout(app._slotReadyTimer);
+        app._slotReadyTimer = null;
+    }
+
+    // Increment generation synchronously BEFORE any async yield or queue handoff
+    const switchToken = ++app._switchProjectGeneration;
 
     const targetProj = app.projects.find(p => p.id === id);
     const targetName = targetProj ? (targetProj.name || id) : id;
+    const targetSub = targetProj?.settings?.isStatic
+        ? `${targetProj.settings.width || 2400}x${targetProj.settings.height || 3600}`
+        : 'INFINITE';
 
-    app._status(`SAVING PREVIOUS PROJECT...`);
-    // Yield to the browser so the UI paints the selected state and status bar immediately!
-    await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+    // STEP 1: INSTANT VISUAL FEEDBACK (0 ms)
+    // Highlight the new target and synchronously clear any stale overlay from previous projects
+    setProjectSlotVisual(app, id, {
+        mode: isNewProject ? 'creating' : 'loading',
+        badge: isNewProject ? 'CREATING...' : 'LOADING...',
+        sub: targetSub,
+        progress: 15,
+        scrollIntoView: isNewProject
+    });
+    app._status(isNewProject ? `CREATING ${targetName.toUpperCase()}...` : `LOADING ${targetName.toUpperCase()}...`);
 
-    // Track generation to prevent race conditions or superseded loads
-    const switchToken = ++app._switchProjectGeneration;
-
-    // If another switch is actively running, queue this target and return
+    // If another switch is actively running, queue this target (latest click wins) and return immediately
     if (app._isSwitchingProject) {
         app._queuedSwitchId = id;
+        app._queuedSwitchOptions = options;
         return;
     }
+
     app._isSwitchingProject = true;
+    app._activeSwitchTargetId = id;
 
     try {
+        // Yield a frame so the browser paints the active slot & progress UI immediately
+        await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+
+        if (switchToken !== app._switchProjectGeneration || app._queuedSwitchId) return;
+
         const outgoingId = app.currentProjectId;
 
         if (app.engine && app.engine.isDrawing) {
@@ -485,112 +660,204 @@ export async function switchProject(app, id) {
             try { await app._activeSavePromise; } catch (e) {}
         }
 
-        // Save outgoing project if valid
-        if (outgoingId) {
-            const isDirty = (app.engine && app.engine.dirtyChunks && app.engine.dirtyChunks.size > 0) || (app.engine && app.engine.refsDirty);
-            const currentProj = app.projects ? app.projects.find(p => p.id === outgoingId) : null;
+        let shouldSaveProjectsList = !!options.projectsListDirty;
 
-            // Generate thumbnail only if canvas was actually modified or thumbnail is missing
-            if (isDirty || !currentProj || !currentProj.thumbnail) {
-                const thumbnail = await generateThumbnail(app);
-                if (currentProj && thumbnail) currentProj.thumbnail = thumbnail;
-                await app.storage.saveGlobalSetting('projects_list', app.projects);
+        // Save outgoing project ONLY if it actually has unsaved changes or completed loading without a thumbnail
+        if (outgoingId && outgoingId !== id) {
+            const hasDirtyChunks = app.engine && app.engine.dirtyChunks && app.engine.dirtyChunks.size > 0;
+            const hasDirtyRefs = !!(app.engine && app.engine.refsDirty);
+            const isDirty = hasDirtyChunks || hasDirtyRefs;
+            const currentProj = app.projects ? app.projects.find(p => p.id === outgoingId) : null;
+            const outgoingReady = app._projectLoadedCompletely !== false;
+            const needsThumb = outgoingReady && (!currentProj || !currentProj.thumbnail);
+
+            if (isDirty || needsThumb) {
+                if (switchToken !== app._switchProjectGeneration || app._queuedSwitchId) {
+                    // Still save dirty work before yielding if chunks/refs are dirty, but don't overwrite the newer card's badge
+                } else {
+                    setProjectSlotVisual(app, id, {
+                        mode: isNewProject ? 'creating' : 'loading',
+                        badge: 'SAVING PREV...',
+                        sub: targetSub,
+                        progress: 35
+                    });
+                    app._status(`SAVING PREVIOUS PROJECT...`);
+                }
+
+                if (outgoingReady && (needsThumb || isDirty)) {
+                    const thumbnail = await generateThumbnail(app, { skipGpuPromote: true });
+                    if (currentProj && thumbnail) {
+                        currentProj.thumbnail = thumbnail;
+                        shouldSaveProjectsList = true;
+                    }
+                }
+
+                if (isDirty) {
+                    // Save ONLY dirty chunks & refs (never force re-encoding clean chunks!)
+                    await saveProject(app, false, outgoingId);
+                }
             }
 
-            // Save outgoing project with explicit outgoing ID so nothing can leak
-            await saveProject(app, true, outgoingId);
-
-            // Save previous viewport before switching ID
-            if (app.engine && app.engine.saveViewport) {
+            if (outgoingReady && app.engine && app.engine.saveViewport) {
                 app.engine.saveViewport(outgoingId);
             }
         }
 
         // Check if user clicked a different project while we were saving
-        if (app._queuedSwitchId) {
-            const nextId = app._queuedSwitchId;
-            app._queuedSwitchId = null;
-            app._isSwitchingProject = false;
-            return switchProject(app, nextId);
-        }
+        if (switchToken !== app._switchProjectGeneration || app._queuedSwitchId) return;
 
-        // STEP 2: SHOWCASE LOADING NEW PROJECT
-        app._status(`LOADING ${targetName.toUpperCase()}...`);
-        await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+        // STEP 2: PREPARE & LOAD TARGET PROJECT
+        setProjectSlotVisual(app, id, {
+            mode: isNewProject ? 'creating' : 'loading',
+            badge: isNewProject ? 'INIT CANVAS...' : 'LOADING...',
+            sub: targetSub,
+            progress: 65
+        });
+        app._status(isNewProject ? `INIT ${targetName.toUpperCase()}...` : `LOADING ${targetName.toUpperCase()}...`);
 
         // Safely set the new project ID across all subsystems
         app.currentProjectId = id;
         app.storage.setProjectId(id);
         if (app.engine) app.engine.currentProjectId = id;
-        await app.storage.saveGlobalSetting('current_project_id', id);
 
-        // Load non-canvas project-specific settings (background, palette, grid)
-        await app.loadProjectSettings(id);
+        // Persist global metadata concurrently
+        const metaSaves = [app.storage.saveGlobalSetting('current_project_id', id)];
+        if (shouldSaveProjectsList) {
+            metaSaves.push(app.storage.saveGlobalSetting('projects_list', app.projects));
+        }
+        const metaSavePromise = Promise.all(metaSaves).then(() => {
+            if (shouldSaveProjectsList && app._projectChannel) {
+                try {
+                    app._projectChannel.postMessage({
+                        type: 'PROJECTS_UPDATED',
+                        projects: app.projects,
+                        currentProjectId: id
+                    });
+                } catch (e) {}
+            }
+        }).catch(() => {});
 
-        // Load project settings
+        // Load project settings (fast-path skips empty IDB read for brand-new projects)
+        await app.loadProjectSettings(id, { isNewProject });
+
+        if (switchToken !== app._switchProjectGeneration || app._queuedSwitchId) return;
+
+        // Load project settings into engine
         const project = app.projects.find(p => p.id === id);
         const settings = project ? project.settings : {};
 
-        // Update Engine with new settings
         app.engine.chunkSize = settings.chunkSize || 1024;
         app.engine.saveQuality = settings.quality || 0.92;
         app.engine.isStatic = settings.isStatic || false;
         app.engine.staticWidth = settings.width || 2400;
         app.engine.staticHeight = settings.height || 3600;
         app.engine.dpiScale = 1.0;
+
+        // Mark partial until loadProject / new init finishes so an aborted load won't overwrite thumbnails
+        app._projectLoadedCompletely = false;
+
+        // Wipe engine state cleanly before configuring new board/viewport
+        app.engine.resetEngineState();
+        app.engine._updateSelectionPreview();
+        app.engine.loadViewport(id);
         if (app.engine.setupBoard) {
             app.engine.setupBoard();
         }
         syncStaticSettingsUI(app);
 
-        // Wipe engine state completely
-        app.engine.resetEngineState();
-
-        app.engine._updateSelectionPreview();
-        app.engine.loadViewport(id);
-
         // Sync UI settings
         const spacingEl = document.getElementById('settings-brush-spacing');
         if (spacingEl) spacingEl.value = app.engine.brush.spacing;
 
-        // Load incoming project data
-        await loadProject(app, id, switchToken);
-
-        if (switchToken !== app._switchProjectGeneration) return;
-
-        // Ensure viewport chunk and stroke buffers are pre-warmed before setting status to READY
-        if (app.engine) {
-            try {
-                const initChunk = app.engine._getChunk(0, 0);
-                if (initChunk) {
-                    app.engine._ensureStrokeCanvas(initChunk);
-                }
-            } catch (err) {
-                console.warn('[SWITCH] Chunk pre-warming notice:', err);
+        if (isNewProject) {
+            // Fast-path: brand-new project has 0 chunks, 0 refs, 0 history, 0 timelapse frames!
+            if (app.recorder && typeof app.recorder.resetSession === 'function') {
+                app.recorder.resetSession();
             }
+            if (app.engine) {
+                try {
+                    const initChunk = app.engine._getChunk(0, 0);
+                    if (initChunk) {
+                        app.engine._ensureStrokeCanvas(initChunk);
+                    }
+                    app.engine.refresh();
+                } catch (err) {
+                    console.warn('[NEW PROJECT] Chunk pre-warming notice:', err);
+                }
+            }
+            await metaSavePromise;
+        } else {
+            // Load incoming project data with live progress updates on the slot card
+            await loadProject(app, id, switchToken, (pct) => {
+                if (switchToken !== app._switchProjectGeneration || app._queuedSwitchId) return;
+                setProjectSlotVisual(app, id, {
+                    mode: 'loading',
+                    badge: `LOADING ${pct}%`,
+                    sub: targetSub,
+                    progress: 65 + Math.round(pct * 0.30)
+                });
+            });
+
+            if (switchToken !== app._switchProjectGeneration || app._queuedSwitchId) return;
+
+            if (app.engine) {
+                try {
+                    const initChunk = app.engine._getChunk(0, 0);
+                    if (initChunk) {
+                        app.engine._ensureStrokeCanvas(initChunk);
+                    }
+                } catch (err) {
+                    console.warn('[SWITCH] Chunk pre-warming notice:', err);
+                }
+            }
+
+            if (app.recorder && typeof app.recorder.onProjectSwitched === 'function') {
+                await app.recorder.onProjectSwitched(id);
+            }
+            await metaSavePromise;
         }
 
+        if (switchToken !== app._switchProjectGeneration || app._queuedSwitchId) return;
+
+        app._projectLoadedCompletely = true;
         app._updateRefImageList();
-        await renderProjectList(app);
 
-        if (app.recorder && typeof app.recorder.onProjectSwitched === 'function') {
-            app.recorder.onProjectSwitched(id);
-        }
+        // Show crisp completion state on the slot briefly while canvas is already interactive!
+        setProjectSlotVisual(app, id, {
+            mode: 'ready',
+            badge: isNewProject ? 'CREATED ✓' : 'READY ✓',
+            sub: targetSub,
+            progress: 100
+        });
+        renderProjectList(app);
+
         app._status('READY');
+
+        app._slotReadyTimer = setTimeout(() => {
+            app._slotReadyTimer = null;
+            if (app._switchProjectGeneration === switchToken) {
+                setProjectSlotVisual(app, null, null);
+            }
+        }, 450);
     } catch (err) {
         console.error("Project switch failed:", err);
+        if (app._switchProjectGeneration === switchToken) {
+            setProjectSlotVisual(app, null, null);
+        }
         app._status('SWITCH ERROR');
     } finally {
         app._isSwitchingProject = false;
-        if (container) {
-            const items = container.querySelectorAll('.project-item');
-            items.forEach(el => el.classList.remove('switching'));
-        }
-        // If another switch was requested, process it now
+        app._activeSwitchTargetId = null;
+        // If another switch was requested, process it immediately
         if (app._queuedSwitchId) {
             const nextId = app._queuedSwitchId;
+            const nextOpts = app._queuedSwitchOptions || {};
             app._queuedSwitchId = null;
-            switchProject(app, nextId);
+            app._queuedSwitchOptions = null;
+            switchProject(app, nextId, nextOpts);
+        } else if (app._switchProjectGeneration === switchToken && !app._slotReadyTimer) {
+            // If we exited early without hitting READY and without a queued switch, ensure overlays are cleared
+            setProjectSlotVisual(app, null, null);
         }
     }
 }
@@ -624,10 +891,12 @@ export async function deleteProject(app, id) {
 }
 
 // Process tasks in controlled batches to avoid thread/layout exhaustion (especially on mobile devices!)
-async function runInBatches(tasks, batchSize = 12, onProgress = null) {
+async function runInBatches(tasks, batchSize = 12, onProgress = null, shouldAbort = null) {
     for (let i = 0; i < tasks.length; i += batchSize) {
+        if (shouldAbort && shouldAbort()) return;
         const batch = tasks.slice(i, i + batchSize);
         await Promise.all(batch.map(fn => fn()));
+        if (shouldAbort && shouldAbort()) return;
         if (onProgress) {
             onProgress(i + batch.length, tasks.length);
         }
@@ -636,7 +905,7 @@ async function runInBatches(tasks, batchSize = 12, onProgress = null) {
     }
 }
 
-export async function loadProject(app, targetProjectId = null, switchToken = null) {
+export async function loadProject(app, targetProjectId = null, switchToken = null, onProgress = null) {
     const projId = targetProjectId || app.currentProjectId;
     console.log(`[PERF] loadProject(${projId}) started`);
     const tLoadStart = performance.now();
@@ -829,10 +1098,17 @@ export async function loadProject(app, targetProjectId = null, switchToken = nul
         console.log(`[PERF] Prepared ${chunkLoadPromises.length} chunk loaders. Starting runInBatches...`);
         const tBatchRunStart = performance.now();
         if (chunkLoadPromises.length > 0) {
-            await runInBatches(chunkLoadPromises, 24, (loaded, total) => {
-                const pct = Math.min(100, Math.round((loaded / total) * 100));
-                app._status(`LOADING (${pct}%)`);
-            });
+            await runInBatches(
+                chunkLoadPromises,
+                24,
+                (loaded, total) => {
+                    if (switchToken !== null && switchToken !== app._switchProjectGeneration) return;
+                    const pct = Math.min(100, Math.round((loaded / total) * 100));
+                    app._status(`LOADING (${pct}%)`);
+                    if (onProgress) onProgress(pct);
+                },
+                switchToken !== null ? () => switchToken !== app._switchProjectGeneration : null
+            );
         }
         console.log(`[PERF] runInBatches() completed in ${(performance.now() - tBatchRunStart).toFixed(2)}ms for ${chunkLoadPromises.length} chunks`);
 
@@ -1052,7 +1328,7 @@ export async function saveProject(app, force = false, targetProjectId = null) {
     }
 }
 
-export async function generateThumbnail(app) {
+export async function generateThumbnail(app, options = {}) {
     const size = 128;
     const thumbCanvas = document.createElement('canvas');
     thumbCanvas.width = size;
@@ -1092,13 +1368,14 @@ export async function generateThumbnail(app) {
         const lx = app.engine.isStatic ? -app.engine.staticWidth / 2 : chunk.cx * app.engine.chunkSize;
         const ly = app.engine.isStatic ? -app.engine.staticHeight / 2 : chunk.cy * app.engine.chunkSize;
         for (let i = 1; i < LAYERS_COUNT; i++) {
+            if (chunk.isEmpty && chunk.isEmpty[i]) continue;
             tctx.drawImage(chunk.canvases[i], lx, ly);
         }
     });
     tctx.restore();
     
     // Sweep and promote all memory-loaded chunk canvases back to GPU after the readback
-    if (app.engine.promoteAllToGPU) {
+    if (!options.skipGpuPromote && app.engine.promoteAllToGPU) {
         app.engine.promoteAllToGPU();
     }
     

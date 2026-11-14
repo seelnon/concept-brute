@@ -905,7 +905,7 @@ export class Engine {
       offscreenCtxs: [],
       isEmpty: new Array(LAYERS_COUNT).fill(true),
       gpuTextures: new Array(LAYERS_COUNT).fill(null),
-      gpuDirty: new Array(LAYERS_COUNT).fill(true),
+      gpuDirty: new Array(LAYERS_COUNT).fill(false),
       gpuStrokeTexture: null,
       gpuStrokeDirty: false,
       gpuStrokeActive: false,

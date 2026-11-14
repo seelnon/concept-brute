@@ -405,7 +405,14 @@ export class GPURenderer {
 
   markAllChunksDirty() {
     this.engine.chunks.forEach(chunk => {
-      chunk.gpuDirty = new Array(LAYERS_COUNT).fill(true);
+      if (!chunk.gpuDirty) {
+        chunk.gpuDirty = new Array(LAYERS_COUNT).fill(false);
+      }
+      for (let l = 0; l < LAYERS_COUNT; l++) {
+        if (!chunk.isEmpty || !chunk.isEmpty[l] || (chunk.gpuTextures && chunk.gpuTextures[l])) {
+          chunk.gpuDirty[l] = true;
+        }
+      }
       if (chunk.strokeCanvas) {
         chunk.gpuStrokeDirty = true;
       }

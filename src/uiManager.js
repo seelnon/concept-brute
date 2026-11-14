@@ -116,6 +116,12 @@ export function setupUI(app) {
     app.settingsPanel = document.getElementById('panel-settings');
     document.getElementById('btn-settings').onclick = () => {
         app.settingsPanel.classList.toggle('hidden');
+        if (!app.settingsPanel.classList.contains('hidden')) {
+            if (!app._isSwitchingProject && !app._queuedSwitchId && !app._slotReadyTimer && app._projectSlotStates?.size > 0) {
+                app._projectSlotStates.clear();
+            }
+            app._renderProjectList();
+        }
         app._updateStorageStat();
     };
     document.getElementById('btn-close-settings').onclick = () => {
@@ -135,7 +141,12 @@ export function setupUI(app) {
             document.getElementById(paneId).classList.add('active');
             
             if (tab.dataset.tab === 'data') app._updateStorageStat();
-            if (tab.dataset.tab === 'projects') app._renderProjectList();
+            if (tab.dataset.tab === 'projects') {
+                if (!app._isSwitchingProject && !app._queuedSwitchId && !app._slotReadyTimer && app._projectSlotStates?.size > 0) {
+                    app._projectSlotStates.clear();
+                }
+                app._renderProjectList();
+            }
         };
     });
 
@@ -175,9 +186,12 @@ export function setupUI(app) {
         document.getElementById('new-quality-val').innerText = e.target.value;
     };
 
-    document.getElementById('btn-create-project-final').onclick = async () => {
+    document.getElementById('btn-create-project-final').onclick = () => {
         const name = document.getElementById('new-project-name').value || 'SKETCH';
-        const id = 'prj_' + Date.now();
+        let id = 'prj_' + Date.now();
+        while (app.projects.some(p => p.id === id)) {
+            id = 'prj_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+        }
         const chunkSize = parseInt(document.getElementById('new-project-chunk-size').value);
         const quality = parseFloat(document.getElementById('new-project-quality').value);
         const mode = document.getElementById('new-project-mode').value;
@@ -200,12 +214,14 @@ export function setupUI(app) {
             } 
         };
         app.projects.push(newProj);
-        await app.storage.saveGlobalSetting('projects_list', app.projects);
-        
+
+        // Close modal immediately for instant visual response
         document.getElementById('modal-new-project').classList.add('hidden');
         if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
         window.focus();
-        app.switchProject(id);
+
+        // Switch with fast-path new project initialization & immediate slot visual in Settings
+        app.switchProject(id, { isNewProject: true, projectsListDirty: true });
     };
 
     // Export Modal
@@ -743,16 +759,6 @@ export function setupUI(app) {
         };
     }
 
-    const qualitySlider = document.getElementById('brush-liquify-quality');
-    const qualityVal = document.getElementById('liquify-quality-val');
-    if (qualitySlider) {
-        qualitySlider.oninput = (e) => {
-          const val = parseInt(e.target.value);
-          const labels = { 1: 'FAST', 2: 'RESOLVE', 3: 'ULTRA' };
-          if (qualityVal) qualityVal.innerText = labels[val] || 'RESOLVE';
-          app.updateActiveSetting('liquifyQuality', val);
-        };
-    }
 
     const heightSlider = document.getElementById('brush-height');
     const heightVal = document.getElementById('height-val');

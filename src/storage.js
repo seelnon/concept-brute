@@ -412,8 +412,8 @@ export class SketchStorage {
 
   async saveGlobalSetting(id, value) {
     try {
-      localStorage.setItem(`global_${id}`, JSON.stringify(value));
-      localStorage.setItem(id, JSON.stringify(value));
+      const serialized = JSON.stringify(value);
+      localStorage.setItem(`global_${id}`, serialized);
     } catch (e) {}
 
     await this.ensureReady();
