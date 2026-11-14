@@ -727,8 +727,8 @@ export function _endStroke(e = null) {
           }
       });
   } else {
-      // If it was smudge or liquify under active selection
-      if ((this.brush.type === TOOLS.SMUDGE || this.brush.type === TOOLS.LIQUIFY) && this.activeSelectionPath) {
+      // If it was smudge, liquify, or fluid paint under active selection
+      if ((this.brush.type === TOOLS.SMUDGE || this.brush.type === TOOLS.LIQUIFY || this.brush.type === TOOLS.FLUID) && this.activeSelectionPath) {
           this.currentStrokeDirtyChunks.forEach((data, id) => {
               const chunk = this.chunks.get(id);
               if (chunk && data.canvas) {
