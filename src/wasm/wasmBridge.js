@@ -13,6 +13,7 @@ class WasmCanvasCore {
     this.memory = null;
     this.ready = false;
     this.liquifySessions = new Map();
+    this._liquifyMaxAllocImg = 0;
     this._initSync();
   }
 
@@ -454,6 +455,7 @@ class WasmCanvasCore {
       const heapBase = this.exports.__heap_base ? this.exports.__heap_base.value : 2097152;
       this.exports.wasm_init_heap(heapBase);
       this.exports.wasm_mark_scratch();
+      this._liquifyMaxAllocImg = 0;
     }
   }
 
@@ -462,12 +464,25 @@ class WasmCanvasCore {
    */
   liquifyPrewarm(w = 2048, h = 2048, cellSize = 8) {
     if (!this.ready) return false;
-    return this.exports.liquify_session_start(w, h, cellSize, 0, 0) === 1;
+    const imgBytes = (w * h * 4) >>> 0;
+    const rawAlloc = imgBytes < 16 * 1024 * 1024 ? 16 * 1024 * 1024 : imgBytes;
+    const alignedAlloc = (rawAlloc + 15) & ~15;
+    const ok = this.exports.liquify_session_start(w, h, cellSize, 0, 0) === 1;
+    if (ok && alignedAlloc > this._liquifyMaxAllocImg) {
+      this._liquifyMaxAllocImg = alignedAlloc;
+    }
+    return ok;
   }
 
   liquifySessionStart(w, h, cellSize, originX, originY) {
     if (!this.ready || w <= 0 || h <= 0) return false;
+    const imgBytes = (w * h * 4) >>> 0;
+    const rawAlloc = imgBytes < 16 * 1024 * 1024 ? 16 * 1024 * 1024 : imgBytes;
+    const alignedAlloc = (rawAlloc + 15) & ~15;
     const res = this.exports.liquify_session_start(w, h, cellSize, originX, originY);
+    if (res === 1 && alignedAlloc > this._liquifyMaxAllocImg) {
+      this._liquifyMaxAllocImg = alignedAlloc;
+    }
     return res === 1;
   }
 
@@ -475,10 +490,13 @@ class WasmCanvasCore {
     if (!this.ready) return 0;
     const ex = this.exports;
     const srcPtr = ex.liquify_session_get_src_ptr ? (ex.liquify_session_get_src_ptr() >>> 0) : 0;
+    if (!srcPtr) return 0;
     const sessW = ex.liquify_session_get_w ? ex.liquify_session_get_w() : 2048;
     const sessH = ex.liquify_session_get_h ? ex.liquify_session_get_h() : 2048;
-    const imgBytes = sessW * sessH * 4;
-    const allocImg = imgBytes < 16 * 1024 * 1024 ? 16 * 1024 * 1024 : imgBytes;
+    const imgBytes = (sessW * sessH * 4) >>> 0;
+    const rawAlloc = imgBytes < 16 * 1024 * 1024 ? 16 * 1024 * 1024 : imgBytes;
+    const alignedFallback = (rawAlloc + 15) & ~15;
+    const allocImg = Math.max(this._liquifyMaxAllocImg || 0, alignedFallback);
     return srcPtr + allocImg;
   }
 

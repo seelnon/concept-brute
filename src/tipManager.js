@@ -29,12 +29,26 @@ export class TipManager {
     t.jitterAngle = saved.jitterAngle ?? 0;
     t.jitterPos = saved.jitterPos ?? 0;
     t.jitterHue = saved.jitterHue ?? 0;
-    t.smudgeFlowBoost = saved.smudgeFlowBoost ?? 10.0;
+    const rawSmudgeBoost = (saved.smudgeFlowBoost === 10.0 && !saved._smudgeCalibratedV2)
+      ? 1.0
+      : (saved.smudgeFlowBoost ?? 1.0);
+    t.smudgeFlowBoost = rawSmudgeBoost;
+    t._smudgeCalibratedV2 = true;
     t.smudgePickup = saved.smudgePickup ?? 2.0;
     t.brushSharpen = saved.brushSharpen ?? 0.0;
     t.wireDensity = saved.wireDensity ?? 30;
     t.wireRange = saved.wireRange ?? 4.0;
     t.wireMinDist = saved.wireMinDist ?? 0.5;
+    t.airWetness = saved.airWetness ?? 80;
+    t.airStreamFlow = saved.airStreamFlow ?? 65;
+    t.airBloom = saved.airBloom ?? 60;
+    t.airEdge = saved.airEdge ?? 50;
+    t.airGranulation = saved.airGranulation ?? 25;
+    t.airTipPour = saved.airTipPour ?? 25;
+    t.airFollowStroke = saved.airFollowStroke ?? false;
+    t.airTipAngle = saved.airTipAngle ?? 0;
+    t.airTipHardness = saved.airTipHardness ?? 55;
+    t.airPressureFlow = saved.airPressureFlow ?? 35;
   }
 
   async init() {
@@ -217,7 +231,7 @@ export class TipManager {
                         clearTimeout(timer);
                         reject(new Error('Error loading default brush tip'));
                     };
-                    img.src = './_main_brushtip.png'; 
+                    img.src = './src/_main_brushtip.png'; 
                 });
             } catch (e) {
                 canvas = this._createShape(type);
@@ -548,12 +562,23 @@ export class TipManager {
           jitterAngle: t.jitterAngle ?? 0,
           jitterPos: t.jitterPos ?? 0,
           jitterHue: t.jitterHue ?? 0,
-          smudgeFlowBoost: t.smudgeFlowBoost ?? 10.0,
+          smudgeFlowBoost: t.smudgeFlowBoost ?? 1.0,
+          _smudgeCalibratedV2: true,
           smudgePickup: t.smudgePickup ?? 2.0,
           brushSharpen: t.brushSharpen ?? 0.0,
           wireDensity: t.wireDensity ?? 30,
           wireRange: t.wireRange ?? 4.0,
-          wireMinDist: t.wireMinDist ?? 0.5
+          wireMinDist: t.wireMinDist ?? 0.5,
+          airWetness: t.airWetness ?? 80,
+          airStreamFlow: t.airStreamFlow ?? 65,
+          airBloom: t.airBloom ?? 60,
+          airEdge: t.airEdge ?? 50,
+          airGranulation: t.airGranulation ?? 25,
+          airTipPour: t.airTipPour ?? 25,
+          airFollowStroke: t.airFollowStroke ?? false,
+          airTipAngle: t.airTipAngle ?? 0,
+          airTipHardness: t.airTipHardness ?? 55,
+          airPressureFlow: t.airPressureFlow ?? 35
       }));
       localStorage.setItem('brushTips', JSON.stringify(mainData));
 
@@ -570,12 +595,23 @@ export class TipManager {
           jitterAngle: t.jitterAngle ?? 0,
           jitterPos: t.jitterPos ?? 0,
           jitterHue: t.jitterHue ?? 0,
-          smudgeFlowBoost: t.smudgeFlowBoost ?? 10.0,
+          smudgeFlowBoost: t.smudgeFlowBoost ?? 1.0,
+          _smudgeCalibratedV2: true,
           smudgePickup: t.smudgePickup ?? 2.0,
           brushSharpen: t.brushSharpen ?? 0.0,
           wireDensity: t.wireDensity ?? 30,
           wireRange: t.wireRange ?? 4.0,
-          wireMinDist: t.wireMinDist ?? 0.5
+          wireMinDist: t.wireMinDist ?? 0.5,
+          airWetness: t.airWetness ?? 80,
+          airStreamFlow: t.airStreamFlow ?? 65,
+          airBloom: t.airBloom ?? 60,
+          airEdge: t.airEdge ?? 50,
+          airGranulation: t.airGranulation ?? 25,
+          airTipPour: t.airTipPour ?? 25,
+          airFollowStroke: t.airFollowStroke ?? false,
+          airTipAngle: t.airTipAngle ?? 0,
+          airTipHardness: t.airTipHardness ?? 55,
+          airPressureFlow: t.airPressureFlow ?? 35
       }));
       localStorage.setItem('brushTips_generated', JSON.stringify(genData));
 

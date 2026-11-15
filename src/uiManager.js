@@ -1,5 +1,7 @@
 import { TOOLS, LAYERS_COUNT } from './constants.js';
 import { PaletteManager } from './paletteManager.js';
+import { syncFluidSettingsFromTip } from './tools/fluidPaint.js';
+import { syncAirSettingsFromTip } from './tools/airPaint.js';
 
 export function setupUI(app) {
     // Ensures keyboard hotkeys listen immediately when the user touches or interacts with the app
@@ -1164,60 +1166,146 @@ export function setupUI(app) {
         };
     }
 
-    // Air Paint Sliders
-    const airTurbInput = document.getElementById('adv-air-turb');
-    if (airTurbInput) {
-        airTurbInput.oninput = (e) => {
-            const val = parseInt(e.target.value);
-            document.getElementById('adv-air-turb-val').innerText = `${val}%`;
-            app.updateActiveSetting('airTurb', val);
+    // Air Paint (Watercolor Navier-Stokes & Tip Pour/Draw) Sliders
+    const syncAirLive = () => {
+        if (app.getCurrentTipSettings) {
+            const ts = app.getCurrentTipSettings();
+            if (ts) syncAirSettingsFromTip(ts);
+        }
+    };
+
+    const bindAirSlider = (inputId, valId, settingKey, unit = '%') => {
+        const el = document.getElementById(inputId);
+        if (!el) return;
+        el.oninput = (e) => {
+            const val = parseFloat(e.target.value);
+            const valEl = document.getElementById(valId);
+            if (valEl) valEl.innerText = `${Math.round(val)}${unit}`;
+            app.updateActiveSetting(settingKey, val);
+            syncAirLive();
+        };
+    };
+
+    bindAirSlider('adv-air-wetness', 'adv-air-wetness-val', 'airWetness', '%');
+    bindAirSlider('adv-air-stream', 'adv-air-stream-val', 'airStreamFlow', '%');
+    bindAirSlider('adv-air-bloom', 'adv-air-bloom-val', 'airBloom', '%');
+    bindAirSlider('adv-air-edge', 'adv-air-edge-val', 'airEdge', '%');
+    bindAirSlider('adv-air-granulation', 'adv-air-granulation-val', 'airGranulation', '%');
+
+    const applyAirTipPour = (rawVal) => {
+        const val = Math.max(0, Math.min(100, Math.round(parseFloat(rawVal) || 0)));
+        const advSlider = document.getElementById('adv-air-tip-pour');
+        const advLbl = document.getElementById('adv-air-tip-pour-val');
+        const panelSlider = document.getElementById('slider-air-tip-pour');
+        const panelLbl = document.getElementById('air-tip-pour-val');
+        if (advSlider) advSlider.value = val;
+        if (advLbl) advLbl.innerText = `${val}%`;
+        if (panelSlider) panelSlider.value = val;
+        if (panelLbl) panelLbl.innerText = `${val}%`;
+
+        const btnDraw = document.getElementById('btn-air-mode-draw');
+        const btnMix = document.getElementById('btn-air-mode-mix');
+        const btnPour = document.getElementById('btn-air-mode-pour');
+        if (btnDraw && btnMix && btnPour) {
+            btnDraw.classList.toggle('active-btn', val <= 12);
+            btnMix.classList.toggle('active-btn', val > 12 && val < 65);
+            btnPour.classList.toggle('active-btn', val >= 65);
+        }
+
+        app.updateActiveSetting('airTipPour', val);
+        syncAirLive();
+    };
+
+    const advAirPourInput = document.getElementById('adv-air-tip-pour');
+    if (advAirPourInput) {
+        advAirPourInput.oninput = (e) => applyAirTipPour(e.target.value);
+    }
+    const panelAirPourInput = document.getElementById('slider-air-tip-pour');
+    if (panelAirPourInput) {
+        panelAirPourInput.oninput = (e) => applyAirTipPour(e.target.value);
+    }
+    const btnAirModeDraw = document.getElementById('btn-air-mode-draw');
+    if (btnAirModeDraw) btnAirModeDraw.onclick = () => applyAirTipPour(0);
+    const btnAirModeMix = document.getElementById('btn-air-mode-mix');
+    if (btnAirModeMix) btnAirModeMix.onclick = () => applyAirTipPour(35);
+    const btnAirModePour = document.getElementById('btn-air-mode-pour');
+    if (btnAirModePour) btnAirModePour.onclick = () => applyAirTipPour(85);
+
+    const advAirFollow = document.getElementById('adv-air-follow-stroke');
+    if (advAirFollow) {
+        advAirFollow.onchange = (e) => {
+            app.updateActiveSetting('airFollowStroke', e.target.checked);
+            syncAirLive();
         };
     }
 
-    const airScaleInput = document.getElementById('adv-air-scale');
-    if (airScaleInput) {
-        airScaleInput.oninput = (e) => {
-            const val = parseInt(e.target.value);
-            document.getElementById('adv-air-scale-val').innerText = `${val}px`;
-            app.updateActiveSetting('airScale', val);
+    bindAirSlider('adv-air-tip-angle', 'adv-air-tip-angle-val', 'airTipAngle', '°');
+    bindAirSlider('adv-air-tip-hardness', 'adv-air-tip-hardness-val', 'airTipHardness', '%');
+    bindAirSlider('adv-air-pressure-flow', 'adv-air-pressure-flow-val', 'airPressureFlow', '%');
+
+    // Advanced Fluid Paint Dynamics
+    const bindAdvFluidSlider = (inputId, valId, settingKey, unit = '%') => {
+        const el = document.getElementById(inputId);
+        if (!el) return;
+        el.oninput = (e) => {
+            const val = parseFloat(e.target.value);
+            const valEl = document.getElementById(valId);
+            if (valEl) valEl.innerText = `${Math.round(val)}${unit}`;
+            app.updateActiveSetting(settingKey, val);
+            if (app.getCurrentTipSettings) {
+                const ts = app.getCurrentTipSettings();
+                if (ts) syncFluidSettingsFromTip(ts);
+            }
+        };
+    };
+
+    const advFluidFollow = document.getElementById('adv-fluid-follow-stroke');
+    if (advFluidFollow) {
+        advFluidFollow.onchange = (e) => {
+            app.updateActiveSetting('fluidFollowStroke', e.target.checked);
+            if (app.getCurrentTipSettings) {
+                const ts = app.getCurrentTipSettings();
+                if (ts) syncFluidSettingsFromTip(ts);
+            }
         };
     }
 
-    const airDensityInput = document.getElementById('adv-air-density');
-    if (airDensityInput) {
-        airDensityInput.oninput = (e) => {
-            const val = parseInt(e.target.value);
-            document.getElementById('adv-air-density-val').innerText = `${val} streams`;
-            app.updateActiveSetting('airDensity', val);
-        };
-    }
+    bindAdvFluidSlider('adv-fluid-tip-angle', 'adv-fluid-tip-angle-val', 'fluidTipAngle', '°');
+    bindAdvFluidSlider('adv-fluid-bristle-contrast', 'adv-fluid-bristle-contrast-val', 'fluidBristleContrast', '%');
+    bindAdvFluidSlider('adv-fluid-bleed', 'adv-fluid-bleed-val', 'fluidBleed', '%');
+    bindAdvFluidSlider('adv-fluid-tip-hardness', 'adv-fluid-tip-hardness-val', 'fluidTipHardness', '%');
+    bindAdvFluidSlider('adv-fluid-pressure-flow', 'adv-fluid-pressure-flow-val', 'fluidPressureFlow', '%');
 
-    const airDriftInput = document.getElementById('adv-air-drift');
-    if (airDriftInput) {
-        airDriftInput.oninput = (e) => {
-            const val = parseInt(e.target.value);
-            document.getElementById('adv-air-drift-val').innerText = `${val}%`;
-            app.updateActiveSetting('airDrift', val);
+    const wireSaveTipBtn = (btnId, defaultLabel) => {
+        const btn = document.getElementById(btnId);
+        if (!btn) return;
+        btn.onclick = () => {
+            if (app.saveCurrentTipPreset) {
+                app.saveCurrentTipPreset();
+                btn.innerText = 'SAVED ✓';
+                setTimeout(() => {
+                    btn.innerText = defaultLabel;
+                }, 900);
+            }
         };
-    }
+    };
 
-    const airFalloffInput = document.getElementById('adv-air-falloff');
-    if (airFalloffInput) {
-        airFalloffInput.oninput = (e) => {
-            const val = parseInt(e.target.value);
-            document.getElementById('adv-air-falloff-val').innerText = `${val}%`;
-            app.updateActiveSetting('airFalloff', val);
+    const wireResetTipBtn = (btnId) => {
+        const btn = document.getElementById(btnId);
+        if (!btn) return;
+        btn.onclick = () => {
+            if (app.resetCurrentTipPreset) {
+                app.resetCurrentTipPreset();
+            }
         };
-    }
+    };
 
-    const airDryFrictionInput = document.getElementById('adv-air-dry-friction');
-    if (airDryFrictionInput) {
-        airDryFrictionInput.oninput = (e) => {
-            const val = parseInt(e.target.value);
-            document.getElementById('adv-air-dry-friction-val').innerText = `${val}%`;
-            app.updateActiveSetting('airDryFriction', val);
-        };
-    }
+    wireSaveTipBtn('btn-fluid-save-tip', 'SAVE TIP');
+    wireResetTipBtn('btn-fluid-reset-tip');
+    wireSaveTipBtn('btn-air-save-tip', 'SAVE TIP');
+    wireResetTipBtn('btn-air-reset-tip');
+    wireSaveTipBtn('btn-adv-save-tip', 'SAVE TO TIP');
+    wireResetTipBtn('btn-adv-reset-tip');
 
     // --- TEXTURE PAINT (SCREENTONES) SYSTEM INTERACTION CONTROLS ---
     const toggleTextureBtn = document.getElementById('btn-toggle-texture');

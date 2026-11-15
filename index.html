@@ -839,9 +839,9 @@
                   <div class="settings-group">
                      <div style="display: flex; justify-content: space-between; align-items: center;">
                          <label class="settings-label">FLOW BOOST</label>
-                         <span id="adv-smudge-flow-boost-val" style="font-size: 9px; font-weight: 900;">10.0</span>
+                         <span id="adv-smudge-flow-boost-val" style="font-size: 9px; font-weight: 900;">1.0</span>
                      </div>
-                     <input type="range" id="adv-smudge-flow-boost" min="0" max="20" step="0.5" value="10.0" class="brutal-range" style="width: 100%;">
+                     <input type="range" id="adv-smudge-flow-boost" min="0" max="10" step="0.1" value="1.0" class="brutal-range" style="width: 100%;">
                   </div>
                   <div class="settings-group">
                      <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -888,6 +888,114 @@
                </div>
              </div>
 
+
+              <!-- FLUID DYNAMICS CATEGORY -->
+              <div class="settings-category" id="cat-fluid" style="display: none;">
+                <div class="category-header">FLUID DYNAMICS</div>
+                <div class="category-content">
+                   <div class="settings-group">
+                      <div class="settings-row" style="margin-bottom: 8px;">
+                         <label class="settings-label">FOLLOW STROKE ANGLE</label>
+                         <div class="checkbox-wrapper">
+                            <input type="checkbox" id="adv-fluid-follow-stroke" class="settings-input-check">
+                            <span class="checkbox-custom"></span>
+                         </div>
+                      </div>
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">TIP ANGLE OFFSET</label>
+                          <span id="adv-fluid-tip-angle-val" style="font-size: 9px; font-weight: 900;">0°</span>
+                      </div>
+                      <input type="range" id="adv-fluid-tip-angle" min="-180" max="180" step="5" value="0" class="brutal-range" style="width: 100%;">
+                   </div>
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">BRISTLE CONTRAST</label>
+                          <span id="adv-fluid-bristle-contrast-val" style="font-size: 9px; font-weight: 900;">65%</span>
+                      </div>
+                      <input type="range" id="adv-fluid-bristle-contrast" min="0" max="100" step="1" value="65" class="brutal-range" style="width: 100%;">
+                   </div>
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">SEGMENT BLEED SMOOTH</label>
+                          <span id="adv-fluid-bleed-val" style="font-size: 9px; font-weight: 900;">50%</span>
+                      </div>
+                      <input type="range" id="adv-fluid-bleed" min="0" max="100" step="1" value="50" class="brutal-range" style="width: 100%;">
+                   </div>
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">TIP EDGE HARDNESS</label>
+                          <span id="adv-fluid-tip-hardness-val" style="font-size: 9px; font-weight: 900;">50%</span>
+                      </div>
+                      <input type="range" id="adv-fluid-tip-hardness" min="0" max="100" step="1" value="50" class="brutal-range" style="width: 100%;">
+                   </div>
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">PRESSURE FLOW</label>
+                          <span id="adv-fluid-pressure-flow-val" style="font-size: 9px; font-weight: 900;">35%</span>
+                      </div>
+                      <input type="range" id="adv-fluid-pressure-flow" min="0" max="100" step="1" value="35" class="brutal-range" style="width: 100%;">
+                   </div>
+                </div>
+              </div>
+
+              <!-- WATERCOLOR TIP & POUR CATEGORY -->
+              <div class="settings-category" id="cat-air" style="display: none;">
+                <div class="category-header">WATERCOLOR TIP &amp; POUR</div>
+                <div class="category-content">
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                          <label class="settings-label">TIP MODE (DRAW ↔ POUR)</label>
+                          <span id="adv-air-tip-pour-val" style="font-size: 9px; font-weight: 900;">25%</span>
+                      </div>
+                      <div style="display: flex; gap: 4px; margin-bottom: 5px;">
+                          <button id="btn-air-mode-draw" class="brutal-btn" style="flex: 1; font-size: 8px; height: 19px; padding: 0;">DRAW</button>
+                          <button id="btn-air-mode-mix" class="brutal-btn" style="flex: 1; font-size: 8px; height: 19px; padding: 0;">MIX</button>
+                          <button id="btn-air-mode-pour" class="brutal-btn" style="flex: 1; font-size: 8px; height: 19px; padding: 0;">POUR</button>
+                      </div>
+                      <input type="range" id="adv-air-tip-pour" min="0" max="100" step="1" value="25" class="brutal-range" style="width: 100%;">
+                   </div>
+                   <div class="settings-group">
+                      <div class="settings-row" style="margin-bottom: 8px;">
+                         <label class="settings-label">FOLLOW STROKE ANGLE</label>
+                         <div class="checkbox-wrapper">
+                            <input type="checkbox" id="adv-air-follow-stroke" class="settings-input-check">
+                            <span class="checkbox-custom"></span>
+                         </div>
+                      </div>
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">TIP ANGLE OFFSET</label>
+                          <span id="adv-air-tip-angle-val" style="font-size: 9px; font-weight: 900;">0°</span>
+                      </div>
+                      <input type="range" id="adv-air-tip-angle" min="-180" max="180" step="5" value="0" class="brutal-range" style="width: 100%;">
+                   </div>
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">TIP EDGE HARDNESS</label>
+                          <span id="adv-air-tip-hardness-val" style="font-size: 9px; font-weight: 900;">55%</span>
+                      </div>
+                      <input type="range" id="adv-air-tip-hardness" min="0" max="100" step="1" value="55" class="brutal-range" style="width: 100%;">
+                   </div>
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">PRESSURE FLOW</label>
+                          <span id="adv-air-pressure-flow-val" style="font-size: 9px; font-weight: 900;">35%</span>
+                      </div>
+                      <input type="range" id="adv-air-pressure-flow" min="0" max="100" step="1" value="35" class="brutal-range" style="width: 100%;">
+                   </div>
+                </div>
+              </div>
+
+              <!-- ACTIVE TIP PRESET BAR -->
+              <div id="adv-tip-preset-bar" style="border-top: 2px solid black; padding-top: 8px; margin-top: 6px; display: flex; flex-direction: column; gap: 6px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <span style="font-size: 8px; font-weight: 900;">PER-TIP PRESET</span>
+                  <span id="adv-active-tip-label" style="font-size: 8px; font-weight: 900; background: black; color: white; padding: 1px 4px;">TIP: MAIN #1</span>
+                </div>
+                <div style="display: flex; gap: 4px;">
+                  <button id="btn-adv-save-tip" class="brutal-btn" style="flex: 1; font-size: 8px; height: 22px; background: black; color: white;">SAVE TO TIP</button>
+                  <button id="btn-adv-reset-tip" class="brutal-btn" style="font-size: 8px; height: 22px; padding: 0 8px;">RESET</button>
+                </div>
+              </div>
 
           </div>
         </div>
@@ -1236,72 +1344,96 @@
             <label for="chk-surface-shading" style="font-size: 8px; font-weight: bold; cursor: pointer; user-select: none;">SURFACE SHADING (3D IMPASTO)</label>
             <input type="checkbox" id="chk-surface-shading" checked style="width: 14px; height: 14px; cursor: pointer; accent-color: black;">
           </div>
+
+          <!-- PER-BRUSH-TIP PRESET CONTROLS -->
+          <div style="display: flex; flex-direction: column; gap: 4px; border-top: 2px solid black; padding-top: 6px; margin-top: 2px;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <span style="font-size: 7px; font-weight: 900; letter-spacing: 0.04em;">TIP SETTINGS</span>
+              <span id="fluid-active-tip-label" style="font-size: 7px; font-weight: 900; background: black; color: white; padding: 1px 4px;">MAIN #1</span>
+            </div>
+            <div style="display: flex; gap: 4px;">
+              <button id="btn-fluid-save-tip" class="brutal-btn" style="flex: 1; font-size: 8px; height: 20px; background: black; color: white; padding: 0 4px;">SAVE TIP</button>
+              <button id="btn-fluid-reset-tip" class="brutal-btn" style="font-size: 8px; height: 20px; padding: 0 6px;">RESET</button>
+            </div>
+          </div>
         </div>
 
       </div>
     </div>
 
-    <!-- AIR PAINTING PANEL -->
-    <div id="panel-air" class="ui-panel hidden" style="width: 180px; left: 20px; top: 120px; z-index: 10002;">
+    <!-- AIR PAINTING PANEL (WATERCOLOR N-S) -->
+    <div id="panel-air" class="ui-panel hidden" style="width: 184px; left: 20px; top: 120px; z-index: 10002;">
       <div id="handle-air" class="panel-handle">
-        <span class="panel-title" style="letter-spacing: 0.05em; font-weight: 1000; font-size: 8px;">💨 AIR TUNING</span>
+        <span class="panel-title" style="letter-spacing: 0.04em; font-weight: 1000; font-size: 8px;">💧 AIR TUNING · WATERCOLOR</span>
         <button id="btn-air-collapse" class="panel-toggle">_</button>
       </div>
       <div id="air-content" class="panel-content" style="padding: 10px; display: flex; flex-direction: column; gap: 8px;">
         
         <div style="display: flex; flex-direction: column; gap: 8px;">
-          <!-- TURBULENCE POWER -->
+          <!-- WATER WETNESS -->
           <div class="slider-container">
             <div class="slider-header">
-              <label class="slider-label" style="font-size: 8px;">TURBULENCE POWER</label>
-              <span id="adv-air-turb-val" class="slider-value" style="font-size: 8px; font-weight: bold;">0%</span>
+              <label class="slider-label" style="font-size: 8px;">WATER WETNESS</label>
+              <span id="adv-air-wetness-val" class="slider-value" style="font-size: 8px; font-weight: bold;">80%</span>
             </div>
-            <input type="range" id="adv-air-turb" min="0" max="100" value="0" class="brutal-range">
+            <input type="range" id="adv-air-wetness" min="0" max="100" value="80" class="brutal-range">
           </div>
 
-          <!-- SWIRL SCALE (FREQ) -->
+          <!-- STREAM FLOW (NAVIER-STOKES) -->
           <div class="slider-container">
             <div class="slider-header">
-              <label class="slider-label" style="font-size: 8px;">SWIRL SCALE (FREQ)</label>
-              <span id="adv-air-scale-val" class="slider-value" style="font-size: 8px; font-weight: bold;">50px</span>
+              <label class="slider-label" style="font-size: 8px;">STREAM FLOW (N-S)</label>
+              <span id="adv-air-stream-val" class="slider-value" style="font-size: 8px; font-weight: bold;">65%</span>
             </div>
-            <input type="range" id="adv-air-scale" min="1" max="50" value="50" class="brutal-range">
+            <input type="range" id="adv-air-stream" min="0" max="100" value="65" class="brutal-range">
           </div>
 
-          <!-- PARTICLE FLOW DENSITY -->
+          <!-- BLOOM & BLEED -->
           <div class="slider-container">
             <div class="slider-header">
-              <label class="slider-label" style="font-size: 8px;">PARTICLE FLOW DENSITY</label>
-              <span id="adv-air-density-val" class="slider-value" style="font-size: 8px; font-weight: bold;">1 streams</span>
+              <label class="slider-label" style="font-size: 8px;">BLOOM & BLEED</label>
+              <span id="adv-air-bloom-val" class="slider-value" style="font-size: 8px; font-weight: bold;">60%</span>
             </div>
-            <input type="range" id="adv-air-density" min="1" max="50" value="1" class="brutal-range">
+            <input type="range" id="adv-air-bloom" min="0" max="100" value="60" class="brutal-range">
           </div>
 
-          <!-- WIND DRIFT FORCE -->
+          <!-- PIGMENT EDGE -->
           <div class="slider-container">
             <div class="slider-header">
-              <label class="slider-label" style="font-size: 8px;">WIND DRIFT FORCE</label>
-              <span id="adv-air-drift-val" class="slider-value" style="font-size: 8px; font-weight: bold;">14%</span>
+              <label class="slider-label" style="font-size: 8px;">PIGMENT EDGE</label>
+              <span id="adv-air-edge-val" class="slider-value" style="font-size: 8px; font-weight: bold;">50%</span>
             </div>
-            <input type="range" id="adv-air-drift" min="0" max="100" value="14" class="brutal-range">
+            <input type="range" id="adv-air-edge" min="0" max="100" value="50" class="brutal-range">
           </div>
 
-          <!-- PAINT DEPLETIION RATE -->
+          <!-- GRANULATION -->
           <div class="slider-container">
             <div class="slider-header">
-              <label class="slider-label" style="font-size: 8px;">PAINT DEPLETIION (FALLOFF)</label>
-              <span id="adv-air-falloff-val" class="slider-value" style="font-size: 8px; font-weight: bold;">0%</span>
+              <label class="slider-label" style="font-size: 8px;">GRANULATION</label>
+              <span id="adv-air-granulation-val" class="slider-value" style="font-size: 8px; font-weight: bold;">25%</span>
             </div>
-            <input type="range" id="adv-air-falloff" min="0" max="100" value="0" class="brutal-range">
+            <input type="range" id="adv-air-granulation" min="0" max="100" value="25" class="brutal-range">
           </div>
 
-          <!-- DRY SPUTTER (FRICTION) -->
+          <!-- TIP POUR / DRAW -->
           <div class="slider-container">
             <div class="slider-header">
-              <label class="slider-label" style="font-size: 8px;">DRY SPUTTER (FRICTION)</label>
-              <span id="adv-air-dry-friction-val" class="slider-value" style="font-size: 8px; font-weight: bold;">0%</span>
+              <label class="slider-label" style="font-size: 8px;">TIP POUR (DRAW ↔ POUR)</label>
+              <span id="air-tip-pour-val" class="slider-value" style="font-size: 8px; font-weight: bold;">25%</span>
             </div>
-            <input type="range" id="adv-air-dry-friction" min="0" max="100" value="0" class="brutal-range">
+            <input type="range" id="slider-air-tip-pour" min="0" max="100" value="25" class="brutal-range">
+          </div>
+
+          <!-- PER-BRUSH-TIP PRESET CONTROLS -->
+          <div style="display: flex; flex-direction: column; gap: 4px; border-top: 2px solid black; padding-top: 6px; margin-top: 2px;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <span style="font-size: 7px; font-weight: 900; letter-spacing: 0.04em;">TIP SETTINGS</span>
+              <span id="air-active-tip-label" style="font-size: 7px; font-weight: 900; background: black; color: white; padding: 1px 4px;">MAIN #1</span>
+            </div>
+            <div style="display: flex; gap: 4px;">
+              <button id="btn-air-save-tip" class="brutal-btn" style="flex: 1; font-size: 8px; height: 20px; background: black; color: white; padding: 0 4px;">SAVE TIP</button>
+              <button id="btn-air-reset-tip" class="brutal-btn" style="font-size: 8px; height: 20px; padding: 0 6px;">RESET</button>
+            </div>
           </div>
         </div>
 

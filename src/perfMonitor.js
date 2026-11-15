@@ -255,8 +255,8 @@ export class PerfMonitor {
       };
     }
 
-    // 2. Stroke initialisation
-    if (phase === 'stroke_init' || (isVeryEarlyInStroke && phase !== 'chunk_paint')) {
+    // 2. Stroke initialisation (strictly within the first 90ms of stroke start)
+    if ((phase === 'stroke_init' && (timeSinceStroke === null || timeSinceStroke < 90)) || (isVeryEarlyInStroke && phase !== 'chunk_paint')) {
       return {
         category: 'STROKE INIT',
         title: `Stroke initialisation & tip preparation`,
@@ -272,6 +272,17 @@ export class PerfMonitor {
         title: `1st stamp calculation & dynamic speed modulation`,
         description: `Recalibrating initial stamp parameters to match stroke speed and pressure ramp.`,
         details: `Evaluated point 1 to point 2 ramp. Dynamic scale and opacity recalculation for initial segment.`
+      };
+    }
+
+    // 4. Wireframe connection mesh
+    if (phase === 'wireframe_step' || activeTool === 'wireframe') {
+      const pointsCount = details.strokePointsCount || (this.strokePointsCount || 1);
+      return {
+        category: 'WIREFRAME MESH',
+        title: `Wireframe dynamic connection mesh`,
+        description: `Incremental multi-point wireframe line connectors across previous stroke points.`,
+        details: `Point ${pointsCount}: evaluated Delaunay connections to historical points.`
       };
     }
 
@@ -506,6 +517,7 @@ export class PerfMonitor {
     else if (record.category === 'TOOL CHANGE') catBg = '#8833cc';
     else if (record.category === 'STROKE INIT') catBg = '#0066cc';
     else if (record.category === 'SMUDGE STEP') catBg = '#008888';
+    else if (record.category === 'WIREFRAME MESH') catBg = '#227700';
     else if (record.category === 'PROLONGED CALC') catBg = '#cc0033';
 
     item.innerHTML = `

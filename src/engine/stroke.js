@@ -1,6 +1,6 @@
 import { TOOLS } from '../constants.js';
 import { paintWireframeIncrementally } from '../tools/wireframe.js';
-import { paintSmudgeOnChunks, startSmudgeStroke } from '../tools/smudge.js';
+import { paintSmudgeOnChunks, startSmudgeStroke, endSmudgeStroke } from '../tools/smudge.js';
 import { paintFluidOnChunks, startFluidPaintStroke, endFluidPaintStroke, cancelFluidAfterEffect } from '../tools/fluidPaint.js';
 import { startLiquifyStroke, paintLiquifyStroke, endLiquifyStroke } from '../tools/liquify.js';
 import { paintAirIncrementally, clearAirParticles, startAirPaintStroke, endAirPaintStroke } from '../tools/airPaint.js';
@@ -528,17 +528,43 @@ export function _moveStroke(e) {
   } else if (this.brush.type === TOOLS.FLUID) {
       const lastP = this.strokePoints[this.strokePoints.length - 1];
       const dist = Math.hypot(worldTo.x - lastP.x, worldTo.y - lastP.y);
-      const minFluidDist = Math.max(1.0, Math.min(10.0, dynamicSize * 0.04));
+      const spacingRatio = this.brush.spacing !== undefined ? this.brush.spacing : 0.05;
+      const minFluidDist = Math.max(0.8, Math.min(Math.max(10.0, dynamicSize * 0.65), dynamicSize * Math.max(0.02, spacingRatio * 0.85)));
       if (dist >= minFluidDist) {
           paintFluidOnChunks(this, lastP, worldTo, dynamicSize, opacMod, color, pressure, currentTime);
           this.strokePoints.push(worldPos);
       }
   } else if (this.brush.type === TOOLS.AIR) {
       const lastP = this.strokePoints[this.strokePoints.length - 1];
-      const dist = Math.sqrt((worldTo.x - lastP.x)**2 + (worldTo.y - lastP.y)**2);
-      
-      const minAirDist = 1.0;
+      const dist = Math.hypot(worldTo.x - lastP.x, worldTo.y - lastP.y);
+      const spacingRatio = this.brush.spacing !== undefined ? this.brush.spacing : 0.05;
+      const isDabSpacing = spacingRatio > 0.08;
+      const minAirDist = isDabSpacing
+          ? Math.max(2.0, dynamicSize * spacingRatio)
+          : Math.max(1.5, Math.min(8.0, dynamicSize * Math.max(0.02, spacingRatio * 0.85)));
+
       if (dist >= minAirDist) {
+          const jPos = this.brush.jitterPos || 0;
+          const jSize = this.brush.jitterSize || 0;
+          const jAngle = this.brush.jitterAngle || 0;
+          const jHue = this.brush.jitterHue || 0;
+
+          if (jPos > 0) {
+              const range = dynamicSize * jPos * 2;
+              worldPos.x += (Math.random() - 0.5) * range;
+              worldPos.y += (Math.random() - 0.5) * range;
+          }
+          if (jSize > 0) {
+              worldPos.size = Math.max(1, dynamicSize * (1 + (Math.random() - 0.5) * jSize));
+          }
+          if (jAngle > 0) {
+              worldPos.angle = (this.rotation || 0) + (Math.random() - 0.5) * jAngle * 2;
+          }
+          if (jHue > 0) {
+              worldPos.color = this._shiftColor(worldPos.color, (Math.random() - 0.5) * jHue * 360, 0);
+          }
+          worldPos.isDab = isDabSpacing;
+
           this.strokePoints.push(worldPos);
           paintAirIncrementally(this, this.strokePoints.length - 1);
       }
@@ -633,13 +659,20 @@ export function _endStroke(e = null) {
       this._selectionBeforeStroke = null;
   }
 
+  if (this.brush.type === TOOLS.SMUDGE) {
+      endSmudgeStroke(this);
+  }
   if (this.brush.type === TOOLS.FLUID) {
       endFluidPaintStroke(this);
+  }
+  if (this.brush.type === TOOLS.AIR) {
+      endAirPaintStroke(this);
+      clearAirParticles(this);
   }
 
   // Bake per-stroke buffer
   if (this.perfMonitor) this.perfMonitor.markPhase('stroke_end_bake', { tool: this.brush.type, chunks: this.currentStrokeDirtyChunks ? this.currentStrokeDirtyChunks.size : 0 });
-  if (this.brush.type !== TOOLS.ERASER && this.brush.type !== TOOLS.SMUDGE && this.brush.type !== TOOLS.LIQUIFY && this.brush.type !== TOOLS.FLUID) {
+  if (this.brush.type !== TOOLS.ERASER && this.brush.type !== TOOLS.SMUDGE && this.brush.type !== TOOLS.LIQUIFY && this.brush.type !== TOOLS.FLUID && this.brush.type !== TOOLS.AIR) {
       this.currentStrokeDirtyChunks.forEach((data, id) => {
           const chunk = this.chunks.get(id);
           if (chunk) {
@@ -727,8 +760,8 @@ export function _endStroke(e = null) {
           }
       });
   } else {
-      // If it was smudge, liquify, or fluid paint under active selection
-      if ((this.brush.type === TOOLS.SMUDGE || this.brush.type === TOOLS.LIQUIFY || this.brush.type === TOOLS.FLUID) && this.activeSelectionPath) {
+      // If it was smudge, liquify, fluid paint, or air watercolor under active selection
+      if ((this.brush.type === TOOLS.SMUDGE || this.brush.type === TOOLS.LIQUIFY || this.brush.type === TOOLS.FLUID || this.brush.type === TOOLS.AIR) && this.activeSelectionPath) {
           this.currentStrokeDirtyChunks.forEach((data, id) => {
               const chunk = this.chunks.get(id);
               if (chunk && data.canvas) {
@@ -902,11 +935,6 @@ export function _endStroke(e = null) {
   if (this.brush.type === TOOLS.LIQUIFY) {
       endLiquifyStroke(this);
       this.clearAllOffscreenCanvases();
-  }
-  
-  if (this.brush.type === TOOLS.AIR) {
-      endAirPaintStroke(this);
-      clearAirParticles();
   }
   
   if (this._transformStateBeforeDrag && this.isDrawing) {

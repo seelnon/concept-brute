@@ -19,12 +19,13 @@ uniform float u_isMirrored;
 uniform int u_mode;
 uniform vec4 u_rect;
 uniform vec4 u_localTransform;
+uniform vec4 u_uvRect;
 
 out vec2 v_uv;
 out vec2 v_worldPos;
 
 void main() {
-    v_uv = a_unitPos;
+    v_uv = u_uvRect.xy + a_unitPos * u_uvRect.zw;
     vec2 worldPos;
 
     if (u_mode == 0) {
@@ -71,6 +72,18 @@ uniform int u_useSolidColor;
 uniform float u_opacity;
 uniform int u_clipToBoard;
 uniform vec2 u_boardHalfSize;
+uniform int u_excludeActive;
+uniform vec4 u_excludeRect;
+uniform vec4 u_uvClamp;
+
+uniform vec2 u_viewport;
+uniform vec2 u_invDpr;
+uniform vec2 u_viewCenter;
+uniform vec2 u_pan;
+uniform float u_zoom;
+uniform float u_cosR;
+uniform float u_sinR;
+uniform float u_isMirrored;
 
 out vec4 outColor;
 
@@ -81,10 +94,33 @@ void main() {
         }
     }
 
+    if (u_excludeActive != 0) {
+        // Compute world coordinate identically from gl_FragCoord for both chunk & overlay
+        // so boundary pixels never suffer MSAA triangle-edge / float-interpolation 1px seams.
+        vec2 cssPos = vec2(gl_FragCoord.x * u_invDpr.x, u_viewport.y - gl_FragCoord.y * u_invDpr.y);
+        vec2 d = (cssPos - u_viewCenter - u_pan) / u_zoom;
+        vec2 fragWorldPos = vec2(
+            d.x * u_cosR + d.y * u_sinR,
+            -d.x * u_sinR + d.y * u_cosR
+        );
+        if (u_isMirrored > 0.5) {
+            fragWorldPos.x = -fragWorldPos.x;
+        }
+        bool inBox = (fragWorldPos.x >= u_excludeRect.x && fragWorldPos.x < u_excludeRect.z &&
+                      fragWorldPos.y >= u_excludeRect.y && fragWorldPos.y < u_excludeRect.w);
+        if (u_excludeActive == 1 && inBox) {
+            discard;
+        }
+        if (u_excludeActive == 2 && !inBox) {
+            discard;
+        }
+    }
+
     if (u_useSolidColor == 1) {
         outColor = vec4(u_solidColor.rgb * u_solidColor.a * u_opacity, u_solidColor.a * u_opacity);
     } else {
-        vec4 texColor = texture(u_tex, v_uv);
+        vec2 uv = (u_excludeActive == 2) ? clamp(v_uv, u_uvClamp.xy, u_uvClamp.zw) : v_uv;
+        vec4 texColor = texture(u_tex, uv);
         outColor = texColor * u_opacity;
     }
 }
@@ -293,12 +329,17 @@ export class GPURenderer {
       u_mode: gl.getUniformLocation(this.quadProgram, 'u_mode'),
       u_rect: gl.getUniformLocation(this.quadProgram, 'u_rect'),
       u_localTransform: gl.getUniformLocation(this.quadProgram, 'u_localTransform'),
+      u_uvRect: gl.getUniformLocation(this.quadProgram, 'u_uvRect'),
       u_tex: gl.getUniformLocation(this.quadProgram, 'u_tex'),
       u_solidColor: gl.getUniformLocation(this.quadProgram, 'u_solidColor'),
       u_useSolidColor: gl.getUniformLocation(this.quadProgram, 'u_useSolidColor'),
       u_opacity: gl.getUniformLocation(this.quadProgram, 'u_opacity'),
       u_clipToBoard: gl.getUniformLocation(this.quadProgram, 'u_clipToBoard'),
-      u_boardHalfSize: gl.getUniformLocation(this.quadProgram, 'u_boardHalfSize')
+      u_boardHalfSize: gl.getUniformLocation(this.quadProgram, 'u_boardHalfSize'),
+      u_excludeActive: gl.getUniformLocation(this.quadProgram, 'u_excludeActive'),
+      u_excludeRect: gl.getUniformLocation(this.quadProgram, 'u_excludeRect'),
+      u_uvClamp: gl.getUniformLocation(this.quadProgram, 'u_uvClamp'),
+      u_invDpr: gl.getUniformLocation(this.quadProgram, 'u_invDpr')
     };
 
     // Cache uniform locations for gridProgram
@@ -448,6 +489,21 @@ export class GPURenderer {
       this.gl.deleteTexture(this.selectionTexture);
       this.selectionTexture = null;
     }
+    if (this.airSolver) {
+      this.airSolver.dispose();
+      this.airSolver = null;
+    }
+    this.airOverlay = null;
+    if (this.fluidSolver) {
+      this.fluidSolver.dispose();
+      this.fluidSolver = null;
+    }
+    this.fluidOverlay = null;
+    if (this.smudgeSolver) {
+      this.smudgeSolver.dispose();
+      this.smudgeSolver = null;
+    }
+    this.smudgeOverlay = null;
   }
 
   requestRender() {
@@ -501,6 +557,7 @@ export class GPURenderer {
     gl.useProgram(this.quadProgram);
 
     gl.uniform2f(this.quadLocs.u_viewport, viewW, viewH);
+    gl.uniform2f(this.quadLocs.u_invDpr, viewW / targetW, viewH / targetH);
     gl.uniform2f(this.quadLocs.u_viewCenter, cx, cy);
     gl.uniform2f(this.quadLocs.u_pan, px, py);
     gl.uniform1f(this.quadLocs.u_zoom, zoom);
@@ -508,7 +565,10 @@ export class GPURenderer {
     gl.uniform1f(this.quadLocs.u_sinR, sinR);
     gl.uniform1f(this.quadLocs.u_isMirrored, isMirrored);
     gl.uniform1i(this.quadLocs.u_tex, 0);
+    gl.uniform4f(this.quadLocs.u_uvRect, 0, 0, 1, 1);
+    gl.uniform4f(this.quadLocs.u_uvClamp, 0, 0, 1, 1);
     gl.uniform2f(this.quadLocs.u_boardHalfSize, engine.staticWidth * 0.5, engine.staticHeight * 0.5);
+    gl.uniform1i(this.quadLocs.u_excludeActive, 0);
 
     // 2. If Static Mode: Draw Drop Shadow, Brutalist 4px Border, and Paper Background
     if (engine.isStatic) {
@@ -668,6 +728,23 @@ export class GPURenderer {
 
       gl.uniform1f(this.quadLocs.u_opacity, 1.0);
 
+      const activeOverlay = (layer === engine.activeLayer)
+        ? (this.airOverlay && this.airOverlay.active && this.airOverlay.tex ? this.airOverlay
+          : (this.fluidOverlay && this.fluidOverlay.active && this.fluidOverlay.tex ? this.fluidOverlay
+            : (this.smudgeOverlay && this.smudgeOverlay.active && this.smudgeOverlay.tex ? this.smudgeOverlay : null)))
+        : null;
+      const exX = activeOverlay ? (activeOverlay.exX ?? activeOverlay.x) : 0;
+      const exY = activeOverlay ? (activeOverlay.exY ?? activeOverlay.y) : 0;
+      const exW = activeOverlay ? (activeOverlay.exW ?? activeOverlay.w) : 0;
+      const exH = activeOverlay ? (activeOverlay.exH ?? activeOverlay.h) : 0;
+
+      if (activeOverlay) {
+        gl.uniform1i(this.quadLocs.u_excludeActive, 1);
+        gl.uniform4f(this.quadLocs.u_excludeRect, exX, exY, exX + exW, exY + exH);
+      } else {
+        gl.uniform1i(this.quadLocs.u_excludeActive, 0);
+      }
+
       for (let i = 0; i < visibleChunks.length; i++) {
         const { chunk, wx, wy, cw, ch } = visibleChunks[i];
         if (!chunk.gpuTextures) {
@@ -693,6 +770,37 @@ export class GPURenderer {
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, chunk.gpuTextures[layer]);
         gl.drawArrays(gl.TRIANGLES, 0, 6);
+      }
+
+      if (activeOverlay) {
+        gl.uniform1i(this.quadLocs.u_excludeActive, 2);
+        gl.uniform4f(this.quadLocs.u_excludeRect, exX, exY, exX + exW, exY + exH);
+        gl.uniform4f(
+          this.quadLocs.u_uvClamp,
+          activeOverlay.uMin ?? 0,
+          activeOverlay.vMin ?? 0,
+          activeOverlay.uMax ?? 1,
+          activeOverlay.vMax ?? 1
+        );
+        gl.uniform4f(
+          this.quadLocs.u_uvRect,
+          activeOverlay.u0 ?? 0,
+          activeOverlay.v0 ?? 0,
+          activeOverlay.uw ?? 1,
+          activeOverlay.vh ?? 1
+        );
+        gl.uniform4f(
+          this.quadLocs.u_rect,
+          activeOverlay.x,
+          activeOverlay.y,
+          activeOverlay.w,
+          activeOverlay.h
+        );
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, activeOverlay.tex);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        gl.uniform1i(this.quadLocs.u_excludeActive, 0);
+        gl.uniform4f(this.quadLocs.u_uvRect, 0, 0, 1, 1);
       }
 
       // Render active strokeCanvas immediately above activeLayer

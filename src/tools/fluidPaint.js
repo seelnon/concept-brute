@@ -1,5 +1,6 @@
 import { TOOLS } from '../constants.js';
 import { hexToRgb, rgbToHsl, hslToRgb } from '../colorUtils.js';
+import { GpuFluidSolver } from './fluidPaintGpu.js';
 
 /**
  * Physical Fluid & Tip-Guided Self-Feeding Paint Engine
@@ -25,9 +26,35 @@ export const fluidSettings = {
   depth: 75,
   gloss: 45,
   fluidity: 80,
-  bristles: 40,
-  shading: true
+  bristles: 50,
+  shading: true,
+  followStroke: false,
+  tipAngle: 0,
+  bristleContrast: 65,
+  bleed: 50,
+  tipHardness: 50,
+  pressureFlow: 35
 };
+
+export function syncFluidSettingsFromTip(tipSettings) {
+  if (!tipSettings) return;
+  fluidSettings.flow = tipSettings.fluidFlow ?? 100;
+  fluidSettings.vortex = tipSettings.fluidVortex ?? 55;
+  fluidSettings.turb = tipSettings.fluidTurb ?? 40;
+  fluidSettings.retention = tipSettings.fluidRetention ?? 35;
+  fluidSettings.pickup = tipSettings.fluidPickup ?? 45;
+  fluidSettings.depth = tipSettings.fluidDepth ?? 75;
+  fluidSettings.gloss = tipSettings.fluidGloss ?? 45;
+  fluidSettings.fluidity = tipSettings.fluidity ?? 80;
+  fluidSettings.bristles = tipSettings.bristles ?? 50;
+  fluidSettings.shading = tipSettings.fluidShading !== undefined ? !!tipSettings.fluidShading : true;
+  fluidSettings.followStroke = !!tipSettings.fluidFollowStroke;
+  fluidSettings.tipAngle = tipSettings.fluidTipAngle ?? 0;
+  fluidSettings.bristleContrast = tipSettings.fluidBristleContrast ?? 65;
+  fluidSettings.bleed = tipSettings.fluidBleed ?? 50;
+  fluidSettings.tipHardness = tipSettings.fluidTipHardness ?? 50;
+  fluidSettings.pressureFlow = tipSettings.fluidPressureFlow ?? 35;
+}
 
 // Reusable scratch buffers to eliminate per-frame allocations & GC stalls
 let _tileReadCanvas = null;
@@ -111,86 +138,61 @@ export function initFluidPaint(app) {
   }
 
   if (sliderFluidity) {
-    const saved = localStorage.getItem('fluid_setting_slider-fluidity');
-    if (saved !== null) {
-      sliderFluidity.value = saved;
-      fluidSettings.fluidity = parseFloat(saved);
-    }
-    if (valFluidity) valFluidity.innerText = `${sliderFluidity.value}%`;
     sliderFluidity.oninput = () => {
       const v = parseFloat(sliderFluidity.value);
       fluidSettings.fluidity = v;
-      if (valFluidity) valFluidity.innerText = `${v}%`;
-      localStorage.setItem('fluid_setting_slider-fluidity', sliderFluidity.value);
+      if (valFluidity) valFluidity.innerText = `${Math.round(v)}%`;
       if (app.updateActiveSetting) app.updateActiveSetting('fluidity', v);
     };
   }
 
   if (sliderBristles) {
-    const saved = localStorage.getItem('fluid_setting_slider-bristles');
-    if (saved !== null) {
-      sliderBristles.value = saved;
-      fluidSettings.bristles = parseInt(saved, 10);
-    }
-    if (valBristles) valBristles.innerText = sliderBristles.value;
     sliderBristles.oninput = () => {
       const v = parseInt(sliderBristles.value, 10);
       fluidSettings.bristles = v;
       if (valBristles) valBristles.innerText = v;
-      localStorage.setItem('fluid_setting_slider-bristles', sliderBristles.value);
+      if (app.updateActiveSetting) app.updateActiveSetting('bristles', v);
     };
   }
 
-  const setupSlider = (sliderId, valId, settingKey, defaultVal) => {
+  const setupSlider = (sliderId, valId, fluidKey, tipKey, defaultVal) => {
     const slider = document.getElementById(sliderId);
     const val = document.getElementById(valId);
     if (slider) {
-      const saved = localStorage.getItem('fluid_setting_' + sliderId);
-      if (saved !== null) {
-        slider.value = saved;
-        fluidSettings[settingKey] = parseFloat(saved);
-      } else {
-        slider.value = defaultVal;
-        fluidSettings[settingKey] = defaultVal;
-      }
-      if (val) val.innerText = `${slider.value}%`;
+      slider.value = defaultVal;
+      fluidSettings[fluidKey] = defaultVal;
+      if (val) val.innerText = `${defaultVal}%`;
 
       slider.oninput = () => {
         const v = parseFloat(slider.value);
-        fluidSettings[settingKey] = v;
-        if (val) val.innerText = `${v}%`;
-        localStorage.setItem('fluid_setting_' + sliderId, slider.value);
+        fluidSettings[fluidKey] = v;
+        if (val) val.innerText = `${Math.round(v)}%`;
+        if (app.updateActiveSetting) app.updateActiveSetting(tipKey, v);
       };
     }
   };
 
-  const setupCheckbox = (chkId, settingKey, defaultVal) => {
+  const setupCheckbox = (chkId, fluidKey, tipKey, defaultVal) => {
     const chk = document.getElementById(chkId);
     if (chk) {
-      const saved = localStorage.getItem('fluid_setting_' + chkId);
-      if (saved !== null) {
-        chk.checked = saved === 'true';
-        fluidSettings[settingKey] = chk.checked;
-      } else {
-        chk.checked = defaultVal;
-        fluidSettings[settingKey] = defaultVal;
-      }
+      chk.checked = defaultVal;
+      fluidSettings[fluidKey] = defaultVal;
       chk.onchange = () => {
-        fluidSettings[settingKey] = chk.checked;
-        localStorage.setItem('fluid_setting_' + chkId, chk.checked);
+        fluidSettings[fluidKey] = chk.checked;
+        if (app.updateActiveSetting) app.updateActiveSetting(tipKey, chk.checked);
       };
     }
   };
 
-  setupSlider('slider-fluid-flow', 'val-fluid-flow', 'flow', 100);
-  setupSlider('slider-fluid-vortex', 'val-fluid-vortex', 'vortex', 55);
-  setupSlider('slider-fluid-turb', 'val-fluid-turb', 'turb', 40);
-  setupSlider('slider-fluid-retention', 'val-fluid-retention', 'retention', 35);
-  setupSlider('slider-fluid-pickup', 'val-fluid-pickup', 'pickup', 45);
-  setupSlider('slider-fluid-depth', 'val-fluid-depth', 'depth', 75);
-  setupSlider('slider-fluid-gloss', 'val-fluid-gloss', 'gloss', 45);
+  setupSlider('slider-fluid-flow', 'val-fluid-flow', 'flow', 'fluidFlow', 100);
+  setupSlider('slider-fluid-vortex', 'val-fluid-vortex', 'vortex', 'fluidVortex', 55);
+  setupSlider('slider-fluid-turb', 'val-fluid-turb', 'turb', 'fluidTurb', 40);
+  setupSlider('slider-fluid-retention', 'val-fluid-retention', 'retention', 'fluidRetention', 35);
+  setupSlider('slider-fluid-pickup', 'val-fluid-pickup', 'pickup', 'fluidPickup', 45);
+  setupSlider('slider-fluid-depth', 'val-fluid-depth', 'depth', 'fluidDepth', 75);
+  setupSlider('slider-fluid-gloss', 'val-fluid-gloss', 'gloss', 'fluidGloss', 45);
 
-  setupCheckbox('chk-surface-shading', 'shading', true);
+  setupCheckbox('chk-surface-shading', 'shading', 'fluidShading', true);
 }
 
 export function activateFluidPaint(app) {
@@ -203,10 +205,11 @@ export function activateFluidPaint(app) {
   const ctrlBristles = document.getElementById('control-bristles');
   if (ctrlBristles) ctrlBristles.style.display = 'flex';
 
-  const sliderFluidity = document.getElementById('slider-fluidity');
-  if (sliderFluidity) {
-    const v = parseFloat(sliderFluidity.value);
-    if (!Number.isNaN(v)) fluidSettings.fluidity = v;
+  if (app.getCurrentTipSettings) {
+    const tipSettings = app.getCurrentTipSettings();
+    if (tipSettings) {
+      syncFluidSettingsFromTip(tipSettings);
+    }
   }
 
   app._status('FLUID PAINT ACTIVE');
@@ -255,11 +258,14 @@ function clampByte(v) {
   return v < 0 ? 0 : v > 255 ? 255 : (v + 0.5) | 0;
 }
 
+let _curlVx = 0.0;
+let _curlVy = 0.0;
+
 /**
  * Analytic divergence-free 2D curl noise velocity field: v = curl(psi)
- * Produces smooth incompressible fluid eddies (zero pinch/explosion).
+ * Writes into module scalars (_curlVx, _curlVy) with zero heap allocation.
  */
-function sampleCurl(x, y, time, freq) {
+function sampleCurlScalar(x, y, time, freq) {
   const fx = x * freq;
   const fy = y * freq;
   const p1 = fx + time;
@@ -267,15 +273,8 @@ function sampleCurl(x, y, time, freq) {
   const p2 = 2.1 * fx - 1.3 * time;
   const q2 = 1.9 * fy + 0.9 * time;
 
-  const sinP1 = Math.sin(p1), cosP1 = Math.cos(p1);
-  const sinQ1 = Math.sin(q1), cosQ1 = Math.cos(q1);
-  const sinP2 = Math.sin(p2), cosP2 = Math.cos(p2);
-  const sinQ2 = Math.sin(q2), cosQ2 = Math.cos(q2);
-
-  return {
-    vx: -sinP1 * sinQ1 + 0.95 * sinP2 * cosQ2,
-    vy: -(cosP1 * cosQ1 + 1.05 * cosP2 * sinQ2)
-  };
+  _curlVx = -Math.sin(p1) * Math.sin(q1) + 0.95 * Math.sin(p2) * Math.cos(q2);
+  _curlVy = -(Math.cos(p1) * Math.cos(q1) + 1.05 * Math.cos(p2) * Math.sin(q2));
 }
 
 // ----------------------------------------------------
@@ -296,11 +295,19 @@ function prepareTipMaps(engine) {
     _tipWorkCtx.drawImage(tip, 0, 0, TIP_RES, TIP_RES);
     const data = _tipWorkCtx.getImageData(0, 0, TIP_RES, TIP_RES).data;
 
+    const hardNorm = Math.max(0.0, Math.min(1.0, (fluidSettings.tipHardness ?? 50) / 100.0));
     let anyOpaque = false;
     for (let y = 0; y < TIP_RES; y++) {
       for (let x = 0; x < TIP_RES; x++) {
         const i = y * TIP_RES + x;
-        const a = data[i * 4 + 3] / 255.0;
+        let a = data[i * 4 + 3] / 255.0;
+        if (hardNorm < 0.48) {
+          const exp = 1.0 + (0.5 - hardNorm) * 2.2;
+          a = Math.pow(a, exp);
+        } else if (hardNorm > 0.52 && a > 0.0) {
+          const boost = 1.0 + (hardNorm - 0.5) * 4.0;
+          a = Math.min(1.0, Math.max(0.0, (a - 0.15 * (hardNorm - 0.5)) * boost));
+        }
         _tipRaw[i] = a;
         if (a > 0.18) {
           anyOpaque = true;
@@ -715,7 +722,18 @@ function writePatchToTilesAndChunks(engine, fb, boxX, boxY, boxW, boxH, isShadin
       const id = `${cx},${cy}`;
       engine._markDirty(id, layer, false);
       if (engine.gpuRenderer) {
-        engine.gpuRenderer.markChunkLayerDirty(chunk, layer);
+        const scale = engine.isStatic ? (engine.dpiScale || 1.0) : 1.0;
+        const pxX = Math.max(0, Math.floor(dstX * scale));
+        const pxY = Math.max(0, Math.floor(dstY * scale));
+        const pxW = Math.min(chunk.canvases[layer].width - pxX, Math.ceil(ow * scale));
+        const pxH = Math.min(chunk.canvases[layer].height - pxY, Math.ceil(oh * scale));
+        if (pxW > 0 && pxH > 0) {
+          const subImg = ctx.getImageData(pxX, pxY, pxW, pxH);
+          engine.gpuRenderer.updateChunkTextureSubRegion(chunk, layer, pxX, pxY, pxW, pxH, subImg);
+          engine.gpuRenderer.requestRender();
+        } else {
+          engine.gpuRenderer.markChunkLayerDirty(chunk, layer);
+        }
       }
     }
   }
@@ -773,7 +791,7 @@ function spawnFluidStreamer(fb, x, y, dirX, dirY, radius, speed, baseColor, rotA
     seed: Math.random() * 50
   });
 
-  if (fb.streamers.length > 48) {
+  if (fb.streamers.length > 28) {
     fb.streamers.shift();
   }
 }
@@ -841,6 +859,15 @@ function drawStreamerSegToPatch(boxX, boxY, boxW, boxH, x0, y0, x1, y1, r, g, b,
   }
 }
 
+function getGpuFluidSolver(engine) {
+  const gr = engine && engine.gpuRenderer;
+  if (!gr || !gr.supported || !gr.gl) return null;
+  if (!gr.fluidSolver) {
+    gr.fluidSolver = new GpuFluidSolver(gr);
+  }
+  return gr.fluidSolver.ready ? gr.fluidSolver : null;
+}
+
 // ----------------------------------------------------
 // PUBLIC STROKE LIFECYCLE
 // ----------------------------------------------------
@@ -853,7 +880,13 @@ export function startFluidPaintStroke(engine, worldPos) {
 
   prepareTipMaps(engine);
 
+  const solver = getGpuFluidSolver(engine);
+  const useGpu = !!(solver && solver.beginStroke(engine, worldPos, _tipRaw, _tipBump));
+
   engine.activeFluidBrush = {
+    useGpu,
+    dabHistory: [],
+    lastDabDist: -999,
     streamers: [],
     tiles: new Map(),
     p0: { x: worldPos.x, y: worldPos.y },
@@ -871,12 +904,14 @@ export function startFluidPaintStroke(engine, worldPos) {
     time: Math.random() * 10.0
   };
 
-  // Pre-warm initial chunk backup lazily on pointerdown
-  const cx = engine.isStatic ? 0 : Math.floor(worldPos.x / engine.chunkSize);
-  const cy = engine.isStatic ? 0 : Math.floor(worldPos.y / engine.chunkSize);
-  const chunk = engine._getChunk(cx, cy);
-  if (chunk) {
-    ensureChunkBackup(engine, chunk, cx, cy);
+  if (!useGpu) {
+    // Pre-warm initial chunk backup lazily on pointerdown for CPU fallback
+    const cx = engine.isStatic ? 0 : Math.floor(worldPos.x / engine.chunkSize);
+    const cy = engine.isStatic ? 0 : Math.floor(worldPos.y / engine.chunkSize);
+    const chunk = engine._getChunk(cx, cy);
+    if (chunk) {
+      ensureChunkBackup(engine, chunk, cx, cy);
+    }
   }
 }
 
@@ -895,6 +930,16 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
     fb.prevDir = { x: dirX, y: dirY };
   }
 
+  const brushAngleJitter = engine?.brush?.jitterAngle || 0;
+  const stepAngleJitter = brushAngleJitter > 0.001 ? ((Math.random() - 0.5) * 2.0 * brushAngleJitter) : 0.0;
+  const baseHueJitter = engine?.brush?.jitterHue || 0;
+  let stepColor = baseColor;
+  if (baseHueJitter > 0.005) {
+    const hsl = rgbToHsl(baseColor.r, baseColor.g, baseColor.b);
+    const hShift = (Math.random() - 0.5) * baseHueJitter * 180.0;
+    stepColor = hslToRgb((hsl.h + hShift + 360) % 360, hsl.s, hsl.l);
+  }
+
   // Normalized tuning parameters
   const flowRatio = fluidSettings.flow / 100;
   const vortexRatio = fluidSettings.vortex / 100;
@@ -904,18 +949,24 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
   const depthRatio = fluidSettings.depth / 100;
   const glossRatio = fluidSettings.gloss / 100;
   const fluidityRatio = fluidSettings.fluidity / 100;
+  const bleedRatio = (fluidSettings.bleed ?? 50) / 100;
+  const bristleContrastRatio = (fluidSettings.bristleContrast ?? 65) / 100;
+  const pressureFlowRatio = (fluidSettings.pressureFlow ?? 35) / 100;
   const isShading = fluidSettings.shading;
   const brCount = Math.max(8, fluidSettings.bristles || 40);
 
   const effPressure = engine?.brush?.pressureEnabled ? pressure : 1.0;
   const brushFlow = engine?.brush?.flow !== undefined ? engine.brush.flow : 1.0;
+  const pFlowMod = (1.0 - pressureFlowRatio) + pressureFlowRatio * effPressure;
   // Flow Rate (Advection) + top-bar Flow control physical paint production/thickness (strand fill & advection push),
-  // while Opacity strictly controls translucency so low Flow produces thinner paint rather than washed-out opacity!
-  const paintSupply = Math.max(0.01, Math.min(1.0, flowRatio * brushFlow));
-  const strokeOpacity = Math.min(1.0, Math.max(0.01, (opacity || 1.0) * effPressure));
+  // while Opacity strictly controls translucency (opacMod from stroke.js already applies pressureOpacityInfluence).
+  const paintSupply = Math.max(0.01, Math.min(1.0, flowRatio * brushFlow * pFlowMod));
+  const strokeOpacity = Math.min(1.0, Math.max(0.01, opacity || 1.0));
 
   const curlFreq = 1.0 / Math.max(12.0, radius * 0.90);
-  const rotAngle = engine?.rotation || 0;
+  const strokeFollowAngle = fluidSettings.followStroke ? Math.atan2(dirY, dirX) : 0.0;
+  const tipOffsetAngle = ((fluidSettings.tipAngle ?? 0) * Math.PI) / 180.0;
+  const rotAngle = (engine?.rotation || 0) + strokeFollowAngle + tipOffsetAngle + stepAngleJitter;
   const cosR = Math.cos(-rotAngle);
   const sinR = Math.sin(-rotAngle);
   const hasCurl = vortexRatio > 0.005 || turbRatio > 0.005;
@@ -947,15 +998,19 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
           dirY,
           radius,
           dist,
-          baseColor,
+          stepColor,
           rotAngle
         );
       }
     }
   }
 
-  const streamerSteps = isTailFlush ? 1 : 2;
+  const streamerSteps = 1;
   const streamerSegsToDraw = [];
+  const midX = (from.x + to.x) * 0.5;
+  const midY = (from.y + to.y) * 0.5;
+  const maxStreamerSpan = Math.max(radius * 2.25, radius + dist * 0.65);
+
   for (let i = fb.streamers.length - 1; i >= 0; i--) {
     const s = fb.streamers[i];
     if (s.life <= 0.01) {
@@ -971,7 +1026,13 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
       const ry = s.y - s.centerY;
       const cd = Math.hypot(rx, ry) || 0.01;
 
-      const curl = hasCurl ? sampleCurl(s.x + s.seed, s.y + s.seed, curTime, curlFreq * 0.85) : { vx: 0, vy: 0 };
+      let cVx = 0.0;
+      let cVy = 0.0;
+      if (hasCurl) {
+        sampleCurlScalar(s.x + s.seed, s.y + s.seed, curTime, curlFreq * 0.85);
+        cVx = _curlVx;
+        cVy = _curlVy;
+      }
       const curlAmp = turbRatio * 1.45 * (0.6 + fluidityRatio * 0.8);
       const rotAmp = vortexRatio * 1.45 * s.orbitSpeed;
       const rotX = (-ry / cd) * rotAmp;
@@ -981,8 +1042,8 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
       const pushX = dirX * Math.min(4.0, dist * 0.35) * pushProx;
       const pushY = dirY * Math.min(4.0, dist * 0.35) * pushProx;
 
-      s.vx = s.vx * 0.88 + (curl.vx * curlAmp + rotX + pushX) * 0.28;
-      s.vy = s.vy * 0.88 + (curl.vy * curlAmp + rotY + pushY) * 0.28;
+      s.vx = s.vx * 0.88 + (cVx * curlAmp + rotX + pushX) * 0.28;
+      s.vy = s.vy * 0.88 + (cVy * curlAmp + rotY + pushY) * 0.28;
 
       const spd = Math.hypot(s.vx, s.vy);
       const maxSpd = Math.max(2.5, radius * 0.22);
@@ -1011,10 +1072,12 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
           alpha: Math.min(0.65, s.alpha * lifeSin * strokeOpacity * (0.35 + 0.65 * paintSupply)),
           width: Math.max(0.55, s.widthBase * lifeSin * (0.45 + 0.55 * paintSupply))
         });
-        if (s.x - 6 < minX) minX = s.x - 6;
-        if (s.x + 6 > maxX) maxX = s.x + 6;
-        if (s.y - 6 < minY) minY = s.y - 6;
-        if (s.y + 6 > maxY) maxY = s.y + 6;
+        if (Math.abs(s.x - midX) <= maxStreamerSpan && Math.abs(s.y - midY) <= maxStreamerSpan) {
+          if (s.x - 6 < minX) minX = s.x - 6;
+          if (s.x + 6 > maxX) maxX = s.x + 6;
+          if (s.y - 6 < minY) minY = s.y - 6;
+          if (s.y + 6 > maxY) maxY = s.y + 6;
+        }
       }
       if (s.life <= 0.01) break;
     }
@@ -1024,9 +1087,8 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
     }
   }
 
-  // Adaptive physics step for large brushes (keeps >100px brushes blazing fast at 60fps!)
-  const simStep = radius <= 48 ? 1 : (radius <= 115 ? 2 : 3);
   const sweepR = radius * 1.08;
+  const simStep = radius <= 48 ? 1 : (radius <= 115 ? 2 : 3);
   const extraPad = Math.ceil(Math.max(10, sweepR * 0.14)) + 6 + simStep;
 
   const boxX = Math.floor(Math.min(minX, Math.min(from.x, to.x) - sweepR) - extraPad);
@@ -1035,6 +1097,72 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
   const boxY2 = Math.ceil(Math.max(maxY, Math.max(from.y, to.y) + sweepR) + extraPad);
   const boxW = Math.max(8, boxX2 - boxX);
   const boxH = Math.max(8, boxY2 - boxY);
+
+  // GPU Fast Path (1:1 pixel resolution on WebGL2 GPU — zero CPU tile readback or stalls!)
+  if (fb.useGpu) {
+    const solver = getGpuFluidSolver(engine);
+    if (solver && solver.active) {
+      const coverWindow = Math.max(24.0, radius * 2.40);
+      const bleedMult = 0.25 + bleedRatio * 1.50;
+      const advSupply = 0.16 + 0.84 * paintSupply;
+      solver.runStep(engine, {
+        isTailFlush,
+        minX: Math.min(minX, Math.min(from.x, to.x) - sweepR),
+        minY: Math.min(minY, Math.min(from.y, to.y) - sweepR),
+        maxX: Math.max(maxX, Math.max(from.x, to.x) + sweepR),
+        maxY: Math.max(maxY, Math.max(from.y, to.y) + sweepR),
+        extraPad,
+        fromX: from.x,
+        fromY: from.y,
+        toX: to.x,
+        toY: to.y,
+        dirX,
+        dirY,
+        prevDX: fb.prevDir.x,
+        prevDY: fb.prevDir.y,
+        safeDist,
+        prevDistTotal,
+        coverWindow,
+        radius,
+        cosR,
+        sinR,
+        curTime,
+        curlFreq,
+        hasCurl,
+        dragAmp: Math.min(3.5, safeDist * 0.24) * fluidityRatio * advSupply * (0.55 + bleedRatio * 0.9),
+        swirlAmp: vortexRatio * (0.9 + fluidityRatio * 1.8) * advSupply,
+        curlAmp: turbRatio * (0.8 + fluidityRatio * 1.6) * advSupply,
+        lagDistBase: (0.8 + fluidityRatio * 2.4) * (0.6 + bleedRatio * 0.8),
+        advMixBase: Math.min(0.74, (0.14 + fluidityRatio * 0.36) * advSupply * bleedMult),
+        trailFeatherInv: 1.0 / Math.max(4.0, radius * (0.22 + bleedRatio * 0.28)),
+        brFreq: brCount * 0.44,
+        bristleContrastRatio,
+        fluidityRatio,
+        vortexRatio,
+        turbRatio,
+        depthScale: depthRatio * 18.5 + glossRatio * 2.5,
+        paintSupply,
+        supplyThreshold: (1.0 - paintSupply) * 0.68,
+        strokeOpacity,
+        recolorRateBase: Math.min(0.95, (0.18 + retentionRatio * 0.72) * (1.0 - pickupRatio * 0.50) * (0.35 + 0.65 * paintSupply)),
+        pickupRatio,
+        retentionRatio,
+        paintR: stepColor.r,
+        paintG: stepColor.g,
+        paintB: stepColor.b,
+        streamerSegs: streamerSegsToDraw,
+        streamerHScale: depthRatio * 10.0 + glossRatio * 2.0,
+        isShading,
+        depthRatio,
+        glossRatio
+      });
+
+      if (!isTailFlush) {
+        fb.prevDir = { x: dirX, y: dirY };
+      }
+      return;
+    }
+  }
 
   ensureScratchBuffers(boxW, boxH);
   readPatchFromTiles(engine, fb, boxX, boxY, boxW, boxH);
@@ -1077,13 +1205,13 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
     }
 
     const replenishRate = 0.08 + retentionRatio * 0.55;
-    fb.carriedR = fb.carriedR * (1.0 - replenishRate) + baseColor.r * replenishRate;
-    fb.carriedG = fb.carriedG * (1.0 - replenishRate) + baseColor.g * replenishRate;
-    fb.carriedB = fb.carriedB * (1.0 - replenishRate) + baseColor.b * replenishRate;
+    fb.carriedR = fb.carriedR * (1.0 - replenishRate) + stepColor.r * replenishRate;
+    fb.carriedG = fb.carriedG * (1.0 - replenishRate) + stepColor.g * replenishRate;
+    fb.carriedB = fb.carriedB * (1.0 - replenishRate) + stepColor.b * replenishRate;
   } else if (!isTailFlush) {
-    fb.carriedR = baseColor.r;
-    fb.carriedG = baseColor.g;
-    fb.carriedB = baseColor.b;
+    fb.carriedR = stepColor.r;
+    fb.carriedG = stepColor.g;
+    fb.carriedB = stepColor.b;
   }
 
   // Step 4: Unified Swept Tip-Guided Self-Advection + Continuous Filament Texture
@@ -1121,13 +1249,14 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
       }
     }
 
+    const bleedMult = 0.25 + bleedRatio * 1.50;
     const advSupply = 0.16 + 0.84 * paintSupply;
-    const dragAmp = Math.min(3.5, safeDist * 0.24) * fluidityRatio * advSupply;
+    const dragAmp = Math.min(3.5, safeDist * 0.24) * fluidityRatio * advSupply * (0.55 + bleedRatio * 0.9);
     const swirlAmp = vortexRatio * (0.9 + fluidityRatio * 1.8) * advSupply;
     const curlAmp = turbRatio * (0.8 + fluidityRatio * 1.6) * advSupply;
-    const lagDistBase = 0.8 + fluidityRatio * 2.4;
-    const advMixBase = Math.min(0.62, (0.14 + fluidityRatio * 0.36) * advSupply);
-    const trailFeatherInv = 1.0 / Math.max(4.0, radius * 0.35);
+    const lagDistBase = (0.8 + fluidityRatio * 2.4) * (0.6 + bleedRatio * 0.8);
+    const advMixBase = Math.min(0.74, (0.14 + fluidityRatio * 0.36) * advSupply * bleedMult);
+    const trailFeatherInv = 1.0 / Math.max(4.0, radius * (0.22 + bleedRatio * 0.28));
 
     const brFreq = brCount * 0.44;
     const depthScale = depthRatio * 18.5 + glossRatio * 2.5;
@@ -1142,17 +1271,57 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
     const recolorRateBase = Math.min(0.95, (0.18 + retentionRatio * 0.72) * (1.0 - pickupRatio * 0.50) * (0.35 + 0.65 * paintSupply));
     const supplyThreshold = (1.0 - paintSupply) * 0.68;
 
-    const duDs = -(dirX * cosR + dirY * sinR) * invRadius * tipHalf;
-    const dvDs = -(-dirX * sinR + dirY * cosR) * invRadius * tipHalf;
+    const duDs = -(dirX * cosR - dirY * sinR) * invRadius * tipHalf;
+    const dvDs = -(dirX * sinR + dirY * cosR) * invRadius * tipHalf;
+
+    const dp1 = curlFreq * simStep;
+    const dp2 = 2.1 * dp1;
+    const cStep1 = Math.cos(dp1);
+    const sStep1 = Math.sin(dp1);
+    const cStep2 = Math.cos(dp2);
+    const sStep2 = Math.sin(dp2);
+    const baseP1 = (boxX + aMinX) * curlFreq + curTime;
+    const baseP2 = 2.1 * ((boxX + aMinX) * curlFreq) - 1.3 * curTime;
+    const baseCosP1 = Math.cos(baseP1);
+    const baseSinP1 = Math.sin(baseP1);
+    const baseCosP2 = Math.cos(baseP2);
+    const baseSinP2 = Math.sin(baseP2);
 
     for (let y = aMinY; y <= aMaxY; y += simStep) {
       const worldY = boxY + y;
       const row = y * boxW;
       const apy = y - fYLocal;
 
+      let sinQ1 = 0.0, cosQ1 = 1.0, sinQ2 = 0.0, cosQ2 = 1.0;
+      let curCosP1 = baseCosP1, curSinP1 = baseSinP1;
+      let curCosP2 = baseCosP2, curSinP2 = baseSinP2;
+      if (hasCurl) {
+        const fyC = worldY * curlFreq;
+        const q1 = fyC - 0.7 * curTime;
+        const q2 = 1.9 * fyC + 0.9 * curTime;
+        sinQ1 = Math.sin(q1);
+        cosQ1 = Math.cos(q1);
+        sinQ2 = Math.sin(q2);
+        cosQ2 = Math.cos(q2);
+      }
+
       for (let x = aMinX; x <= aMaxX; x += simStep) {
         const worldX = boxX + x;
         const apx = x - fXLocal;
+
+        let curSinP1Val = curSinP1, curCosP1Val = curCosP1;
+        let curSinP2Val = curSinP2, curCosP2Val = curCosP2;
+        if (hasCurl) {
+          const nextCos1 = curCosP1 * cStep1 - curSinP1 * sStep1;
+          const nextSin1 = curSinP1 * cStep1 + curCosP1 * sStep1;
+          curCosP1 = nextCos1;
+          curSinP1 = nextSin1;
+
+          const nextCos2 = curCosP2 * cStep2 - curSinP2 * sStep2;
+          const nextSin2 = curSinP2 * cStep2 + curCosP2 * sStep2;
+          curCosP2 = nextCos2;
+          curSinP2 = nextSin2;
+        }
 
         const proj = apx * dirX + apy * dirY;
         let tSeg = proj / safeDist;
@@ -1223,9 +1392,8 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
         let curlVx = 0.0;
         let curlVy = 0.0;
         if (hasCurl) {
-          const curl = sampleCurl(worldX, worldY, curTime, curlFreq);
-          curlVx = curl.vx;
-          curlVy = curl.vy;
+          curlVx = -curSinP1Val * sinQ1 + 0.95 * curSinP2Val * cosQ2;
+          curlVy = -(curCosP1Val * cosQ1 + 1.05 * curCosP2Val * sinQ2);
         }
 
         const trailFade = proj >= 0.0 ? 1.0 : Math.max(0.0, 1.0 + proj * trailFeatherInv);
@@ -1314,7 +1482,7 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
           const ridgePhase = crossNorm * brFreq + phaseWarp;
           const wave = 0.54 + 0.30 * Math.sin(ridgePhase) + 0.16 * Math.sin(ridgePhase * 2.13 + phaseWarp * 0.6);
 
-          const ridgePronounce = (0.24 + 0.76 * maxTipBump) * (0.40 + 0.60 * (1.0 - fluidityRatio * 0.50));
+          const ridgePronounce = (0.10 + 0.90 * bristleContrastRatio) * (0.24 + 0.76 * maxTipBump) * (0.40 + 0.60 * (1.0 - fluidityRatio * 0.50));
           const ridgeFactor = 1.0 - ridgePronounce * (1.0 - wave);
 
           let strandCoverage = maxTipA;
@@ -1345,7 +1513,7 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
               outA01 = targetBrushAlpha;
             }
 
-            const toneShift = (wave - 0.54) * (5.0 + 11.0 * maxTipBump);
+            const toneShift = (wave - 0.54) * (4.0 + 14.0 * maxTipBump) * (0.2 + 1.25 * bristleContrastRatio);
             const fR = clampByte(paintR + toneShift);
             const fG = clampByte(paintG + toneShift);
             const fB = clampByte(paintB + toneShift);
@@ -1552,33 +1720,49 @@ export function paintFluidOnChunks(engine, from, to, size, opacity, color, press
   const rawDy = to.y - from.y;
   const dist = Math.hypot(rawDx, rawDy) || 0.001;
 
-  const radius = Math.max(2.0, (size || engine.brush.size || 35) * 0.5);
+  let radius = Math.max(2.0, (size || engine.brush.size || 35) * 0.5);
+  const jSize = engine?.brush?.jitterSize || 0;
+  if (jSize > 0.005) {
+    const targetMod = Math.max(0.25, 1.0 + (Math.random() - 0.5) * 1.4 * jSize);
+    fb.curSizeMod = (fb.curSizeMod ?? 1.0) * 0.65 + targetMod * 0.35;
+    radius = Math.max(2.0, radius * fb.curSizeMod);
+  }
   fb.radius = radius;
+
+  let targetToX = to.x;
+  let targetToY = to.y;
+  const jPos = engine?.brush?.jitterPos || 0;
+  if (jPos > 0.005) {
+    const scR = radius * jPos * 0.45;
+    targetToX += (Math.random() - 0.5) * 2.0 * scR;
+    targetToY += (Math.random() - 0.5) * 2.0 * scR;
+  }
+
   const baseColor = parseColor(color || engine.brush.color);
   fb.baseColor = baseColor;
 
   if (dist > 500.0) {
-    fb.p0 = { x: to.x, y: to.y };
+    fb.p0 = { x: targetToX, y: targetToY };
     fb.p1 = null;
-    fb.midPrev = { x: to.x, y: to.y };
-    fb.lastPos = { x: to.x, y: to.y };
+    fb.midPrev = { x: targetToX, y: targetToY };
+    fb.lastPos = { x: targetToX, y: targetToY };
     fb.prevDir = null;
     return;
   }
 
   if (!fb.p1) {
-    const mid = { x: (fb.p0.x + to.x) * 0.5, y: (fb.p0.y + to.y) * 0.5 };
+    const mid = { x: (fb.p0.x + targetToX) * 0.5, y: (fb.p0.y + targetToY) * 0.5 };
     runFluidStep(engine, fb, fb.p0, mid, radius, opacity, baseColor, pressure, false);
-    fb.p1 = { x: to.x, y: to.y };
+    fb.p1 = { x: targetToX, y: targetToY };
     fb.midPrev = mid;
   } else {
-    const midNext = { x: (fb.p1.x + to.x) * 0.5, y: (fb.p1.y + to.y) * 0.5 };
+    const midNext = { x: (fb.p1.x + targetToX) * 0.5, y: (fb.p1.y + targetToY) * 0.5 };
     runSmoothedBezier(engine, fb, fb.midPrev, fb.p1, midNext, radius, opacity, baseColor, pressure);
-    fb.p1 = { x: to.x, y: to.y };
+    fb.p1 = { x: targetToX, y: targetToY };
     fb.midPrev = midNext;
   }
 
-  fb.lastPos = { x: to.x, y: to.y };
+  fb.lastPos = { x: targetToX, y: targetToY };
   fb.lastOpacity = opacity;
   fb.lastPressure = pressure;
 }
@@ -1598,7 +1782,7 @@ export function endFluidPaintStroke(engine) {
       const dabAngle = Math.random() * Math.PI * 2;
       const dabDist = Math.max(0.8, Math.min(2.5, fb.radius * 0.06));
       const dabTo = { x: p.x + Math.cos(dabAngle) * dabDist, y: p.y + Math.sin(dabAngle) * dabDist };
-      runFluidStep(engine, fb, p, dabTo, fb.radius, op, fb.baseColor, 1.0, false);
+      runFluidStep(engine, fb, p, dabTo, fb.radius, op, fb.baseColor, pr, false);
     } else if (fb.p1 && fb.midPrev) {
       // Flush final half-segment smoothly to the exact pointerup coordinate
       runFluidStep(engine, fb, fb.midPrev, fb.p1, fb.radius, op, fb.baseColor, pr, false);
@@ -1609,8 +1793,16 @@ export function endFluidPaintStroke(engine) {
       runFluidStep(engine, fb, fb.lastPos, fb.lastPos, fb.radius, op, fb.baseColor, 1.0, true);
     }
 
+    if (fb.useGpu) {
+      const solver = getGpuFluidSolver(engine);
+      if (solver && solver.active) {
+        solver.endStroke(engine);
+      }
+    }
+
     fb.tiles.clear();
     fb.streamers = [];
+    fb.dabHistory = [];
     engine.activeFluidBrush = null;
   }
 }
@@ -1620,6 +1812,9 @@ export function endFluidPaintStroke(engine) {
  */
 export function cancelFluidAfterEffect(engine) {
   if (!engine) return;
+  if (engine.gpuRenderer && engine.gpuRenderer.fluidSolver) {
+    engine.gpuRenderer.fluidSolver.cancel(engine);
+  }
   if (engine.activeFluidBrush) {
     if (engine.activeFluidBrush.tiles) engine.activeFluidBrush.tiles.clear();
     engine.activeFluidBrush = null;

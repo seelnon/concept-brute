@@ -90,14 +90,24 @@ export function startLiquifyStroke(engine, worldPos) {
     // Fixed, high precision cell size of 8px (<0.01ms evaluation)
     const cellSize = 8.0;
 
+    const sessionDim = 3072;
     let originX, originY, width, height;
     if (engine.isStatic) {
-        width = Math.ceil(engine.staticWidth / 8) * 8;
-        height = Math.ceil(engine.staticHeight / 8) * 8;
-        originX = -engine.staticWidth / 2;
-        originY = -engine.staticHeight / 2;
+        const fullW = Math.ceil(engine.staticWidth / 8) * 8;
+        const fullH = Math.ceil(engine.staticHeight / 8) * 8;
+        width = Math.min(sessionDim, fullW);
+        height = Math.min(sessionDim, fullH);
+        const minOriginX = -engine.staticWidth / 2;
+        const minOriginY = -engine.staticHeight / 2;
+        const maxOriginX = Math.max(minOriginX, engine.staticWidth / 2 - width);
+        const maxOriginY = Math.max(minOriginY, engine.staticHeight / 2 - height);
+        originX = fullW <= sessionDim
+            ? minOriginX
+            : Math.max(minOriginX, Math.min(maxOriginX, Math.floor((worldPos.x - width / 2) / 64) * 64));
+        originY = fullH <= sessionDim
+            ? minOriginY
+            : Math.max(minOriginY, Math.min(maxOriginY, Math.floor((worldPos.y - height / 2) / 64) * 64));
     } else {
-        const sessionDim = 3072;
         width = sessionDim;
         height = sessionDim;
         originX = Math.floor((worldPos.x - width / 2) / 64) * 64;
