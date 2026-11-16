@@ -1,6 +1,6 @@
 import { TOOLS } from '../constants.js';
 import { hexToRgb, rgbToHsl, hslToRgb } from '../colorUtils.js';
-import { GpuWatercolorSolver, WORK_SIZE as GPU_WORK_SIZE } from './airWatercolorGpu.js';
+import { GpuWatercolorSolver } from './airWatercolorGpu.js';
 
 /**
  * Air Paint — Incompressible Navier-Stokes Watercolor Wash Engine
@@ -240,57 +240,31 @@ function parseColor(c) {
   return { r: 45, g: 110, b: 200 };
 }
 
-function hash21Cpu(x, y) {
-  let px = (x * 123.34) % 1;
-  if (px < 0) px += 1;
-  let py = (y * 456.21) % 1;
-  if (py < 0) py += 1;
-  const d = px * (px + 45.32) + py * (py + 45.32);
-  px += d;
-  py += d;
-  const r = (px * py) % 1;
-  return r < 0 ? r + 1 : r;
-}
-
-function valueNoiseCpu(x, y) {
-  const ix = Math.floor(x);
-  const iy = Math.floor(y);
-  const fx = x - ix;
-  const fy = y - iy;
-  const ux = fx * fx * (3.0 - 2.0 * fx);
-  const uy = fy * fy * (3.0 - 2.0 * fy);
-  const a = hash21Cpu(ix, iy);
-  const b = hash21Cpu(ix + 1, iy);
-  const c = hash21Cpu(ix, iy + 1);
-  const d = hash21Cpu(ix + 1, iy + 1);
-  return a + (b - a) * ux + ((c - a) + (a - b - c + d) * ux) * uy;
-}
-
 /**
- * Aperiodic domain-warped curl perturbation for fluid eddies (zero repeating diamond lattice).
+ * Analytic divergence-free curl perturbation for fluid eddies.
  */
 function sampleCurl(x, y, time, freq) {
-  const px = x * freq;
-  const py = y * freq;
-  const w = valueNoiseCpu(px * 0.37 - py * 0.28 + time * 0.17, px * 0.28 + py * 0.37 - time * 0.13) * 3.14159;
-  const a1 = Math.sin(px * 0.894 + py * 0.447 + w + time * 0.85);
-  const a2 = Math.sin(-px * 0.618 + py * 1.174 - w * 0.72 - time * 0.73);
-  const a3 = Math.sin(-px * 1.236 - py * 1.568 + w * 0.53 + time * 0.61);
+  const fx = x * freq;
+  const fy = y * freq;
+  const p1 = fx + time * 0.85;
+  const q1 = fy - time * 0.62;
+  const p2 = 2.07 * fx - time * 1.1;
+  const q2 = 1.93 * fy + time * 0.77;
 
   return {
-    vx: 0.48 * a1 + 0.39 * a2 - 0.31 * a3,
-    vy: -0.44 * a1 + 0.42 * a2 + 0.36 * a3
+    vx: -Math.sin(p1) * Math.sin(q1) + 0.85 * Math.sin(p2) * Math.cos(q2),
+    vy: -(Math.cos(p1) * Math.cos(q1) + 0.92 * Math.cos(p2) * Math.sin(q2))
   };
 }
 
 /**
- * World-anchored rotated aperiodic cold-press watercolor paper tooth [0..1].
+ * World-anchored deterministic cold-press watercolor paper tooth [0..1].
+ * Never shimmers or swims between frames because it depends purely on world coordinates.
  */
 function samplePaperTooth(wx, wy) {
-  const nCoarse = valueNoiseCpu(wx * 0.141 - wy * 0.075, wx * 0.075 + wy * 0.141);
-  const nMed = valueNoiseCpu(-wx * 0.237 - wy * 0.296 + 17.3, wx * 0.296 - wy * 0.237 + 9.1);
-  const nFine = valueNoiseCpu(wx * 0.412 + wy * 0.661 + 4.7, -wx * 0.661 + wy * 0.412 + 23.5);
-  const v = 0.08 + 0.38 * nCoarse + 0.32 * nMed + 0.22 * nFine;
+  const fine = Math.sin(wx * 0.34 + Math.cos(wy * 0.29) * 1.3) * Math.cos(wy * 0.37 - Math.sin(wx * 0.31) * 1.2);
+  const med = Math.sin(wx * 0.11 + wy * 0.09) * Math.cos(wy * 0.12 - wx * 0.08);
+  const v = 0.52 + 0.28 * fine + 0.20 * med;
   return v < 0 ? 0 : (v > 1 ? 1 : v);
 }
 
@@ -346,17 +320,17 @@ function ensureAirTile(engine, ab, tx, ty) {
   if (engine.isStatic) {
     const chunk = engine._getChunk(0, 0);
     if (chunk) {
-      const lx = -engine.staticWidth / 2;
-      const ly = -engine.staticHeight / 2;
-      const ox = Math.max(wx, lx);
-      const oy = Math.max(wy, ly);
-      const ox2 = Math.min(wx + TILE_SIZE, lx + chunk.width);
-      const oy2 = Math.min(wy + TILE_SIZE, ly + chunk.height);
-      const ow = ox2 - ox;
-      const oh = oy2 - oy;
-      if (ow > 0 && oh > 0) {
-        ensureChunkBackup(engine, chunk, 0, 0);
-        if (!chunk.isEmpty || !chunk.isEmpty[layer]) {
+      ensureChunkBackup(engine, chunk, 0, 0);
+      if (!chunk.isEmpty || !chunk.isEmpty[layer]) {
+        const lx = -engine.staticWidth / 2;
+        const ly = -engine.staticHeight / 2;
+        const ox = Math.max(wx, lx);
+        const oy = Math.max(wy, ly);
+        const ox2 = Math.min(wx + TILE_SIZE, lx + chunk.width);
+        const oy2 = Math.min(wy + TILE_SIZE, ly + chunk.height);
+        const ow = ox2 - ox;
+        const oh = oy2 - oy;
+        if (ow > 0 && oh > 0) {
           _tileReadCtx.drawImage(chunk.canvases[layer], ox - lx, oy - ly, ow, oh, ox - wx, oy - wy, ow, oh);
           hasAnyPixels = true;
         }
@@ -828,16 +802,8 @@ function computeAirTipAngle(engine, dirX, dirY, pointAngle = null) {
 // ----------------------------------------------------
 // CORE NAVIER-STOKES WATERCOLOR SIMULATION STEP
 // ----------------------------------------------------
-function runAirStep(engine, ab, from, to, stateFrom, stateTo, isSettleStep = false, pointAngle = null, isDab = false) {
+function runAirStep(engine, ab, from, to, radius, opacity, baseColor, pressure, isSettleStep = false, pointAngle = null, isDab = false) {
   syncAirSettingsFromEngine(engine);
-
-  const sFrom = stateFrom;
-  const sTo = stateTo || stateFrom;
-  const radius = Math.max(sFrom.radius, sTo.radius);
-  const minRad = Math.min(sFrom.radius, sTo.radius);
-  const opacity = sTo.cpuOpacity !== undefined ? sTo.cpuOpacity : sTo.opacity;
-  const pressure = sTo.pressure !== undefined ? sTo.pressure : 1.0;
-  const baseColor = sTo.color;
 
   const wetnessRatio = Math.max(0.0, Math.min(1.0, airSettings.wetness / 100.0));
   const streamRatio = Math.max(0.0, Math.min(1.0, airSettings.streamFlow / 100.0));
@@ -1318,14 +1284,6 @@ function runAirStep(engine, ab, from, to, stateFrom, stateTo, isSettleStep = fal
         if (d2 >= reachGrid2) continue;
 
         const worldX = rawX0 + gx * simStep;
-        const rLoc = sFrom.radius + (sTo.radius - sFrom.radius) * tSeg;
-        const rRatio = minRad > 0.1 ? (rLoc / Math.max(0.5, radius)) : 1.0;
-        const colR = sFrom.color.r + (sTo.color.r - sFrom.color.r) * tSeg;
-        const colG = sFrom.color.g + (sTo.color.g - sFrom.color.g) * tSeg;
-        const colB = sFrom.color.b + (sTo.color.b - sFrom.color.b) * tSeg;
-        const opLoc = sFrom.opacity + (sTo.opacity - sFrom.opacity) * tSeg;
-        const flowLoc = sFrom.flow + (sTo.flow - sFrom.flow) * tSeg;
-
         const tooth = samplePaperTooth(worldX, worldY);
         const edgeNoise = sampleCurl(worldX, worldY, curTime * 0.25, curlFreq * 0.8);
 
@@ -1335,18 +1293,17 @@ function runAirStep(engine, ab, from, to, stateFrom, stateTo, isSettleStep = fal
         if (_hasAirTip) {
           let bestA = 0.0;
           let bestBump = 0.0;
-          const steps = isDab || dist < 1.0 ? 1 : Math.min(8, Math.max(2, Math.ceil(dist / Math.max(2.0, rLoc * 0.25))));
+          const steps = isDab || dist < 1.0 ? 1 : Math.min(8, Math.max(2, Math.ceil(dist / Math.max(2.0, radius * 0.25))));
           const wobbleU = tipPourRatio > 0.04 ? (edgeNoise.vx * 0.05 + (tooth - 0.5) * 0.06) * tipPourRatio : 0.0;
           const wobbleV = tipPourRatio > 0.04 ? (edgeNoise.vy * 0.05 + (0.5 - tooth) * 0.06) * tipPourRatio : 0.0;
-          const invRLoc = 1.0 / Math.max(1.0, rLoc);
           for (let st = 0; st < steps; st++) {
             const stFrac = steps === 1 ? 1.0 : st / (steps - 1);
             const sxW = isDab ? to.x : (from.x + rawDx * stFrac);
             const syW = isDab ? to.y : (from.y + rawDy * stFrac);
             const lxW = worldX - sxW;
             const lyW = worldY - syW;
-            const u = (lxW * rotCos - lyW * rotSin) * invRLoc + wobbleU;
-            const v = (lxW * rotSin + lyW * rotCos) * invRLoc + wobbleV;
+            const u = (lxW * rotCos - lyW * rotSin) * invRadWorld + wobbleU;
+            const v = (lxW * rotSin + lyW * rotCos) * invRadWorld + wobbleV;
             const ts = sampleCpuAirTip(u, v);
             if (ts.a > bestA) bestA = ts.a;
             if (ts.bump > bestBump) bestBump = ts.bump;
@@ -1356,7 +1313,7 @@ function runAirStep(engine, ab, from, to, stateFrom, stateTo, isSettleStep = fal
           dNorm = Math.max(0.0, Math.min(1.05, 1.0 - (bestA * (1.0 - tipPourRatio) + bestBump * tipPourRatio) * 0.88));
         } else {
           // Organic liquid edge wobble scaled by Bloom + Stream Flow
-          const dNormRaw = Math.sqrt(d2) / Math.max(0.5, radGrid * rRatio);
+          const dNormRaw = Math.sqrt(d2) / Math.max(0.5, radGrid);
           const wobbleAmt = (edgeNoise.vx * 0.14 + (tooth - 0.5) * 0.16) * (0.30 + 0.70 * bloomRatio);
           dNorm = Math.max(0.0, dNormRaw + wobbleAmt);
           if (dNorm < 1.06) {
@@ -1373,7 +1330,7 @@ function runAirStep(engine, ab, from, to, stateFrom, stateTo, isSettleStep = fal
           // Classic subtle watery rim lightening inside puddle center when Pigment Edge is up
           const centerLighten = 1.0 - edgeRatio * 0.15 * (1.0 - dNorm) * wetnessRatio;
 
-          const targetA = Math.min(1.0, washDome * opLoc * flowLoc * caustics * granMod * centerLighten);
+          const targetA = Math.min(1.0, washDome * strokeOpacity * flowFactor * caustics * granMod * centerLighten);
 
           const prevDist = _nsDist[i];
           const prevCov = (localDist - prevDist >= 0 && localDist - prevDist < coverWindow) ? _nsCov[i] : 0.0;
@@ -1383,9 +1340,9 @@ function runAirStep(engine, ab, from, to, stateFrom, stateTo, isSettleStep = fal
 
           if (stepA > 0.002) {
             const curA = _nsA[i];
-            let paintR = colR;
-            let paintG = colG;
-            let paintB = colB;
+            let paintR = baseColor.r;
+            let paintG = baseColor.g;
+            let paintB = baseColor.b;
 
             // Paper valley settling tint & Beer-Lambert optical translucent layer mixing
             if (curA > 0.02) {
@@ -1393,12 +1350,12 @@ function runAirStep(engine, ab, from, to, stateFrom, stateTo, isSettleStep = fal
               const dstR = _nsPR[i] * invC;
               const dstG = _nsPG[i] * invC;
               const dstB = _nsPB[i] * invC;
-              const multR = (dstR * colR) / 255.0;
-              const multG = (dstG * colG) / 255.0;
-              const multB = (dstB * colB) / 255.0;
-              paintR = colR * (1.0 - opticalMultWeight) + multR * opticalMultWeight;
-              paintG = colG * (1.0 - opticalMultWeight) + multG * opticalMultWeight;
-              paintB = colB * (1.0 - opticalMultWeight) + multB * opticalMultWeight;
+              const multR = (dstR * baseColor.r) / 255.0;
+              const multG = (dstG * baseColor.g) / 255.0;
+              const multB = (dstB * baseColor.b) / 255.0;
+              paintR = baseColor.r * (1.0 - opticalMultWeight) + multR * opticalMultWeight;
+              paintG = baseColor.g * (1.0 - opticalMultWeight) + multG * opticalMultWeight;
+              paintB = baseColor.b * (1.0 - opticalMultWeight) + multB * opticalMultWeight;
             }
 
             // Slight mineral darkening inside paper valleys for cold-press granulation
@@ -1420,15 +1377,6 @@ function runAirStep(engine, ab, from, to, stateFrom, stateTo, isSettleStep = fal
 
             _nsDist[i] = localDist;
             if (targetA > _nsNewCov[i]) _nsNewCov[i] = targetA;
-          } else if (_nsA[i] > 0.02 && _nsW[i] > 0.03) {
-            const invC = 1.0 / _nsA[i];
-            const dstR = _nsPR[i] * invC;
-            const dstG = _nsPG[i] * invC;
-            const dstB = _nsPB[i] * invC;
-            const wBlend = Math.min(0.32, washDome * (0.14 + 0.22 * wetnessRatio));
-            _nsPR[i] = (dstR + (colR - dstR) * wBlend) * _nsA[i];
-            _nsPG[i] = (dstG + (colG - dstG) * wBlend) * _nsA[i];
-            _nsPB[i] = (dstB + (colB - dstB) * wBlend) * _nsA[i];
           }
         }
 
@@ -1524,60 +1472,27 @@ function runAirStep(engine, ab, from, to, stateFrom, stateTo, isSettleStep = fal
   engine.strokeMaxY = Math.max(engine.strokeMaxY ?? -Infinity, boxY + boxH - apron);
 }
 
-function makeAirState(engine, p) {
-  const radius = Math.max(3.0, (p.size || engine.brush.size || 70) * 0.5);
-  const cpuOpacity = p.opacity !== undefined ? p.opacity : (engine.brush.opacity ?? 0.55);
-  const pressure = p.pressure !== undefined ? p.pressure : 1.0;
-  const effPressure = engine?.brush?.pressureEnabled ? pressure : 1.0;
-  const pFlowInf = (airSettings.pressureFlow ?? 35) / 100.0;
-  const pressFlowScale = 1.0 - pFlowInf + pFlowInf * effPressure;
-  const opacity = Math.max(0.02, Math.min(1.0, cpuOpacity * effPressure));
-  const flow = Math.max(0.03, Math.min(1.0, (engine?.brush?.flow ?? 0.70) * pressFlowScale));
-  const color = parseColor(p.color || engine.brush.color);
-  return { radius, color, opacity, cpuOpacity, flow, pressure };
-}
-
-function lerpAirState(a, b, t) {
-  if (!a) return b;
-  if (!b || t <= 0) return a;
-  if (t >= 1) return b;
-  return {
-    radius: a.radius + (b.radius - a.radius) * t,
-    color: {
-      r: a.color.r + (b.color.r - a.color.r) * t,
-      g: a.color.g + (b.color.g - a.color.g) * t,
-      b: a.color.b + (b.color.b - a.color.b) * t
-    },
-    opacity: a.opacity + (b.opacity - a.opacity) * t,
-    cpuOpacity: a.cpuOpacity + (b.cpuOpacity - a.cpuOpacity) * t,
-    flow: a.flow + (b.flow - a.flow) * t,
-    pressure: a.pressure + (b.pressure - a.pressure) * t
-  };
-}
-
 /**
- * Quadratic Bezier arc subdivision (CPU fallback) with smooth state interpolation & fast-stroke splitting.
+ * Quadratic Bezier arc subdivision so quick curves produce fluid continuous washes without corners.
  */
-function runSmoothedBezier(engine, ab, a, ctrl, b, stateA, stateB, pointAngle = null, isDab = false) {
+function runSmoothedBezier(engine, ab, a, ctrl, b, radius, opacity, baseColor, pressure, pointAngle = null, isDab = false) {
   const dx1 = ctrl.x - a.x;
   const dy1 = ctrl.y - a.y;
   const dx2 = b.x - ctrl.x;
   const dy2 = b.y - ctrl.y;
   const len1 = Math.hypot(dx1, dy1);
   const len2 = Math.hypot(dx2, dy2);
-  const totalLen = len1 + len2;
 
-  let subSteps = Math.max(1, Math.ceil(totalLen / 360));
+  let subSteps = 1;
   if (!isDab && len1 > 0.5 && len2 > 0.5) {
     const dot = (dx1 * dx2 + dy1 * dy2) / (len1 * len2);
     const angle = Math.acos(dot < -1 ? -1 : (dot > 1 ? 1 : dot));
     if (angle > 0.16) {
-      subSteps = Math.max(subSteps, Math.min(8, Math.max(2, Math.ceil(angle / 0.20))));
+      subSteps = Math.min(4, Math.max(2, Math.ceil(angle / 0.20)));
     }
   }
 
   let prevPt = a;
-  let prevSt = stateA;
   for (let i = 1; i <= subSteps; i++) {
     const t = i / subSteps;
     const invT = 1.0 - t;
@@ -1587,10 +1502,8 @@ function runSmoothedBezier(engine, ab, a, ctrl, b, stateA, stateB, pointAngle = 
           x: invT * invT * a.x + 2.0 * invT * t * ctrl.x + t * t * b.x,
           y: invT * invT * a.y + 2.0 * invT * t * ctrl.y + t * t * b.y
         };
-    const nextSt = lerpAirState(stateA, stateB, t);
-    runAirStep(engine, ab, prevPt, nextPt, prevSt, nextSt, false, pointAngle, isDab);
+    runAirStep(engine, ab, prevPt, nextPt, radius, opacity, baseColor, pressure, false, pointAngle, isDab);
     prevPt = nextPt;
-    prevSt = nextSt;
   }
 }
 
@@ -1625,76 +1538,13 @@ function getGpuSolver(engine) {
   return gr.airSolver.ready ? gr.airSolver : null;
 }
 
-function getGpuPad(radius, params) {
-  return Math.ceil(radius * (1.06 + 0.22 + params.bloom * 0.30 + params.tipPour * 0.22)) + 24;
-}
-
-function runGpuLinearSegment(engine, solver, ab, a, b, stateA, stateB, params, timeSec, pointAngle = null, isDab = false) {
-  const maxR = Math.max(stateA.radius, stateB.radius);
-  const pad = getGpuPad(maxR, params);
-  const spanX = Math.ceil(Math.abs(b.x - a.x)) + pad * 2 + 20;
-  const spanY = Math.ceil(Math.abs(b.y - a.y)) + pad * 2 + 20;
-
-  if (spanX <= GPU_WORK_SIZE && spanY <= GPU_WORK_SIZE) {
-    const sDx = b.x - a.x;
-    const sDy = b.y - a.y;
-    const sL = Math.hypot(sDx, sDy);
-    const dirX = sL > 0.0001 ? sDx / sL : (ab.prevDir ? ab.prevDir.x : 1.0);
-    const dirY = sL > 0.0001 ? sDy / sL : (ab.prevDir ? ab.prevDir.y : 0.0);
-    ab.prevDir = { x: dirX, y: dirY };
-    const tipInfo = buildTipInfo(engine, dirX, dirY, params, pointAngle, isDab);
-    const bMinX = Math.min(a.x, b.x) - pad;
-    const bMinY = Math.min(a.y, b.y) - pad;
-    const bMaxX = Math.max(a.x, b.x) + pad;
-    const bMaxY = Math.max(a.y, b.y) + pad;
-    solver.beginStepBatch(engine, bMinX, bMinY, bMaxX, bMaxY);
-    solver.injectSegment(engine, a, b, stateA, stateB, params, timeSec, tipInfo);
-    solver.solveAndFlowStep(engine, bMinX, bMinY, bMaxX, bMaxY, params, 1.0);
-    ab.time = timeSec + 0.04;
-    return;
-  }
-
-  // Fast flick exceeds single GPU_WORK_SIZE box: split cleanly along segment with zero gaps
-  const maxChunkAxis = Math.max(96, GPU_WORK_SIZE - pad * 2 - 48);
-  const nChunks = Math.max(2, Math.min(16, Math.ceil(Math.max(Math.abs(b.x - a.x), Math.abs(b.y - a.y)) / maxChunkAxis)));
-  let prevPt = a;
-  let prevSt = stateA;
-  for (let i = 1; i <= nChunks; i++) {
-    const t = i / nChunks;
-    const nextPt = i === nChunks ? b : { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
-    const nextSt = lerpAirState(stateA, stateB, t);
-    const sDx = nextPt.x - prevPt.x;
-    const sDy = nextPt.y - prevPt.y;
-    const sL = Math.hypot(sDx, sDy);
-    const dirX = sL > 0.0001 ? sDx / sL : (ab.prevDir ? ab.prevDir.x : 1.0);
-    const dirY = sL > 0.0001 ? sDy / sL : (ab.prevDir ? ab.prevDir.y : 0.0);
-    ab.prevDir = { x: dirX, y: dirY };
-    const tipInfo = buildTipInfo(engine, dirX, dirY, params, pointAngle, isDab);
-    const cPad = getGpuPad(Math.max(prevSt.radius, nextSt.radius), params);
-    const bMinX = Math.min(prevPt.x, nextPt.x) - cPad;
-    const bMinY = Math.min(prevPt.y, nextPt.y) - cPad;
-    const bMaxX = Math.max(prevPt.x, nextPt.x) + cPad;
-    const bMaxY = Math.max(prevPt.y, nextPt.y) + cPad;
-    solver.beginStepBatch(engine, bMinX, bMinY, bMaxX, bMaxY);
-    solver.injectSegment(engine, prevPt, nextPt, prevSt, nextSt, params, timeSec + i * 0.015, tipInfo);
-    solver.solveAndFlowStep(engine, bMinX, bMinY, bMaxX, bMaxY, params, 1.0);
-    prevPt = nextPt;
-    prevSt = nextSt;
-  }
-  ab.time = timeSec + 0.06;
-}
-
-function runGpuSmoothedBezier(engine, solver, ab, a, ctrl, b, stateA, stateB, params, timeSec, pointAngle = null, isDab = false) {
+function runGpuSmoothedBezier(engine, solver, ab, a, ctrl, b, radius, opacity, baseColor, flowFactor, params, timeSec, pointAngle = null, isDab = false) {
   const dx1 = ctrl.x - a.x;
   const dy1 = ctrl.y - a.y;
   const dx2 = b.x - ctrl.x;
   const dy2 = b.y - ctrl.y;
   const len1 = Math.hypot(dx1, dy1);
   const len2 = Math.hypot(dx2, dy2);
-  const totalLen = len1 + len2;
-
-  const maxR = Math.max(stateA.radius, stateB.radius);
-  const pad = getGpuPad(maxR, params);
 
   let subSteps = 1;
   if (!isDab && len1 > 0.5 && len2 > 0.5) {
@@ -1710,61 +1560,31 @@ function runGpuSmoothedBezier(engine, solver, ab, a, ctrl, b, stateA, stateB, pa
   let maxX = isDab ? b.x : Math.max(a.x, ctrl.x, b.x);
   let maxY = isDab ? b.y : Math.max(a.y, ctrl.y, b.y);
 
-  const spanX = (maxX - minX) + pad * 2 + 20;
-  const spanY = (maxY - minY) + pad * 2 + 20;
+  const pad = Math.ceil(radius * (1.12 + params.bloom * 0.35 + params.tipPour * 0.22)) + 16;
+  solver.beginStepBatch(engine, minX - pad, minY - pad, maxX + pad, maxY + pad);
 
-  if (spanX <= GPU_WORK_SIZE && spanY <= GPU_WORK_SIZE) {
-    // Fast single-batch path for all normal strokes
-    solver.beginStepBatch(engine, minX - pad, minY - pad, maxX + pad, maxY + pad);
-
-    let prevPt = a;
-    let prevSt = stateA;
-    for (let i = 1; i <= subSteps; i++) {
-      const t = i / subSteps;
-      const invT = 1.0 - t;
-      const nextPt = i === subSteps
-        ? b
-        : {
-            x: invT * invT * a.x + 2.0 * invT * t * ctrl.x + t * t * b.x,
-            y: invT * invT * a.y + 2.0 * invT * t * ctrl.y + t * t * b.y
-          };
-      const nextSt = lerpAirState(stateA, stateB, t);
-      const sDx = nextPt.x - prevPt.x;
-      const sDy = nextPt.y - prevPt.y;
-      const sL = Math.hypot(sDx, sDy);
-      const dirX = sL > 0.0001 ? sDx / sL : (ab.prevDir ? ab.prevDir.x : 1.0);
-      const dirY = sL > 0.0001 ? sDy / sL : (ab.prevDir ? ab.prevDir.y : 0.0);
-      const tipInfo = buildTipInfo(engine, dirX, dirY, params, pointAngle, isDab);
-      solver.injectSegment(engine, prevPt, nextPt, prevSt, nextSt, params, timeSec + i * 0.015, tipInfo);
-      ab.prevDir = { x: dirX, y: dirY };
-      prevPt = nextPt;
-      prevSt = nextSt;
-    }
-
-    solver.solveAndFlowStep(engine, minX - pad, minY - pad, maxX + pad, maxY + pad, params, 1.0);
-    ab.time = timeSec + 0.06;
-    return;
-  }
-
-  // Long fast Bezier flick exceeds single GPU_WORK_SIZE box: subdivide and batch along the curve
-  const maxSegLen = Math.max(96, GPU_WORK_SIZE - pad * 2 - 48);
-  const segCount = Math.max(subSteps, Math.min(16, Math.ceil(totalLen / maxSegLen)));
   let prevPt = a;
-  let prevSt = stateA;
-  for (let i = 1; i <= segCount; i++) {
-    const t = i / segCount;
+  for (let i = 1; i <= subSteps; i++) {
+    const t = i / subSteps;
     const invT = 1.0 - t;
-    const nextPt = i === segCount
+    const nextPt = i === subSteps
       ? b
       : {
           x: invT * invT * a.x + 2.0 * invT * t * ctrl.x + t * t * b.x,
           y: invT * invT * a.y + 2.0 * invT * t * ctrl.y + t * t * b.y
         };
-    const nextSt = lerpAirState(stateA, stateB, t);
-    runGpuLinearSegment(engine, solver, ab, prevPt, nextPt, prevSt, nextSt, params, timeSec + i * 0.015, pointAngle, isDab);
+    const sDx = nextPt.x - prevPt.x;
+    const sDy = nextPt.y - prevPt.y;
+    const sL = Math.hypot(sDx, sDy);
+    const dirX = sL > 0.0001 ? sDx / sL : (ab.prevDir ? ab.prevDir.x : 1.0);
+    const dirY = sL > 0.0001 ? sDy / sL : (ab.prevDir ? ab.prevDir.y : 0.0);
+    const tipInfo = buildTipInfo(engine, dirX, dirY, params, pointAngle, isDab);
+    solver.injectSegment(engine, prevPt, nextPt, radius, baseColor, opacity, flowFactor, params, timeSec + i * 0.015, tipInfo);
+    ab.prevDir = { x: dirX, y: dirY };
     prevPt = nextPt;
-    prevSt = nextSt;
   }
+
+  solver.solveAndFlowStep(engine, minX - pad, minY - pad, maxX + pad, maxY + pad, params, 1.0);
   ab.time = timeSec + 0.06;
 }
 
@@ -1780,7 +1600,8 @@ export function startAirPaintStroke(engine) {
     ? engine.strokePoints[0]
     : { x: 0, y: 0, size: engine.brush.size, opacity: engine.brush.opacity, color: engine.brush.color, pressure: 1.0 };
 
-  const startState = makeAirState(engine, startP);
+  const baseColor = parseColor(startP.color || engine.brush.color);
+  const radius = Math.max(3.0, (startP.size || engine.brush.size || 70) * 0.5);
 
   const solver = getGpuSolver(engine);
   if (solver) {
@@ -1794,19 +1615,16 @@ export function startAirPaintStroke(engine) {
     streamers: [],
     p0: { x: startP.x, y: startP.y },
     p1: null,
-    p1State: null,
     midPrev: { x: startP.x, y: startP.y },
-    midState: startState,
     lastPos: { x: startP.x, y: startP.y },
-    lastState: startState,
     prevDir: null,
     totalDist: 0,
     time: (performance.now() * 0.001) % 100.0,
     hasPainted: false,
-    radius: startState.radius,
-    baseColor: startState.color,
-    lastOpacity: startState.cpuOpacity,
-    lastPressure: startState.pressure,
+    radius,
+    baseColor,
+    lastOpacity: startP.opacity ?? engine.brush.opacity ?? 0.55,
+    lastPressure: startP.pressure ?? 1.0,
     lastAngle: startP.angle ?? null
   };
 }
@@ -1823,30 +1641,28 @@ export function paintAirIncrementally(engine, j) {
   const ab = engine.activeAirBrush;
   ab.hasPainted = true;
 
-  syncAirSettingsFromEngine(engine);
-
   const pPrev = points[j - 1];
   const p = points[j];
-  const curState = makeAirState(engine, p);
-  const prevState = ab.lastState || makeAirState(engine, pPrev);
+
+  const radius = Math.max(3.0, (p.size || engine.brush.size || 70) * 0.5);
+  const opacity = p.opacity !== undefined ? p.opacity : (engine.brush.opacity ?? 0.55);
+  const pressure = p.pressure !== undefined ? p.pressure : 1.0;
   const pointAngle = p.angle !== undefined ? p.angle : null;
   const isDab = !!p.isDab;
+  const baseColor = parseColor(p.color || engine.brush.color);
 
-  ab.radius = curState.radius;
-  ab.baseColor = curState.color;
-  ab.lastOpacity = curState.cpuOpacity;
-  ab.lastPressure = curState.pressure;
+  ab.radius = radius;
+  ab.baseColor = baseColor;
+  ab.lastOpacity = opacity;
+  ab.lastPressure = pressure;
   ab.lastAngle = pointAngle;
 
   const dist = Math.hypot(p.x - pPrev.x, p.y - pPrev.y);
-  if (!Number.isFinite(dist) || dist > 25000.0) {
+  if (dist > 450.0) {
     ab.p0 = { x: p.x, y: p.y };
     ab.p1 = null;
-    ab.p1State = null;
     ab.midPrev = { x: p.x, y: p.y };
-    ab.midState = curState;
     ab.lastPos = { x: p.x, y: p.y };
-    ab.lastState = curState;
     ab.prevDir = null;
     return;
   }
@@ -1854,7 +1670,13 @@ export function paintAirIncrementally(engine, j) {
   if (ab.useGpu) {
     const solver = getGpuSolver(engine);
     if (solver && solver.active) {
+      syncAirSettingsFromEngine(engine);
       const params = getNormalizedAirParams();
+      const effPressure = engine?.brush?.pressureEnabled ? pressure : 1.0;
+      const pFlowInf = (airSettings.pressureFlow ?? 35) / 100.0;
+      const pressFlowScale = 1.0 - pFlowInf + pFlowInf * effPressure;
+      const effOpacity = Math.max(0.02, Math.min(1.0, opacity * effPressure));
+      const flowFactor = Math.max(0.03, Math.min(1.0, (engine?.brush?.flow ?? 0.70) * pressFlowScale));
 
       if (isDab) {
         const sDx = p.x - pPrev.x;
@@ -1864,100 +1686,65 @@ export function paintAirIncrementally(engine, j) {
         const dirY = sL > 0.0001 ? sDy / sL : (ab.prevDir ? ab.prevDir.y : 0.0);
         ab.prevDir = { x: dirX, y: dirY };
         const tipInfo = buildTipInfo(engine, dirX, dirY, params, pointAngle, true);
-
-        const spacingRatio = engine.brush.spacing !== undefined ? engine.brush.spacing : 0.15;
-        const dabSpacing = Math.max(4.0, (prevState.radius + curState.radius) * spacingRatio);
-        const nDabs = sL > dabSpacing * 1.5 ? Math.min(16, Math.max(1, Math.round(sL / dabSpacing))) : 1;
-
-        const maxR = Math.max(prevState.radius, curState.radius);
-        const pad = getGpuPad(maxR, params);
-        const bMinX = Math.min(pPrev.x, p.x) - pad;
-        const bMinY = Math.min(pPrev.y, p.y) - pad;
-        const bMaxX = Math.max(pPrev.x, p.x) + pad;
-        const bMaxY = Math.max(pPrev.y, p.y) + pad;
-
-        if (nDabs === 1 || ((bMaxX - bMinX + 20) <= GPU_WORK_SIZE && (bMaxY - bMinY + 20) <= GPU_WORK_SIZE)) {
-          const dMinX = nDabs === 1 ? p.x - pad : bMinX;
-          const dMinY = nDabs === 1 ? p.y - pad : bMinY;
-          const dMaxX = nDabs === 1 ? p.x + pad : bMaxX;
-          const dMaxY = nDabs === 1 ? p.y + pad : bMaxY;
-          solver.beginStepBatch(engine, dMinX, dMinY, dMaxX, dMaxY);
-          for (let k = 1; k <= nDabs; k++) {
-            const t = k / nDabs;
-            const dPt = k === nDabs ? p : { x: pPrev.x + sDx * t, y: pPrev.y + sDy * t };
-            const dSt = k === nDabs ? curState : lerpAirState(prevState, curState, t);
-            solver.injectSegment(engine, dPt, dPt, dSt, dSt, params, ab.time + k * 0.01, tipInfo);
-          }
-          solver.solveAndFlowStep(engine, dMinX, dMinY, dMaxX, dMaxY, params, 1.0);
-        } else {
-          for (let k = 1; k <= nDabs; k++) {
-            const t = k / nDabs;
-            const dPt = k === nDabs ? p : { x: pPrev.x + sDx * t, y: pPrev.y + sDy * t };
-            const dSt = k === nDabs ? curState : lerpAirState(prevState, curState, t);
-            const kPad = getGpuPad(dSt.radius, params);
-            solver.beginStepBatch(engine, dPt.x - kPad, dPt.y - kPad, dPt.x + kPad, dPt.y + kPad);
-            solver.injectSegment(engine, dPt, dPt, dSt, dSt, params, ab.time + k * 0.01, tipInfo);
-            solver.solveAndFlowStep(engine, dPt.x - kPad, dPt.y - kPad, dPt.x + kPad, dPt.y + kPad, params, 1.0);
-          }
-        }
+        const pad = Math.ceil(radius * (1.12 + params.bloom * 0.35 + params.tipPour * 0.22)) + 16;
+        solver.beginStepBatch(engine, p.x - pad, p.y - pad, p.x + pad, p.y + pad);
+        solver.injectSegment(engine, p, p, radius, baseColor, effOpacity, flowFactor, params, ab.time, tipInfo);
+        solver.solveAndFlowStep(engine, p.x - pad, p.y - pad, p.x + pad, p.y + pad, params, 1.0);
         ab.time += 0.04;
         ab.p0 = { x: p.x, y: p.y };
         ab.p1 = null;
-        ab.p1State = null;
         ab.midPrev = { x: p.x, y: p.y };
-        ab.midState = curState;
       } else if (!ab.p1) {
         const mid = { x: (ab.p0.x + p.x) * 0.5, y: (ab.p0.y + p.y) * 0.5 };
-        const midState = lerpAirState(ab.midState, curState, 0.5);
-        runGpuLinearSegment(engine, solver, ab, ab.p0, mid, ab.midState, midState, params, ab.time, pointAngle, false);
+        const sDx = mid.x - ab.p0.x;
+        const sDy = mid.y - ab.p0.y;
+        const sL = Math.hypot(sDx, sDy);
+        const dirX = sL > 0.0001 ? sDx / sL : 1.0;
+        const dirY = sL > 0.0001 ? sDy / sL : 0.0;
+        ab.prevDir = { x: dirX, y: dirY };
+        const tipInfo = buildTipInfo(engine, dirX, dirY, params, pointAngle, false);
+        const pad = Math.ceil(radius * (1.12 + params.bloom * 0.35 + params.tipPour * 0.22)) + 16;
+        const bMinX = Math.min(ab.p0.x, mid.x) - pad;
+        const bMinY = Math.min(ab.p0.y, mid.y) - pad;
+        const bMaxX = Math.max(ab.p0.x, mid.x) + pad;
+        const bMaxY = Math.max(ab.p0.y, mid.y) + pad;
+        solver.beginStepBatch(engine, bMinX, bMinY, bMaxX, bMaxY);
+        solver.injectSegment(engine, ab.p0, mid, radius, baseColor, effOpacity, flowFactor, params, ab.time, tipInfo);
+        solver.solveAndFlowStep(engine, bMinX, bMinY, bMaxX, bMaxY, params, 1.0);
+        ab.time += 0.04;
         ab.p1 = { x: p.x, y: p.y };
-        ab.p1State = curState;
         ab.midPrev = mid;
-        ab.midState = midState;
       } else {
         const midNext = { x: (ab.p1.x + p.x) * 0.5, y: (ab.p1.y + p.y) * 0.5 };
-        const midNextState = lerpAirState(ab.p1State || prevState, curState, 0.5);
-        runGpuSmoothedBezier(engine, solver, ab, ab.midPrev, ab.p1, midNext, ab.midState, midNextState, params, ab.time, pointAngle, false);
+        runGpuSmoothedBezier(engine, solver, ab, ab.midPrev, ab.p1, midNext, radius, effOpacity, baseColor, flowFactor, params, ab.time, pointAngle, false);
         ab.p1 = { x: p.x, y: p.y };
-        ab.p1State = curState;
         ab.midPrev = midNext;
-        ab.midState = midNextState;
       }
 
       ab.lastPos = { x: p.x, y: p.y };
-      ab.lastState = curState;
       return;
     }
   }
 
   // CPU Fallback (if WebGL2 unavailable)
   if (isDab) {
-    runAirStep(engine, ab, p, p, curState, curState, false, pointAngle, true);
+    runAirStep(engine, ab, p, p, radius, opacity, baseColor, pressure, false, pointAngle, true);
     ab.p0 = { x: p.x, y: p.y };
     ab.p1 = null;
-    ab.p1State = null;
     ab.midPrev = { x: p.x, y: p.y };
-    ab.midState = curState;
   } else if (!ab.p1) {
     const mid = { x: (ab.p0.x + p.x) * 0.5, y: (ab.p0.y + p.y) * 0.5 };
-    const midState = lerpAirState(ab.midState, curState, 0.5);
-    runAirStep(engine, ab, ab.p0, mid, ab.midState, midState, false, pointAngle, false);
+    runAirStep(engine, ab, ab.p0, mid, radius, opacity, baseColor, pressure, false, pointAngle, false);
     ab.p1 = { x: p.x, y: p.y };
-    ab.p1State = curState;
     ab.midPrev = mid;
-    ab.midState = midState;
   } else {
     const midNext = { x: (ab.p1.x + p.x) * 0.5, y: (ab.p1.y + p.y) * 0.5 };
-    const midNextState = lerpAirState(ab.p1State || prevState, curState, 0.5);
-    runSmoothedBezier(engine, ab, ab.midPrev, ab.p1, midNext, ab.midState, midNextState, pointAngle, false);
+    runSmoothedBezier(engine, ab, ab.midPrev, ab.p1, midNext, radius, opacity, baseColor, pressure, pointAngle, false);
     ab.p1 = { x: p.x, y: p.y };
-    ab.p1State = curState;
     ab.midPrev = midNext;
-    ab.midState = midNextState;
   }
 
   ab.lastPos = { x: p.x, y: p.y };
-  ab.lastState = curState;
 }
 
 export function endAirPaintStroke(engine) {
@@ -1965,41 +1752,51 @@ export function endAirPaintStroke(engine) {
   if (!ab) return;
 
   const p = ab.lastPos;
+  const op = ab.lastOpacity ?? engine.brush.opacity ?? 0.55;
+  const pr = ab.lastPressure ?? 1.0;
   const pAng = ab.lastAngle ?? null;
-  const lastSt = ab.lastState || makeAirState(engine, {
-    x: p.x,
-    y: p.y,
-    size: ab.radius * 2,
-    opacity: ab.lastOpacity,
-    color: ab.baseColor,
-    pressure: ab.lastPressure
-  });
 
   if (ab.useGpu) {
     const solver = getGpuSolver(engine);
     if (solver && solver.active) {
       syncAirSettingsFromEngine(engine);
       const params = getNormalizedAirParams();
+      const effPressure = engine?.brush?.pressureEnabled ? pr : 1.0;
+      const pFlowInf = (airSettings.pressureFlow ?? 35) / 100.0;
+      const pressFlowScale = 1.0 - pFlowInf + pFlowInf * effPressure;
+      const effOpacity = Math.max(0.02, Math.min(1.0, op * effPressure));
+      const flowFactor = Math.max(0.03, Math.min(1.0, (engine?.brush?.flow ?? 0.70) * pressFlowScale));
 
       if (!ab.hasPainted) {
         const dirX = ab.prevDir ? ab.prevDir.x : 1.0;
         const dirY = ab.prevDir ? ab.prevDir.y : 0.0;
         const tipInfo = buildTipInfo(engine, dirX, dirY, params, pAng, true);
-        const pad = getGpuPad(lastSt.radius, params);
+        const pad = Math.ceil(ab.radius * (1.12 + params.bloom * 0.35 + params.tipPour * 0.22)) + 16;
         solver.beginStepBatch(engine, p.x - pad, p.y - pad, p.x + pad, p.y + pad);
         if (_hasAirTip) {
-          solver.injectSegment(engine, p, p, lastSt, lastSt, params, ab.time, tipInfo);
+          solver.injectSegment(engine, p, p, ab.radius, ab.baseColor, effOpacity, flowFactor, params, ab.time, tipInfo);
         } else {
           const dabAngle = Math.random() * Math.PI * 2;
-          const dabDist = Math.max(0.8, Math.min(2.5, lastSt.radius * 0.05));
+          const dabDist = Math.max(0.8, Math.min(2.5, ab.radius * 0.05));
           const dabTo = { x: p.x + Math.cos(dabAngle) * dabDist, y: p.y + Math.sin(dabAngle) * dabDist };
-          solver.injectSegment(engine, p, dabTo, lastSt, lastSt, params, ab.time, tipInfo);
+          solver.injectSegment(engine, p, dabTo, ab.radius, ab.baseColor, effOpacity, flowFactor, params, ab.time, tipInfo);
         }
         solver.solveAndFlowStep(engine, p.x - pad, p.y - pad, p.x + pad, p.y + pad, params, 1.0);
       } else if (ab.p1 && ab.midPrev) {
-        const endSt = ab.p1State || lastSt;
-        const midSt = ab.midState || endSt;
-        runGpuLinearSegment(engine, solver, ab, ab.midPrev, ab.p1, midSt, endSt, params, ab.time, pAng, false);
+        const sDx = ab.p1.x - ab.midPrev.x;
+        const sDy = ab.p1.y - ab.midPrev.y;
+        const sL = Math.hypot(sDx, sDy);
+        const dirX = sL > 0.0001 ? sDx / sL : (ab.prevDir ? ab.prevDir.x : 1.0);
+        const dirY = sL > 0.0001 ? sDy / sL : (ab.prevDir ? ab.prevDir.y : 0.0);
+        const tipInfo = buildTipInfo(engine, dirX, dirY, params, pAng, false);
+        const pad = Math.ceil(ab.radius * (1.12 + params.bloom * 0.35 + params.tipPour * 0.22)) + 16;
+        const bMinX = Math.min(ab.midPrev.x, ab.p1.x) - pad;
+        const bMinY = Math.min(ab.midPrev.y, ab.p1.y) - pad;
+        const bMaxX = Math.max(ab.midPrev.x, ab.p1.x) + pad;
+        const bMaxY = Math.max(ab.midPrev.y, ab.p1.y) + pad;
+        solver.beginStepBatch(engine, bMinX, bMinY, bMaxX, bMaxY);
+        solver.injectSegment(engine, ab.midPrev, ab.p1, ab.radius, ab.baseColor, effOpacity, flowFactor, params, ab.time, tipInfo);
+        solver.solveAndFlowStep(engine, bMinX, bMinY, bMaxX, bMaxY, params, 1.0);
       }
 
       solver.endStroke(engine, params);
@@ -2012,22 +1809,22 @@ export function endAirPaintStroke(engine) {
 
   if (!ab.hasPainted) {
     if (_hasAirTip) {
-      runAirStep(engine, ab, p, p, lastSt, lastSt, false, pAng, true);
+      runAirStep(engine, ab, p, p, ab.radius, op, ab.baseColor, 1.0, false, pAng, true);
     } else {
       const dabAngle = Math.random() * Math.PI * 2;
-      const dabDist = Math.max(0.8, Math.min(2.5, lastSt.radius * 0.05));
+      const dabDist = Math.max(0.8, Math.min(2.5, ab.radius * 0.05));
       const dabTo = { x: p.x + Math.cos(dabAngle) * dabDist, y: p.y + Math.sin(dabAngle) * dabDist };
-      runAirStep(engine, ab, p, dabTo, lastSt, lastSt, false, pAng, true);
+      runAirStep(engine, ab, p, dabTo, ab.radius, op, ab.baseColor, 1.0, false, pAng, true);
     }
   } else if (ab.p1 && ab.midPrev) {
     // Flush final half-segment cleanly to exact pointerup coordinate
-    runAirStep(engine, ab, ab.midPrev, ab.p1, ab.midState || lastSt, ab.p1State || lastSt, false, pAng, false);
+    runAirStep(engine, ab, ab.midPrev, ab.p1, ab.radius, op, ab.baseColor, pr, false, pAng, false);
   }
 
   // Smoothly coast & settle Navier-Stokes streams + wet capillary bleed without abrupt cuts
   const settleSteps = Math.min(6, Math.max(2, Math.round((airSettings.wetness / 100) * 5)));
   for (let s = 0; s < settleSteps; s++) {
-    runAirStep(engine, ab, ab.lastPos, ab.lastPos, lastSt, lastSt, true, pAng, false);
+    runAirStep(engine, ab, ab.lastPos, ab.lastPos, ab.radius, op, ab.baseColor, 1.0, true, pAng, false);
   }
 
   // Persist wet paper film across strokes for true wet-on-wet watercolor bleeding
