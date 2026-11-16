@@ -274,7 +274,7 @@ class App {
 
     // Global UI focus prevention
     document.addEventListener('pointerup', (e) => {
-        const btn = e.target.closest('button');
+        const btn = (e.target instanceof Element) ? e.target.closest('button') : null;
         if (btn) {
             // Delay slightly to allow the click/action to complete if needed
             setTimeout(() => {
@@ -498,10 +498,13 @@ class App {
       pos3 = e.clientX;
       pos4 = e.clientY;
       
-      handle.setPointerCapture(e.pointerId);
+      try {
+        handle.setPointerCapture(e.pointerId);
+      } catch (_) {}
       handle.onpointermove = elementDrag;
       handle.onpointerup = closeDragElement;
       handle.onpointercancel = closeDragElement;
+      handle.onlostpointercapture = closeDragElement;
     }
 
     function elementDrag(e) {
@@ -516,10 +519,15 @@ class App {
     }
 
     function closeDragElement(e) {
-      handle.releasePointerCapture(e.pointerId);
       handle.onpointermove = null;
       handle.onpointerup = null;
       handle.onpointercancel = null;
+      handle.onlostpointercapture = null;
+      try {
+        if (e && e.pointerId !== undefined && handle.hasPointerCapture?.(e.pointerId)) {
+          handle.releasePointerCapture(e.pointerId);
+        }
+      } catch (_) {}
       
       if (el.id !== 'modal-ref-editor' && el.id !== 'modal-new-project' && el.id !== 'modal-export') {
         self.windowPositions[el.id] = {
@@ -1272,20 +1280,28 @@ class App {
     };
 
     svPicker.onpointerdown = (e) => {
-        svPicker.setPointerCapture(e.pointerId);
+        try {
+            svPicker.setPointerCapture(e.pointerId);
+        } catch (_) {}
         updateFromSV(e);
         
         const onPointerMove = (pe) => updateFromSV(pe);
         const onPointerUp = (pe) => {
-            svPicker.releasePointerCapture(pe.pointerId);
             svPicker.removeEventListener('pointermove', onPointerMove);
             svPicker.removeEventListener('pointerup', onPointerUp);
             svPicker.removeEventListener('pointercancel', onPointerUp);
+            svPicker.removeEventListener('lostpointercapture', onPointerUp);
+            try {
+                if (pe && pe.pointerId !== undefined && svPicker.hasPointerCapture?.(pe.pointerId)) {
+                    svPicker.releasePointerCapture(pe.pointerId);
+                }
+            } catch (_) {}
         };
         
         svPicker.addEventListener('pointermove', onPointerMove);
         svPicker.addEventListener('pointerup', onPointerUp);
         svPicker.addEventListener('pointercancel', onPointerUp);
+        svPicker.addEventListener('lostpointercapture', onPointerUp);
     };
 
     hueSlider.oninput = (e) => {

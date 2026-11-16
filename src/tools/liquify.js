@@ -39,9 +39,8 @@ function _stampWorldRegion(engine, stroke, minWorldX, maxWorldX, minWorldY, maxW
 
     for (let cx = sCX; cx <= eCX; cx++) {
         for (let cy = sCY; cy <= eCY; cy++) {
-            const entry = _ensureChunkBackup(engine, cx, cy);
-            if (!entry) continue;
-            const { chunk, backupData } = entry;
+            const chunk = engine._getChunk(cx, cy);
+            if (!chunk) continue;
 
             const clx = engine.isStatic ? -engine.staticWidth / 2 : cx * engine.chunkSize;
             const cly = engine.isStatic ? -engine.staticHeight / 2 : cy * engine.chunkSize;
@@ -54,6 +53,8 @@ function _stampWorldRegion(engine, stroke, minWorldX, maxWorldX, minWorldY, maxW
             const clipMaxY = Math.min(cly + chunkH, maxWorldY);
 
             if (clipMaxX > clipMinX && clipMaxY > clipMinY) {
+                const entry = _ensureChunkBackup(engine, cx, cy);
+                const backupData = entry ? entry.backupData : null;
                 const srcX = Math.round(clipMinX - clx);
                 const srcY = Math.round(clipMinY - cly);
                 const stampW = Math.round(clipMaxX - clipMinX);

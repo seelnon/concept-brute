@@ -6,13 +6,16 @@ import { syncAirSettingsFromTip } from './tools/airPaint.js';
 export function setupUI(app) {
     // Ensures keyboard hotkeys listen immediately when the user touches or interacts with the app
     document.addEventListener('pointerdown', (e) => {
-        if (!e.target.closest('input, textarea, select')) {
+        const targetEl = (e.target instanceof Element) ? e.target : null;
+        if (!targetEl || !targetEl.closest('input, textarea, select')) {
             if (document.activeElement && document.activeElement !== document.body && document.activeElement.tagName !== 'SELECT') {
                 document.activeElement.blur();
             }
-            window.focus();
+            if (!document.hasFocus()) {
+                window.focus();
+            }
         }
-        if (e.target.closest('button, [role="button"], input[type="range"]')) {
+        if (targetEl && targetEl.closest('button, [role="button"], input[type="range"]')) {
             setTimeout(() => {
                 if (document.activeElement && document.activeElement !== document.body && document.activeElement.tagName !== 'SELECT') {
                     document.activeElement.blur();

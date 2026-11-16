@@ -1083,7 +1083,6 @@ export class GpuSmudgeSolver {
         for (let cy = sCY; cy <= eCY; cy++) {
           const chunk = engine._getChunk(cx, cy);
           if (!chunk) continue;
-          this._ensureChunkBackup(engine, chunk, cx, cy);
 
           const lx = engine.isStatic ? -engine.staticWidth * 0.5 : cx * engine.chunkSize;
           const ly = engine.isStatic ? -engine.staticHeight * 0.5 : cy * engine.chunkSize;
@@ -1094,6 +1093,7 @@ export class GpuSmudgeSolver {
           const ow = ox2 - ox;
           const oh = oy2 - oy;
           if (ow <= 0 || oh <= 0) continue;
+          this._ensureChunkBackup(engine, chunk, cx, cy);
 
           const ctx = chunk.ctxs[layer];
           ctx.save();

@@ -283,7 +283,9 @@ export class TipManager {
     let drawing = false;
 
     const startDraw = (e) => {
-        this.editorCanvas.setPointerCapture(e.pointerId);
+        try {
+            this.editorCanvas.setPointerCapture(e.pointerId);
+        } catch (_) {}
         drawing = true;
         this._drawEditor(e, true);
     };
@@ -291,8 +293,12 @@ export class TipManager {
     const moveDraw = (e) => { if (drawing) this._drawEditor(e); };
     const stopDraw = (e) => { 
         if (drawing) { 
-            this.editorCanvas.releasePointerCapture(e.pointerId);
             drawing = false; 
+            try {
+                if (e && e.pointerId !== undefined && this.editorCanvas.hasPointerCapture?.(e.pointerId)) {
+                    this.editorCanvas.releasePointerCapture(e.pointerId);
+                }
+            } catch (_) {}
             this._updateFromEditor(); 
         } 
     };
@@ -301,6 +307,7 @@ export class TipManager {
     this.editorCanvas.onpointermove = moveDraw;
     this.editorCanvas.onpointerup = stopDraw;
     this.editorCanvas.onpointercancel = stopDraw;
+    this.editorCanvas.onlostpointercapture = stopDraw;
     
     document.getElementById('btn-tip-clear').onclick = () => {
         this.editorCtx.clearRect(0,0,128,128);

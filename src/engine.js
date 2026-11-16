@@ -9,7 +9,9 @@ import {
   processLassoSelection,
   applySelection,
   normalizeSelectionPath,
-  drawSelectionMask
+  drawSelectionMask,
+  updateGizmoHoverUI,
+  clearGizmoHoverUI
 } from './tools/selection.js';
 import { paintSmudgeOnChunks } from './tools/smudge.js';
 import { isMobileDevice } from './colorUtils.js';
@@ -149,6 +151,10 @@ export class Engine {
     this._lastTextureParams = null;
     
     this.activePointers = new Map(); // For multitouch gestures
+    this._pointerTimes = new Map();
+    this._lastPointerMoveTime = 0;
+    this._activeStrokePointerId = null;
+    this._activeStrokePointerType = null;
     this._gridTexture = null;
     this._lastGridParams = null;
     this.worldCenter = 200000;
@@ -370,8 +376,70 @@ export class Engine {
   }
 
   _initEvents() {
-    this.container.addEventListener('pointerenter', () => {
-        // Do not force focus or window jump on hover enter
+    const pruneStaleNonTouchPointers = (eventPointerType = null) => {
+        const now = performance.now();
+        for (const [id, p] of this.activePointers) {
+            if (p.pointerType === 'touch') continue;
+            if (!eventPointerType || p.pointerType === eventPointerType) {
+                this.activePointers.delete(id);
+                this._pointerTimes.delete(id);
+            } else if (eventPointerType === 'mouse' && p.pointerType === 'pen') {
+                const ts = this._pointerTimes.get(id) || 0;
+                if (now - ts > 180) {
+                    this.activePointers.delete(id);
+                    this._pointerTimes.delete(id);
+                }
+            }
+        }
+        if (this.activePointers.size === 0) {
+            this.isGesture = false;
+        }
+    };
+
+    const recoverOrphanedActiveState = (e) => {
+        if (!e || e.buttons !== 0 || e.pointerType === 'touch') return;
+        pruneStaleNonTouchPointers(e.pointerType);
+        const isSimulatedMouse = e.pointerType === 'mouse' && this.lastPenTouchTime && (performance.now() - this.lastPenTouchTime < 120);
+        if (isSimulatedMouse) return;
+
+        if (this.isPanning || this.isZooming) {
+            this.isPanning = false;
+            this.isZooming = false;
+            this.isMouseDown = false;
+            this._updateCursor();
+        }
+        if (this.isDrawing && this._activeStrokePointerType !== 'touch') {
+            if (this._activeStrokePointerId == null || e.pointerId === this._activeStrokePointerId || e.pointerType === this._activeStrokePointerType) {
+                this.isMouseDown = false;
+                this._endStroke(e);
+            }
+        }
+    };
+
+    const handleContainerEnter = (e) => {
+        // Do not force focus or window jump on hover enter, just refresh rect & unstuck cursor/pointer state
+        this._containerRect = null;
+        if (e.buttons === 0 && e.pointerType !== 'touch') {
+            recoverOrphanedActiveState(e);
+        }
+        this._updateCursor();
+        this._updateBrushCursor(e);
+    };
+
+    this.container.addEventListener('pointerenter', handleContainerEnter);
+    this.container.addEventListener('pointerover', (e) => {
+        if (e.target === this.container && e.buttons === 0 && e.pointerType !== 'touch') {
+            this._containerRect = null;
+            recoverOrphanedActiveState(e);
+            this._updateBrushCursor(e);
+        }
+    });
+    this.container.addEventListener('pointerleave', (e) => {
+        if (!this.isDrawing && e.pointerType !== 'touch') {
+            if (this.brushCursor) this.brushCursor.style.display = 'none';
+            if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
+            clearGizmoHoverUI(this);
+        }
     });
 
     this.container.addEventListener('pointerdown', (e) => {
@@ -381,18 +449,20 @@ export class Engine {
             this.lastPenTouchTime = performance.now();
         }
 
-        // Activate app focus immediately so keyboard hotkeys listen without needing to click buttons
-        if (!e.target.closest('input, textarea, select')) {
+        const targetEl = e.target instanceof Element ? e.target : null;
+
+        // Activate container focus for hotkeys without redundant focus churn on every tap
+        if (!targetEl || !targetEl.closest('input, textarea, select')) {
             if (document.activeElement && document.activeElement !== document.body && document.activeElement !== this.container) {
                 document.activeElement.blur();
             }
-            if (typeof this.container.focus === 'function') {
+            if (document.activeElement !== this.container && typeof this.container.focus === 'function') {
                 this.container.focus({ preventScroll: true });
             }
         }
 
         // UI SHIELD: Ignore if hitting any UI element
-        if (e.target !== this.container && e.target.closest('.ui-panel, .tool-btn, .brutal-btn, .dots-btn, #top-bar, #top-bar-ref, .brutal-range, button, input, select, #recording-selection-box, .rec-handle')) {
+        if (targetEl && e.target !== this.container && targetEl.closest('.ui-panel, .tool-btn, .brutal-btn, .dots-btn, #top-bar, #top-bar-ref, #selection-mode-toolbar, .brutal-range, button, input, select, textarea, #recording-selection-box, .rec-handle, #modal-new-project, #modal-export, #modal-ref-editor')) {
             return;
         }
 
@@ -408,6 +478,9 @@ export class Engine {
                 this.refresh();
                 this._status('LASSO CANCELLED');
                 this.activePointers.delete(e.pointerId);
+                this._pointerTimes.delete(e.pointerId);
+                this._activeStrokePointerId = null;
+                this._activeStrokePointerType = null;
                 this.isMouseDown = false;
                 
                 this._lassoJustCancelled = true;
@@ -418,22 +491,40 @@ export class Engine {
 
         // Stop browser gestures, drag-outs, selection, especially for Alt-click and Windows Ink
         if (e.cancelable) e.preventDefault();
+
+        // Prune stale non-mouse pointers if mouse arrives >250ms after any pen activity
+        if (e.pointerType === 'mouse') {
+            const now = performance.now();
+            for (const [id, p] of this.activePointers) {
+                if (p.pointerType === 'pen') {
+                    const ts = this._pointerTimes.get(id) || 0;
+                    if (!this.isDrawing || (now - ts > 250)) {
+                        this.activePointers.delete(id);
+                        this._pointerTimes.delete(id);
+                    }
+                }
+            }
+        }
         
         // Prioritize non-mouse pointers (Pen/Touch)
         const pointers = Array.from(this.activePointers.values());
         const hasNonMouse = pointers.some(p => p.pointerType !== 'mouse');
         
-        // If we have a pen/touch active, ignore any new mouse downs
+        // If we have an active pen/touch, ignore simulated mouse downs
         if (hasNonMouse && e.pointerType === 'mouse') return;
         
         // If this is a pen/touch down, clear any ghost mouse pointers
         if (e.pointerType !== 'mouse') {
             for (const [id, p] of this.activePointers) {
-                if (p.pointerType === 'mouse') this.activePointers.delete(id);
+                if (p.pointerType === 'mouse') {
+                    this.activePointers.delete(id);
+                    this._pointerTimes.delete(id);
+                }
             }
         }
 
         this.activePointers.set(e.pointerId, e);
+        this._pointerTimes.set(e.pointerId, performance.now());
 
         const currentPointers = Array.from(this.activePointers.values());
         const hasPen = currentPointers.some(p => p.pointerType === 'pen');
@@ -441,6 +532,7 @@ export class Engine {
         // IF we have a pen, IGNORE ALL touch pointers in the map (and from event)
         if (hasPen && e.pointerType === 'touch') {
             this.activePointers.delete(e.pointerId);
+            this._pointerTimes.delete(e.pointerId);
             return;
         }
 
@@ -448,7 +540,10 @@ export class Engine {
             // Pen always takes full priority over gestures and touches
             this.isGesture = false;
             for (const [id, p] of this.activePointers) {
-                if (p.pointerType !== 'pen') this.activePointers.delete(id);
+                if (p.pointerType !== 'pen') {
+                    this.activePointers.delete(id);
+                    this._pointerTimes.delete(id);
+                }
             }
             if (e.pointerType !== 'pen') return;
         } else if (this.activePointers.size > 1) {
@@ -467,9 +562,13 @@ export class Engine {
 
         if (this.isExportMode) {
             const m = this._getMousePos(e);
-            this.exportStartPos = { x: m.wx, y: m.wy };
-            this.exportRect = { x: m.wx, y: m.wy, w: 0, h: 0 };
+            const wx = this.isStatic ? Math.max(-this.staticWidth / 2, Math.min(this.staticWidth / 2, m.wx)) : m.wx;
+            const wy = this.isStatic ? Math.max(-this.staticHeight / 2, Math.min(this.staticHeight / 2, m.wy)) : m.wy;
+            this.exportStartPos = { x: wx, y: wy };
+            this.exportRect = { x: wx, y: wy, w: 0, h: 0 };
             this.isDrawing = true;
+            this._activeStrokePointerId = e.pointerId;
+            this._activeStrokePointerType = e.pointerType;
             return;
         }
 
@@ -482,6 +581,8 @@ export class Engine {
         }
 
         this.isMouseDown = true;
+        this._activeStrokePointerId = e.pointerId;
+        this._activeStrokePointerType = e.pointerType;
         if (e.button === 1 || this.keys[' ']) { // Middle click or Space
             this.isPanning = true;
             this.lastMousePos = { x: e.clientX, y: e.clientY };
@@ -498,21 +599,35 @@ export class Engine {
     this.container.addEventListener('gestureend', (e) => e.preventDefault());
 
     window.addEventListener('pointermove', (e) => {
-      // Stop browser gestures (zoom/pan) especially for Windows Ink/Stylus
-      if (e.cancelable && e.target === this.container) e.preventDefault();
+      const now = performance.now();
+      this._lastPointerMoveTime = now;
+
+      // Only suppress browser gestures while actively pressing/touching on canvas (keep hover intact for Windows Ink)
+      if (e.cancelable && e.target === this.container && (e.buttons > 0 || e.pointerType === 'touch')) e.preventDefault();
       if (this.perfMonitor) this.perfMonitor.markInteraction();
 
-      if (e.pointerType === 'pen' || e.pointerType === 'touch') {
-          this.lastPenTouchTime = performance.now();
+      // Update pen/touch activity timestamp only when actively pressed or touching, not passive pen hover
+      if ((e.pointerType === 'pen' || e.pointerType === 'touch') && (e.buttons > 0 || e.pointerType === 'touch')) {
+          this.lastPenTouchTime = now;
       }
 
-      // Ignore simulated mouse events right after pen/touch interaction to prevent cursor teleportation at stroke start/end
-      if (e.pointerType === 'mouse' && this.lastPenTouchTime && (performance.now() - this.lastPenTouchTime < 100)) {
+      // Prune stale canvas pointers when no non-touch button is pressed
+      if (e.buttons === 0 && e.pointerType !== 'touch') {
+          this.activePointers.delete(e.pointerId);
+          this._pointerTimes.delete(e.pointerId);
+          recoverOrphanedActiveState(e);
+      } else if (this.activePointers.has(e.pointerId)) {
+          // Only update pointers that originated on the painting canvas (never track UI/Settings drags)
+          this.activePointers.set(e.pointerId, e);
+          this._pointerTimes.set(e.pointerId, now);
+      }
+
+      // Ignore simulated mouse events right after pen/touch press/release to prevent cursor teleportation
+      if (e.pointerType === 'mouse' && this.lastPenTouchTime && (now - this.lastPenTouchTime < 100)) {
           return;
       }
 
-      // Ignore mouse moves if we already have non-mouse pointers active, BUT only if target is the canvas
-      // This allows mouse to still work on UI sliders even if stylus is hovering.
+      // Ignore mouse moves over canvas ONLY if a non-mouse canvas pointer is genuinely active right now
       const hasNonMouse = Array.from(this.activePointers.values()).some(p => p.pointerType !== 'mouse');
       if (hasNonMouse && e.pointerType === 'mouse' && e.target === this.container) return;
 
@@ -520,6 +635,7 @@ export class Engine {
       const hasPen = pointers.some(p => p.pointerType === 'pen') || e.pointerType === 'pen';
       if (hasPen && e.pointerType === 'touch') {
           this.activePointers.delete(e.pointerId);
+          this._pointerTimes.delete(e.pointerId);
           return;
       }
 
@@ -527,21 +643,14 @@ export class Engine {
           // Stylus pen active - cancel any gesture lock and remove touch pointers
           this.isGesture = false;
           for (const [id, p] of this.activePointers) {
-              if (p.pointerType !== 'pen') this.activePointers.delete(id);
+              if (p.pointerType !== 'pen') {
+                  this.activePointers.delete(id);
+                  this._pointerTimes.delete(id);
+              }
           }
       }
 
-      // Only track activePointers when pressed (buttons > 0 or touch event), not passive hovering
-      if (e.buttons === 0 && e.pointerType !== 'touch') {
-          this.activePointers.delete(e.pointerId);
-          if (this.activePointers.size === 0) {
-              this.isGesture = false;
-          }
-      } else {
-          this.activePointers.set(e.pointerId, e);
-      }
-
-      // Filter pointers list again after set
+      // Filter pointers list again after set/prune
       const currentPointers = Array.from(this.activePointers.values());
       const nonMouseCount = currentPointers.filter(p => p.pointerType !== 'mouse').length;
       
@@ -556,8 +665,8 @@ export class Engine {
           const m = this._getMousePos(e);
           const x1 = this.exportStartPos.x;
           const y1 = this.exportStartPos.y;
-          const x2 = m.wx;
-          const y2 = m.wy;
+          const x2 = this.isStatic ? Math.max(-this.staticWidth / 2, Math.min(this.staticWidth / 2, m.wx)) : m.wx;
+          const y2 = this.isStatic ? Math.max(-this.staticHeight / 2, Math.min(this.staticHeight / 2, m.wy)) : m.wy;
           
           this.exportRect = {
               x: Math.min(x1, x2),
@@ -578,7 +687,8 @@ export class Engine {
 
       // Use coalesced events for smoother line input, but dispatch single frame for simulation brushes (Liquify, Fluid, Air)
       const isSimulationBrush = this.brush.type === TOOLS.LIQUIFY || this.brush.type === TOOLS.FLUID || this.brush.type === TOOLS.AIR;
-      const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+      const rawEvents = e.getCoalescedEvents ? e.getCoalescedEvents() : null;
+      const events = (rawEvents && rawEvents.length > 0) ? rawEvents : [e];
       
       if (isSimulationBrush) {
           this._moveStroke(events[events.length - 1]);
@@ -600,8 +710,20 @@ export class Engine {
       this._updateBrushCursor(e);
     });
 
+    // Hover fallback: if Windows Ink / Chromium pauses pointermove right after returning from Settings
+    // or switching tablet-as-mouse mode, mousemove keeps the hover cursor alive instead of freezing.
+    window.addEventListener('mousemove', (e) => {
+        if (this.isDrawing || this.isPanning || this.isZooming || this.isGesture) return;
+        const now = performance.now();
+        if (now - (this._lastPointerMoveTime || 0) <= 25) return;
+        if (this.lastPenTouchTime && (now - this.lastPenTouchTime < 120)) return;
+        this._handlePickerMove(e);
+        this._updateBrushCursor(e);
+    });
+
     const endHandler = (e) => {
         this.activePointers.delete(e.pointerId);
+        this._pointerTimes.delete(e.pointerId);
         
         if (e.pointerType === 'pen' || e.pointerType === 'touch') {
             this.lastPenTouchTime = performance.now();
@@ -618,6 +740,8 @@ export class Engine {
         if (this.isExportMode && this.isDrawing) {
             this.isDrawing = false;
             this.isExportMode = false;
+            this._activeStrokePointerId = null;
+            this._activeStrokePointerType = null;
             this.container.classList.remove('export-mode');
             
             // Only trigger if selection has some area
@@ -630,6 +754,8 @@ export class Engine {
         this.isMouseDown = false;
         if (e.button === 1) {
             this.isPanning = false;
+            this._activeStrokePointerId = null;
+            this._activeStrokePointerType = null;
             this._updateCursor();
             return;
         }
@@ -640,6 +766,7 @@ export class Engine {
     window.addEventListener('pointercancel', endHandler);
     window.addEventListener('pointerout', (e) => {
         this.activePointers.delete(e.pointerId);
+        this._pointerTimes.delete(e.pointerId);
         if (e.pointerType === 'touch') {
             if (this.brushCursor) this.brushCursor.style.display = 'none';
             if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
@@ -647,6 +774,7 @@ export class Engine {
     });
     window.addEventListener('pointerleave', (e) => {
         this.activePointers.delete(e.pointerId);
+        this._pointerTimes.delete(e.pointerId);
         if (e.pointerType === 'touch') {
             if (this.brushCursor) this.brushCursor.style.display = 'none';
             if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
@@ -659,8 +787,12 @@ export class Engine {
             this._endStroke();
         }
         this.activePointers.clear();
+        this._pointerTimes.clear();
+        this._activeStrokePointerId = null;
+        this._activeStrokePointerType = null;
         this.isDrawing = false;
         this.isPanning = false;
+        this.isZooming = false;
         this.isGesture = false;
         this.isMouseDown = false;
         this.keys = {};
@@ -668,6 +800,18 @@ export class Engine {
     };
 
     window.addEventListener('blur', handleReset);
+    window.addEventListener('focus', () => {
+        this._containerRect = null;
+        if (!this.isDrawing) {
+            this.activePointers.clear();
+            this._pointerTimes.clear();
+            this.isGesture = false;
+            this.isPanning = false;
+            this.isZooming = false;
+            this.isMouseDown = false;
+            this._updateCursor();
+        }
+    });
 
     document.addEventListener('visibilitychange', () => {
         if (document.hidden) {
@@ -703,6 +847,15 @@ export class Engine {
 
         this.keys[key] = true;
         this._updateCursor();
+        if (this.floatingSelection && (key === 'alt' || key === 'shift') && this.lastMousePos) {
+            updateGizmoHoverUI(
+                this,
+                this.lastMousePos.x,
+                this.lastMousePos.y,
+                Boolean(e.altKey || this.keys['alt']),
+                this.isDrawing && this._gizmoDrag ? this._gizmoDrag : null
+            );
+        }
     });
     window.addEventListener('keyup', (e) => {
         if (
@@ -714,8 +867,18 @@ export class Engine {
         ) {
             return;
         }
-        this.keys[e.key.toLowerCase()] = false;
+        const key = e.key.toLowerCase();
+        this.keys[key] = false;
         this._updateCursor();
+        if (this.floatingSelection && (key === 'alt' || key === 'shift') && this.lastMousePos) {
+            updateGizmoHoverUI(
+                this,
+                this.lastMousePos.x,
+                this.lastMousePos.y,
+                Boolean(e.altKey || this.keys['alt']),
+                this.isDrawing && this._gizmoDrag ? this._gizmoDrag : null
+            );
+        }
     });
     
     this.container.addEventListener('wheel', (e) => {
@@ -780,12 +943,14 @@ export class Engine {
   }
 
   _updateCursor() {
-    if (this.isDrawing) {
-        this.container.style.cursor = 'none';
-    } else if (this.isPanning || this.keys[' ']) {
+    if (this.isPanning || this.keys[' ']) {
         this.container.style.cursor = 'grab';
     } else if (this.isZooming || this.keys['z']) {
         this.container.style.cursor = 'zoom-in';
+    } else if (this.floatingSelection && this._gizmoCursor) {
+        this.container.style.cursor = this._gizmoCursor;
+    } else if (this.isDrawing) {
+        this.container.style.cursor = 'none';
     } else {
         this.container.style.cursor = 'crosshair';
     }
@@ -1689,6 +1854,7 @@ export class Engine {
       const center = this._getMousePos({ clientX: rect.left + rect.width/2, clientY: rect.top + rect.height/2 });
       
       const clip = this.clipboard;
+      this.transformMode = 'move';
       this.transformHistory = [];
       this.transformRedoHistory = [];
       this.floatingSelection = {
@@ -1725,6 +1891,7 @@ export class Engine {
       const data = this._getSelectionData(true);
       if (!data) return;
 
+      this.transformMode = 'move';
       this.transformHistory = [];
       this.transformRedoHistory = [];
       this.floatingSelection = {
@@ -1887,21 +2054,49 @@ export class Engine {
     if (this.activePointers.size === 0 && e && e.pointerType === 'touch') {
         this.brushCursor.style.display = 'none';
         if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
+        clearGizmoHoverUI(this);
         return;
     }
 
     const rect = this.getContainerRect();
 
     // Hide if mouse is over UI
-    if (e && (e.target.closest('.ui-panel') || e.target.closest('button') || e.target.closest('input') || e.target.closest('#top-bar'))) {
+    const targetEl = (e && e.target instanceof Element) ? e.target : null;
+    if (targetEl && (targetEl.closest('.ui-panel') || targetEl.closest('#selection-mode-toolbar') || targetEl.closest('button') || targetEl.closest('input') || targetEl.closest('select') || targetEl.closest('textarea') || targetEl.closest('#top-bar') || targetEl.closest('#top-bar-ref'))) {
         this.brushCursor.style.display = 'none';
         if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
+        clearGizmoHoverUI(this);
+        if (this.container) this.container.style.cursor = 'default';
         return;
     }
 
     // Position relative to container
     let mX = mouseX - rect.left;
     let mY = mouseY - rect.top;
+
+    if (!this.isDrawing && (mX < 0 || mY < 0 || mX > rect.width || mY > rect.height)) {
+        this.brushCursor.style.display = 'none';
+        if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
+        clearGizmoHoverUI(this);
+        return;
+    }
+
+    // Unified Transform Gizmo cursor & prompt when floating selection is active
+    if (this.floatingSelection && !this.isExportMode) {
+        this.brushCursor.style.display = 'none';
+        if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
+        const isAltDown = Boolean((e && e.altKey) || this.keys['alt']);
+        updateGizmoHoverUI(
+            this,
+            mouseX,
+            mouseY,
+            isAltDown,
+            (this.isDrawing && this._gizmoDrag) ? this._gizmoDrag : null
+        );
+        return;
+    } else {
+        clearGizmoHoverUI(this);
+    }
 
     // Manage brush crosshair visibility and positioning
     let showCrosshair = this.isDrawing && !this.isExportMode && this.brush.type !== TOOLS.REF_MOVE;
@@ -2448,8 +2643,10 @@ export class Engine {
   clearSelection() {
       this.activeSelectionPath = null;
       this.floatingSelection = null;
+      this._gizmoDrag = null;
       this.transformHistory = [];
       this.transformRedoHistory = [];
+      clearGizmoHoverUI(this);
       this._updateSelectionPreview();
       this.refresh();
       this._status('READY');
@@ -2460,7 +2657,7 @@ export class Engine {
   }
 
   _handlePickerMove(e) {
-    if (e.altKey && !this.isDrawing && this.brush.type !== TOOLS.LASSO) {
+    if (e.altKey && !this.isDrawing && this.brush.type !== TOOLS.LASSO && !this.floatingSelection) {
       const color = this.pickColor(e.clientX, e.clientY);
       this._notifyPicker(e.clientX, e.clientY, color, false);
     } else {

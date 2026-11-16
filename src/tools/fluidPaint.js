@@ -421,17 +421,17 @@ function ensureTile(engine, fb, tx, ty) {
   if (engine.isStatic) {
     const chunk = engine._getChunk(0, 0);
     if (chunk) {
-      ensureChunkBackup(engine, chunk, 0, 0);
-      if (!chunk.isEmpty || !chunk.isEmpty[layer]) {
-        const lx = -engine.staticWidth / 2;
-        const ly = -engine.staticHeight / 2;
-        const ox = Math.max(wx, lx);
-        const oy = Math.max(wy, ly);
-        const ox2 = Math.min(wx + TILE_SIZE, lx + chunk.width);
-        const oy2 = Math.min(wy + TILE_SIZE, ly + chunk.height);
-        const ow = ox2 - ox;
-        const oh = oy2 - oy;
-        if (ow > 0 && oh > 0) {
+      const lx = -engine.staticWidth / 2;
+      const ly = -engine.staticHeight / 2;
+      const ox = Math.max(wx, lx);
+      const oy = Math.max(wy, ly);
+      const ox2 = Math.min(wx + TILE_SIZE, lx + chunk.width);
+      const oy2 = Math.min(wy + TILE_SIZE, ly + chunk.height);
+      const ow = ox2 - ox;
+      const oh = oy2 - oy;
+      if (ow > 0 && oh > 0) {
+        ensureChunkBackup(engine, chunk, 0, 0);
+        if (!chunk.isEmpty || !chunk.isEmpty[layer]) {
           _tileReadCtx.drawImage(chunk.canvases[layer], ox - lx, oy - ly, ow, oh, ox - wx, oy - wy, ow, oh);
           hasAnyPixels = true;
         }

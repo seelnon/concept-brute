@@ -642,11 +642,10 @@ export class GpuFluidSolver {
 
     this.carriedA = this._makeTexFBO(1, 1, false, false);
     this.carriedB = this._makeTexFBO(1, 1, false, false);
-    this.tileCommitStraight = this._makeTexFBO(TILE_SIZE, TILE_SIZE, false, false);
     this.chunkBlitFbo = gl.createFramebuffer();
 
     if (!this.workStateA || !this.workStateB || !this.workPaintA || !this.workPaintB ||
-        !this.workLit || !this.carriedA || !this.carriedB || !this.tileCommitStraight || !this.chunkBlitFbo) {
+        !this.workLit || !this.carriedA || !this.carriedB || !this.chunkBlitFbo) {
       this.dispose();
       return;
     }
@@ -1075,10 +1074,20 @@ export class GpuFluidSolver {
     const needMaxX = Math.ceil(params.maxX + pad);
     const needMaxY = Math.ceil(params.maxY + pad);
 
-    const workX = needMinX;
-    const workY = needMinY;
-    const boxW = Math.min(WORK_SIZE, Math.max(8, needMaxX - workX));
-    const boxH = Math.min(WORK_SIZE, Math.max(8, needMaxY - workY));
+    const spanX = needMaxX - needMinX;
+    const spanY = needMaxY - needMinY;
+    const boxW = Math.min(WORK_SIZE, Math.max(8, spanX));
+    const boxH = Math.min(WORK_SIZE, Math.max(8, spanY));
+    const workX = spanX > WORK_SIZE ? Math.floor((needMinX + needMaxX - boxW) * 0.5) : needMinX;
+    const workY = spanY > WORK_SIZE ? Math.floor((needMinY + needMaxY - boxH) * 0.5) : needMinY;
+
+    if (engine.isStatic) {
+      const halfW = engine.staticWidth * 0.5;
+      const halfH = engine.staticHeight * 0.5;
+      if ((workX + boxW) <= -halfW || workX >= halfW || (workY + boxH) <= -halfH || workY >= halfH) {
+        return;
+      }
+    }
 
     const tiles = this._assembleWorkBox(engine, workX, workY, boxW, boxH);
     if (tiles.length === 0) return;
@@ -1407,7 +1416,6 @@ export class GpuFluidSolver {
         for (let cy = sCY; cy <= eCY; cy++) {
           const chunk = engine._getChunk(cx, cy);
           if (!chunk) continue;
-          this._ensureBackedUp(engine, chunk, cx, cy);
 
           const lx = engine.isStatic ? -engine.staticWidth * 0.5 : cx * engine.chunkSize;
           const ly = engine.isStatic ? -engine.staticHeight * 0.5 : cy * engine.chunkSize;
@@ -1418,6 +1426,7 @@ export class GpuFluidSolver {
           const ow = ox2 - ox;
           const oh = oy2 - oy;
           if (ow <= 0 || oh <= 0) continue;
+          this._ensureBackedUp(engine, chunk, cx, cy);
 
           const ctx = chunk.ctxs[layer];
           ctx.save();
@@ -1499,7 +1508,7 @@ export class GpuFluidSolver {
     };
     [
       this.workStateA, this.workStateB, this.workPaintA, this.workPaintB,
-      this.workLit, this.carriedA, this.carriedB, this.tileCommitStraight
+      this.workLit, this.carriedA, this.carriedB
     ].forEach(delTexFbo);
     if (this.mrtWorkA) gl.deleteFramebuffer(this.mrtWorkA);
     if (this.mrtWorkB) gl.deleteFramebuffer(this.mrtWorkB);

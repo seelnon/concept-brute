@@ -1,3 +1,360 @@
+const ROTATE_BAND_PX = 90;
+const _svgCursorCache = new Map();
+
+function _makeSvgCursor(svgBody, hotX = 12, hotY = 12, fallback = 'default') {
+    const key = `${hotX},${hotY}|${svgBody}`;
+    let cached = _svgCursorCache.get(key);
+    if (!cached) {
+        const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">${svgBody}</svg>`;
+        cached = `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}") ${hotX} ${hotY}, ${fallback}`;
+        _svgCursorCache.set(key, cached);
+    }
+    return cached;
+}
+
+function _getScaleCursor(angleRad, nonUniform = false) {
+    const deg = Math.round((angleRad * 180) / Math.PI);
+    const snapped = ((deg % 180) + 180) % 180; // double-ended arrow is symmetric mod 180
+    const accent = nonUniform ? '#00ffff' : '#ffff00';
+    return _makeSvgCursor(
+        `<g transform="rotate(${snapped} 12 12)">` +
+        `<path d="M3 12 L8 7.5 L8 10.5 L16 10.5 L16 7.5 L21 12 L16 16.5 L16 13.5 L8 13.5 L8 16.5 Z" fill="${accent}" stroke="#000000" stroke-width="1.5" stroke-linejoin="round"/>` +
+        `</g>`,
+        12, 12, 'nesw-resize'
+    );
+}
+
+function _getRotateCursor(tangentAngleRad) {
+    const deg = Math.round((tangentAngleRad * 180) / Math.PI);
+    const qDeg = Math.round(deg / 5) * 5;
+    return _makeSvgCursor(
+        `<g transform="rotate(${qDeg} 12 12)">` +
+        `<path d="M6.2 9.5 A6.8 6.8 0 0 1 17.8 9.5" fill="none" stroke="#000000" stroke-width="4" stroke-linecap="round"/>` +
+        `<path d="M6.2 9.5 A6.8 6.8 0 0 1 17.8 9.5" fill="none" stroke="#ffff00" stroke-width="2" stroke-linecap="round"/>` +
+        `<polygon points="3.5,8.5 8.5,6.5 7.5,11.8" fill="#ffff00" stroke="#000000" stroke-width="1.2" stroke-linejoin="round"/>` +
+        `<polygon points="20.5,8.5 15.5,6.5 16.5,11.8" fill="#ffff00" stroke="#000000" stroke-width="1.2" stroke-linejoin="round"/>` +
+        `</g>`,
+        12, 12, 'grab'
+    );
+}
+
+function _getMoveCursor() {
+    return _makeSvgCursor(
+        `<path d="M12 2 L15 5.5 L13.2 5.5 L13.2 10.8 L18.5 10.8 L18.5 9 L22 12 L18.5 15 L18.5 13.2 L13.2 13.2 L13.2 18.5 L15 18.5 L12 22 L9 18.5 L10.8 18.5 L10.8 13.2 L5.5 13.2 L5.5 15 L2 12 L5.5 9 L5.5 10.8 L10.8 10.8 L10.8 5.5 L9 5.5 Z" fill="#ffffff" stroke="#000000" stroke-width="1.3" stroke-linejoin="round"/>`,
+        12, 12, 'move'
+    );
+}
+
+export function isUnifiedTransformMode(mode) {
+    return !mode || mode === 'move' || mode === 'transform' || mode === 'scale' || mode === 'rotate';
+}
+
+export function hitTestTransformGizmo(engine, clientX, clientY) {
+    const sel = engine && engine.floatingSelection;
+    if (!sel || !sel.canvas) return null;
+
+    const rect = engine.getContainerRect();
+    const sx = clientX - rect.left;
+    const sy = clientY - rect.top;
+    const world = engine._screenToWorld(sx, sy);
+    const wx = world.wx;
+    const wy = world.wy;
+
+    const selW = sel.width || sel.canvas.width;
+    const selH = sel.height || sel.canvas.height;
+    const scX = sel.scaleX !== undefined ? sel.scaleX : (sel.scale || 1);
+    const scY = sel.scaleY !== undefined ? sel.scaleY : (sel.scale || 1);
+    const rot = sel.rotation || 0;
+    const zoom = engine.zoom || 1;
+
+    const pivotX = sel.x + selW * 0.5;
+    const pivotY = sel.y + selH * 0.5;
+    const hw = (selW * scX) * 0.5;
+    const hh = (selH * scY) * 0.5;
+
+    const dx = wx - pivotX;
+    const dy = wy - pivotY;
+    const cosN = Math.cos(-rot);
+    const sinN = Math.sin(-rot);
+    const lx = dx * cosN - dy * sinN;
+    const ly = dx * sinN + dy * cosN;
+
+    const pxX = lx * zoom;
+    const pxY = ly * zoom;
+    const pxHW = hw * zoom;
+    const pxHH = hh * zoom;
+
+    const outX = Math.max(0, Math.abs(pxX) - pxHW);
+    const outY = Math.max(0, Math.abs(pxY) - pxHH);
+    const distOutside = Math.hypot(outX, outY);
+    const isInsideBox = Math.abs(pxX) <= pxHW && Math.abs(pxY) <= pxHH;
+
+    const mode = engine.transformMode || 'move';
+    const baseHit = {
+        mode,
+        selW,
+        selH,
+        scX,
+        scY,
+        rot,
+        pivotX,
+        pivotY,
+        wx,
+        wy,
+        lx,
+        ly,
+        pxX,
+        pxY,
+        pxHW,
+        pxHH,
+        distOutside
+    };
+
+    if (mode === 'deform') {
+        if (isInsideBox || distOutside <= 14) {
+            return { ...baseHit, zone: 'deform', handle: null, cursorAngle: 0 };
+        }
+        return { ...baseHit, zone: 'apply', handle: null, cursorAngle: 0 };
+    }
+
+    if (mode === 'opacity') {
+        if (isInsideBox || distOutside <= 14) {
+            return { ...baseHit, zone: 'opacity', handle: null, cursorAngle: 0 };
+        }
+        return { ...baseHit, zone: 'apply', handle: null, cursorAngle: 0 };
+    }
+
+    // Unified Gizmo Mode: Corner/Side handles -> Scale, Inside -> Move, Outside halo -> Rotate
+    const pivotScreen = engine._worldToScreen(pivotX, pivotY);
+    const computeHandleScreenAngle = (hx, hy) => {
+        const cosP = Math.cos(rot);
+        const sinP = Math.sin(rot);
+        const offX = hx * hw;
+        const offY = hy * hh;
+        const hwx = pivotX + offX * cosP - offY * sinP;
+        const hwy = pivotY + offX * sinP + offY * cosP;
+        const hs = engine._worldToScreen(hwx, hwy);
+        return Math.atan2(hs.y - pivotScreen.y, hs.x - pivotScreen.x);
+    };
+
+    const minDim = Math.min(pxHW * 2, pxHH * 2);
+    const cornerHitR = Math.min(14, Math.max(6, minDim * 0.35 + 4));
+
+    const corners = [
+        { id: 'tl', hx: -1, hy: -1, ax: 1, ay: 1 },
+        { id: 'tr', hx: 1, hy: -1, ax: -1, ay: 1 },
+        { id: 'bl', hx: -1, hy: 1, ax: 1, ay: -1 },
+        { id: 'br', hx: 1, hy: 1, ax: -1, ay: -1 }
+    ];
+
+    let bestCorner = null;
+    let bestCornerDist = Infinity;
+    for (const c of corners) {
+        const d = Math.hypot(pxX - c.hx * pxHW, pxY - c.hy * pxHH);
+        if (d <= cornerHitR && d < bestCornerDist) {
+            bestCornerDist = d;
+            bestCorner = c;
+        }
+    }
+    if (bestCorner) {
+        return {
+            ...baseHit,
+            zone: 'scale',
+            handleKind: 'corner',
+            handle: bestCorner.id,
+            hx: bestCorner.hx,
+            hy: bestCorner.hy,
+            ax: bestCorner.ax,
+            ay: bestCorner.ay,
+            cursorAngle: computeHandleScreenAngle(bestCorner.hx, bestCorner.hy)
+        };
+    }
+
+    // Side midpoint handles + grabbing directly along side borders
+    const sides = [
+        { id: 't', hx: 0, hy: -1, ax: 0, ay: 1, show: pxHW * 2 >= 26 },
+        { id: 'b', hx: 0, hy: 1, ax: 0, ay: -1, show: pxHW * 2 >= 26 },
+        { id: 'l', hx: -1, hy: 0, ax: 1, ay: 0, show: pxHH * 2 >= 26 },
+        { id: 'r', hx: 1, hy: 0, ax: -1, ay: 0, show: pxHH * 2 >= 26 }
+    ];
+
+    let bestSide = null;
+    let bestSideDist = Infinity;
+    for (const s of sides) {
+        if (!s.show) continue;
+        const dKnob = Math.hypot(pxX - s.hx * pxHW, pxY - s.hy * pxHH);
+        const onVerticalEdge = s.hx !== 0 && Math.abs(pxX - s.hx * pxHW) <= 7 && Math.abs(pxY) <= Math.max(0, pxHH - 8);
+        const onHorizontalEdge = s.hy !== 0 && Math.abs(pxY - s.hy * pxHH) <= 7 && Math.abs(pxX) <= Math.max(0, pxHW - 8);
+        const edgeDist = onVerticalEdge ? Math.abs(pxX - s.hx * pxHW) : (onHorizontalEdge ? Math.abs(pxY - s.hy * pxHH) : Infinity);
+        const effDist = Math.min(dKnob <= 13 ? dKnob : Infinity, edgeDist);
+        if (effDist < bestSideDist) {
+            bestSideDist = effDist;
+            bestSide = s;
+        }
+    }
+    if (bestSide) {
+        return {
+            ...baseHit,
+            zone: 'scale',
+            handleKind: 'side',
+            handle: bestSide.id,
+            hx: bestSide.hx,
+            hy: bestSide.hy,
+            ax: bestSide.ax,
+            ay: bestSide.ay,
+            cursorAngle: computeHandleScreenAngle(bestSide.hx, bestSide.hy)
+        };
+    }
+
+    // Inside box -> Move
+    if (isInsideBox) {
+        return {
+            ...baseHit,
+            zone: 'move',
+            handle: null,
+            cursorAngle: 0
+        };
+    }
+
+    // Outside box -> Rotate within outer rotate band
+    if (distOutside <= ROTATE_BAND_PX) {
+        const tangentAngle = Math.atan2(sy - pivotScreen.y, sx - pivotScreen.x) + Math.PI * 0.5;
+        return {
+            ...baseHit,
+            zone: 'rotate',
+            handle: null,
+            cursorAngle: tangentAngle
+        };
+    }
+
+    // Far outside -> Click to apply & exit transform
+    return {
+        ...baseHit,
+        zone: 'apply',
+        handle: null,
+        cursorAngle: 0
+    };
+}
+
+function _ensureGizmoPrompt(engine) {
+    if (!engine || !engine.uiLayer) return null;
+    let prompt = document.getElementById('gizmo-prompt');
+    if (!prompt) {
+        prompt = document.createElement('div');
+        prompt.id = 'gizmo-prompt';
+        prompt.className = 'gizmo-prompt pointer-events-none hidden';
+        engine.uiLayer.appendChild(prompt);
+    }
+    return prompt;
+}
+
+export function clearGizmoHoverUI(engine) {
+    if (!engine) return;
+    engine._gizmoCursor = null;
+    engine._hoveredGizmoZone = null;
+    const prompt = document.getElementById('gizmo-prompt');
+    if (prompt) prompt.classList.add('hidden');
+    if (engine.selectionOverlay) {
+        engine.selectionOverlay.classList.remove('gizmo-rotate-hover');
+        const handles = engine.selectionOverlay.querySelectorAll('.gizmo-handle');
+        handles.forEach(h => {
+            h.classList.remove('active-handle', 'alt-handle');
+        });
+    }
+}
+
+export function updateGizmoHoverUI(engine, clientX, clientY, isAltDown = false, hitOverride = null) {
+    if (!engine || !engine.floatingSelection) {
+        clearGizmoHoverUI(engine);
+        return null;
+    }
+
+    const hit = hitOverride || hitTestTransformGizmo(engine, clientX, clientY);
+    if (!hit) {
+        clearGizmoHoverUI(engine);
+        return null;
+    }
+
+    engine._hoveredGizmoZone = hit;
+
+    const sel = engine.floatingSelection;
+    const scX = sel.scaleX !== undefined ? sel.scaleX : (sel.scale || 1);
+    const scY = sel.scaleY !== undefined ? sel.scaleY : (sel.scale || 1);
+    const rotDeg = Math.round(((sel.rotation || 0) * 180) / Math.PI);
+    const opPct = Math.round((sel.opacity !== undefined ? sel.opacity : 1) * 100);
+
+    let cursor = 'crosshair';
+    let label = '';
+    let promptAccent = '';
+
+    if (hit.zone === 'scale') {
+        cursor = _getScaleCursor(hit.cursorAngle, isAltDown);
+        if (engine.isDrawing && engine._gizmoDrag) {
+            label = Math.abs(scX - scY) < 0.005
+                ? `SCALE ${Math.round(scX * 100)}%`
+                : `X:${Math.round(scX * 100)}% Y:${Math.round(scY * 100)}%`;
+        } else {
+            label = isAltDown ? 'NON-UNIFORM SCALE [ALT]' : 'SCALE (HOLD ALT: NON-UNIFORM)';
+        }
+        promptAccent = isAltDown ? 'alt' : 'active';
+    } else if (hit.zone === 'rotate') {
+        cursor = _getRotateCursor(hit.cursorAngle);
+        label = (engine.isDrawing && engine._gizmoDrag)
+            ? `↻ ${rotDeg}°`
+            : '↻ ROTATE';
+        promptAccent = 'active';
+    } else if (hit.zone === 'move') {
+        cursor = _getMoveCursor();
+        label = (engine.isDrawing && engine._gizmoDrag) ? 'MOVING' : 'MOVE';
+        promptAccent = '';
+    } else if (hit.zone === 'opacity') {
+        cursor = 'ns-resize';
+        label = `OPACITY ${opPct}%`;
+        promptAccent = '';
+    } else if (hit.zone === 'deform') {
+        cursor = 'crosshair';
+        label = 'PIN WARP';
+        promptAccent = '';
+    } else if (hit.zone === 'apply') {
+        cursor = 'pointer';
+        label = 'CLICK TO APPLY';
+        promptAccent = 'muted';
+    }
+
+    engine._gizmoCursor = cursor;
+    if (engine.container && !engine.isPanning && !engine.isZooming && !engine.keys[' '] && !engine.keys['z']) {
+        engine.container.style.cursor = cursor;
+    }
+
+    if (engine.selectionOverlay) {
+        engine.selectionOverlay.classList.toggle('gizmo-rotate-hover', hit.zone === 'rotate');
+        const handles = engine.selectionOverlay.querySelectorAll('.gizmo-handle');
+        handles.forEach(h => {
+            const isActive = hit.zone === 'scale' && h.dataset.handle === hit.handle;
+            h.classList.toggle('active-handle', isActive && !isAltDown);
+            h.classList.toggle('alt-handle', isActive && isAltDown);
+        });
+    }
+
+    const prompt = _ensureGizmoPrompt(engine);
+    if (prompt) {
+        if (label) {
+            const rect = engine.getContainerRect();
+            const px = Math.max(8, Math.min(rect.width - 180, (clientX - rect.left) + 16));
+            const py = Math.max(8, Math.min(rect.height - 28, (clientY - rect.top) + 18));
+            prompt.textContent = label;
+            prompt.style.left = `${px}px`;
+            prompt.style.top = `${py}px`;
+            prompt.dataset.accent = promptAccent;
+            prompt.classList.remove('hidden');
+        } else {
+            prompt.classList.add('hidden');
+        }
+    }
+
+    return hit;
+}
+
 export function drawLasso(engine, from, to) {
     if (!engine.lassoPath) {
         engine.lassoPath = [];
@@ -17,6 +374,9 @@ export function updateSelectionPreview(engine) {
     if (!engine.floatingSelection) {
         if (engine.selectionOverlay) engine.selectionOverlay.remove();
         engine.selectionOverlay = null;
+        const staleToolbar = document.getElementById('selection-mode-toolbar');
+        if (staleToolbar) staleToolbar.remove();
+        clearGizmoHoverUI(engine);
 
         // Clean up all chunk selection canvases
         engine.chunks.forEach(chunk => {
@@ -66,46 +426,91 @@ export function updateSelectionPreview(engine) {
         engine.selectionOverlay = document.createElement('div');
         engine.selectionOverlay.className = 'absolute pointer-events-none selection-overlay-gpu';
         engine.selectionOverlay.style.boxSizing = 'border-box';
-        // Use layout-independent outline and boxShadow for high-contrast marquee look to avoid 1px coordinate shifting.
         engine.selectionOverlay.style.outline = '1px dashed #ffffff';
         engine.selectionOverlay.style.boxShadow = '0 0 0 1px #000000, 0 0 0 2px #ffffff';
         engine.uiLayer.appendChild(engine.selectionOverlay);
     }
-    
-    engine.selectionOverlay.style.width = `${selW}px`;
-    engine.selectionOverlay.style.height = `${selH}px`;
-    
-    // pivot point calculation in screen space
-    const s = engine._worldToScreen(sel.x + selW / 2, sel.y + selH / 2);
-    
-    let rot = (sel.rotation || 0);
-    const displayScaleX = scX * engine.zoom;
-    const displayScaleY = scY * engine.zoom;
+
+    const boxW = Math.max(1, selW * scX * engine.zoom);
+    const boxH = Math.max(1, selH * scY * engine.zoom);
+    engine.selectionOverlay.style.width = `${boxW}px`;
+    engine.selectionOverlay.style.height = `${boxH}px`;
+
+    // Pivot point calculation in screen space
+    const worldPivotX = sel.x + selW / 2;
+    const worldPivotY = sel.y + selH / 2;
+    const s = engine._worldToScreen(worldPivotX, worldPivotY);
+
+    const rot = (sel.rotation || 0);
     const opacity = (sel.opacity !== undefined ? sel.opacity : 1);
-    
-    let mirrorX = sel.mirrorX ? -1 : 1;
-    let mirrorY = sel.mirrorY ? -1 : 1;
-    
-    let finalRot = rot + engine.rotation;
-    if (engine.isMirrored) {
-        mirrorX *= -1;
-        finalRot = -finalRot;
-    }
+
+    const mirrorXSign = (sel.mirrorX ? -1 : 1) * (engine.isMirrored ? -1 : 1);
+    const mirrorYSign = sel.mirrorY ? -1 : 1;
+    const finalRot = engine.isMirrored ? (-rot + engine.rotation) : (rot + engine.rotation);
 
     engine.selectionOverlay.style.left = '0px';
     engine.selectionOverlay.style.top = '0px';
     engine.selectionOverlay.style.transformOrigin = 'center center';
-    // Center on pivot, then rotate and scale
-    engine.selectionOverlay.style.transform = `translate3d(${s.x}px, ${s.y}px, 0px) translate3d(-50%, -50%, 0px) rotate(${finalRot}rad) scale(${displayScaleX * mirrorX}, ${displayScaleY * mirrorY})`;
-    
-    // Opacity shouldn't change opacity of outer UI/bounding box and the menu, so keep overlay fully opaque
+    engine.selectionOverlay.style.transform = `translate3d(${s.x}px, ${s.y}px, 0px) translate3d(-50%, -50%, 0px) rotate(${finalRot}rad)`;
     engine.selectionOverlay.style.opacity = '1';
+
+    const currentMode = engine.transformMode || 'move';
+    const unified = isUnifiedTransformMode(currentMode);
+
+    // Unified Move/Scale/Rotate Handles & Center Pivot
+    let gizmoLayer = engine.selectionOverlay.querySelector('.gizmo-handles-layer');
+    if (unified) {
+        if (!gizmoLayer) {
+            gizmoLayer = document.createElement('div');
+            gizmoLayer.className = 'gizmo-handles-layer';
+
+            const pivot = document.createElement('div');
+            pivot.className = 'gizmo-pivot';
+            gizmoLayer.appendChild(pivot);
+
+            const handleSpecs = [
+                { id: 'tl', kind: 'corner', left: '0%', top: '0%' },
+                { id: 'tr', kind: 'corner', left: '100%', top: '0%' },
+                { id: 'bl', kind: 'corner', left: '0%', top: '100%' },
+                { id: 'br', kind: 'corner', left: '100%', top: '100%' },
+                { id: 't', kind: 'edge-h', left: '50%', top: '0%' },
+                { id: 'b', kind: 'edge-h', left: '50%', top: '100%' },
+                { id: 'l', kind: 'edge-v', left: '0%', top: '50%' },
+                { id: 'r', kind: 'edge-v', left: '100%', top: '50%' }
+            ];
+            handleSpecs.forEach(spec => {
+                const h = document.createElement('div');
+                h.className = `gizmo-handle gizmo-handle-${spec.kind}`;
+                h.dataset.handle = spec.id;
+                h.style.left = spec.left;
+                h.style.top = spec.top;
+                gizmoLayer.appendChild(h);
+            });
+            engine.selectionOverlay.appendChild(gizmoLayer);
+        }
+
+        gizmoLayer.style.display = 'block';
+        const showTopBottomEdges = boxW >= 26;
+        const showLeftRightEdges = boxH >= 26;
+        gizmoLayer.querySelectorAll('.gizmo-handle').forEach(h => {
+            const id = h.dataset.handle;
+            if (id === 't' || id === 'b') {
+                h.style.display = showTopBottomEdges ? 'block' : 'none';
+            } else if (id === 'l' || id === 'r') {
+                h.style.display = showLeftRightEdges ? 'block' : 'none';
+            } else {
+                h.style.display = 'block';
+            }
+        });
+    } else if (gizmoLayer) {
+        gizmoLayer.style.display = 'none';
+    }
 
     // Puppet pin drawing and event handling
     const existingPins = engine.selectionOverlay.querySelectorAll('.brutal-pin');
     existingPins.forEach(p => p.remove());
 
-    if (engine.transformMode === 'deform') {
+    if (currentMode === 'deform') {
         const origW = sel.width || sel.canvas.width;
         const origH = sel.height || sel.canvas.height;
 
@@ -145,6 +550,8 @@ export function updateSelectionPreview(engine) {
             ];
         }
 
+        engine.selectionOverlay.style.pointerEvents = 'auto';
+
         // Draw pin circles
         sel.pins.forEach(pin => {
             const pinEl = document.createElement('div');
@@ -153,35 +560,31 @@ export function updateSelectionPreview(engine) {
             pinEl.style.height = '12px';
             pinEl.style.borderRadius = '50%';
             pinEl.style.border = '2px solid black';
-            
-            // Choose background color based on type
+
             if (pin.type === 'corner') {
-                pinEl.style.backgroundColor = '#00ffff'; // cyan corners
+                pinEl.style.backgroundColor = '#00ffff';
             } else if (pin.type === 'center') {
-                pinEl.style.backgroundColor = '#ff00ff'; // magenta center
+                pinEl.style.backgroundColor = '#ff00ff';
             } else {
-                pinEl.style.backgroundColor = '#00ff00'; // green custom pins
+                pinEl.style.backgroundColor = '#00ff00';
             }
-            
-            const parentScaleX = (scX * engine.zoom) * mirrorX;
-            const parentScaleY = (scY * engine.zoom) * mirrorY;
-            const invScaleX = Math.abs(parentScaleX) > 0.001 ? 1 / parentScaleX : 1;
-            const invScaleY = Math.abs(parentScaleY) > 0.001 ? 1 / parentScaleY : 1;
-            pinEl.style.transform = `translate(-50%, -50%) scale(${invScaleX}, ${invScaleY})`;
-            pinEl.style.left = `${((pin.x - margin) / origW) * 100}%`;
-            pinEl.style.top = `${((pin.y - margin) / origH) * 100}%`;
+
+            const uPct = ((pin.x - margin) / origW) * 100;
+            const vPct = ((pin.y - margin) / origH) * 100;
+            pinEl.style.transform = 'translate(-50%, -50%)';
+            pinEl.style.left = `${mirrorXSign < 0 ? (100 - uPct) : uPct}%`;
+            pinEl.style.top = `${mirrorYSign < 0 ? (100 - vPct) : vPct}%`;
             pinEl.style.cursor = 'move';
-            pinEl.style.pointerEvents = 'auto'; // allow dragging
+            pinEl.style.pointerEvents = 'auto';
             pinEl.style.zIndex = '120';
-            
-            // Handle pin dragging in local space with transform history tracking
+
             pinEl.onpointerdown = (pe) => {
                 pe.stopPropagation();
                 pe.preventDefault();
                 engine.isDraggingPin = pin;
                 engine.pinDragStartMouse = { x: pe.clientX, y: pe.clientY };
                 engine.pinDragStartPos = { x: pin.x, y: pin.y };
-                
+
                 const stateBefore = engine.captureFloatingSelectionState ? engine.captureFloatingSelectionState() : null;
                 let moved = false;
 
@@ -192,41 +595,38 @@ export function updateSelectionPreview(engine) {
                         if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
                             moved = true;
                         }
-                        
-                        // Inverse transformation of pointer movement (rotated and scaled by selection placement)
+
                         const sX = sel.scaleX !== undefined ? sel.scaleX : (sel.scale || 1);
                         const sY = sel.scaleY !== undefined ? sel.scaleY : (sel.scale || 1);
-                        const rot = (sel.rotation || 0) + (engine.rotation || 0);
-                        const cosRot = Math.cos(-rot);
-                        const sinRot = Math.sin(-rot);
-                        
+                        const curRot = engine.isMirrored
+                            ? (-(sel.rotation || 0) + (engine.rotation || 0))
+                            : ((sel.rotation || 0) + (engine.rotation || 0));
+                        const cosRot = Math.cos(-curRot);
+                        const sinRot = Math.sin(-curRot);
+
                         let localDx = dx * cosRot - dy * sinRot;
                         let localDy = dx * sinRot + dy * cosRot;
-                        
-                        const displayScaleX = sX * engine.zoom;
-                        const displayScaleY = sY * engine.zoom;
-                        
-                        localDx /= displayScaleX;
-                        localDy /= displayScaleY;
-                        
+
+                        localDx /= (sX * engine.zoom);
+                        localDy /= (sY * engine.zoom);
+
                         if (sel.mirrorX) localDx *= -1;
                         if (sel.mirrorY) localDy *= -1;
                         if (engine.isMirrored) localDx *= -1;
-                        
+
                         pin.x = engine.pinDragStartPos.x + localDx;
                         pin.y = engine.pinDragStartPos.y + localDy;
-                        
-                        // Warp selection image and trigger redraw!
+
                         warpSelectionImage(engine);
                         engine._updateSelectionPreview();
                     }
                 };
-                
+
                 const onPointerUp = () => {
                     engine.isDraggingPin = null;
                     document.removeEventListener('pointermove', onPointerMove);
                     document.removeEventListener('pointerup', onPointerUp);
-                    
+
                     if (moved && stateBefore) {
                         const stateAfter = engine.captureFloatingSelectionState ? engine.captureFloatingSelectionState() : null;
                         if (stateAfter) {
@@ -239,23 +639,22 @@ export function updateSelectionPreview(engine) {
                         }
                     }
                 };
-                
+
                 document.addEventListener('pointermove', onPointerMove);
                 document.addEventListener('pointerup', onPointerUp);
             };
-            
-            // Double click to delete pin (except corners/center)
+
             if (pin.type !== 'corner' && pin.type !== 'center') {
                 pinEl.ondblclick = (e) => {
                     e.stopPropagation();
                     e.preventDefault();
-                    
+
                     const stateBefore = engine.captureFloatingSelectionState ? engine.captureFloatingSelectionState() : null;
-                    
+
                     sel.pins = sel.pins.filter(p => p !== pin);
                     warpSelectionImage(engine);
                     engine._updateSelectionPreview();
-                    
+
                     const stateAfter = engine.captureFloatingSelectionState ? engine.captureFloatingSelectionState() : null;
                     if (stateBefore && stateAfter) {
                         if (!engine.transformHistory) engine.transformHistory = [];
@@ -267,7 +666,7 @@ export function updateSelectionPreview(engine) {
                     }
                 };
             }
-            
+
             engine.selectionOverlay.appendChild(pinEl);
         });
 
@@ -275,36 +674,35 @@ export function updateSelectionPreview(engine) {
         engine.selectionOverlay.onpointerdown = (pe) => {
             const sX = sel.scaleX !== undefined ? sel.scaleX : (sel.scale || 1);
             const sY = sel.scaleY !== undefined ? sel.scaleY : (sel.scale || 1);
-            
+
             const origW = sel.width || (w - 2 * margin);
             const origH = sel.height || (h - 2 * margin);
 
-            const m = engine._getMousePos(pe); // get world coords
+            const m = engine._getMousePos(pe);
             const cx = sel.x + origW / 2;
             const cy = sel.y + origH / 2;
             const dx = m.wx - cx;
             const dy = m.wy - cy;
-            
-            const rot = sel.rotation || 0;
-            const localXCent = dx * Math.cos(-rot) - dy * Math.sin(-rot);
-            const localYCent = dx * Math.sin(-rot) + dy * Math.cos(-rot);
-            
-            let mX = sel.mirrorX ? -1 : 1;
-            let mY = sel.mirrorY ? -1 : 1;
-            
+
+            const curRot = sel.rotation || 0;
+            const localXCent = dx * Math.cos(-curRot) - dy * Math.sin(-curRot);
+            const localYCent = dx * Math.sin(-curRot) + dy * Math.cos(-curRot);
+
+            const mX = sel.mirrorX ? -1 : 1;
+            const mY = sel.mirrorY ? -1 : 1;
+
             const localX = (localXCent / (sX * mX)) + origW / 2 + margin;
             const localY = (localYCent / (sY * mY)) + origH / 2 + margin;
-            
+
             if (localX >= 0 && localX <= w && localY >= 0 && localY <= h) {
-                // Check if we already clicked near a pin to avoid double adding
                 const clickedNearPin = sel.pins.some(p => {
                     const d = Math.sqrt((p.x - localX)**2 + (p.y - localY)**2);
-                    return d < 18; // 18px radius tolerance
+                    return d < 18;
                 });
-                
+
                 if (!clickedNearPin) {
                     const stateBefore = engine.captureFloatingSelectionState ? engine.captureFloatingSelectionState() : null;
-                    
+
                     const newPin = {
                         id: Math.random().toString(),
                         ox: localX,
@@ -316,7 +714,7 @@ export function updateSelectionPreview(engine) {
                     sel.pins.push(newPin);
                     warpSelectionImage(engine);
                     engine._updateSelectionPreview();
-                    
+
                     const stateAfter = engine.captureFloatingSelectionState ? engine.captureFloatingSelectionState() : null;
                     if (stateBefore && stateAfter) {
                         if (!engine.transformHistory) engine.transformHistory = [];
@@ -331,14 +729,12 @@ export function updateSelectionPreview(engine) {
         };
     } else {
         if (engine.selectionOverlay) {
+            engine.selectionOverlay.style.pointerEvents = 'none';
             engine.selectionOverlay.onpointerdown = null;
         }
     }
 
     // Position/update the selectionCanvas on each attached chunk (or render directly via WebGL2 GPURenderer)
-    const worldPivotX = sel.x + selW / 2;
-    const worldPivotY = sel.y + selH / 2;
-
     if (engine.gpuRenderer && engine.gpuRenderer.supported) {
         engine.gpuRenderer.requestRender();
     } else {
@@ -353,7 +749,7 @@ export function updateSelectionPreview(engine) {
             }
 
             const scale = engine.isStatic ? engine.dpiScale : 1;
-            
+
             if (!chunk.selectionCanvas) {
                 const sCanv = document.createElement('canvas');
                 sCanv.width = chunk.width * scale;
@@ -364,7 +760,7 @@ export function updateSelectionPreview(engine) {
                 sCanv.style.webkitBackfaceVisibility = 'hidden';
                 sCanv.style.transform = 'translate3d(0, 0, 0)';
                 sCanv.style.willChange = 'transform';
-                
+
                 const sCtx = sCanv.getContext('2d', { alpha: true });
                 if (scale !== 1) {
                     sCtx.scale(scale, scale);
@@ -372,8 +768,7 @@ export function updateSelectionPreview(engine) {
                 chunk.selectionCanvas = sCanv;
                 chunk.selectionCtx = sCtx;
             }
-            
-            // Ensure its DOM insertion position is correct (immediately above active layer in this chunk)
+
             const nextCanvas = chunk.canvases[engine.activeLayer + 1];
             if (nextCanvas) {
                 if (chunk.selectionCanvas.nextSibling !== nextCanvas) {
@@ -384,125 +779,77 @@ export function updateSelectionPreview(engine) {
                     chunk.element.appendChild(chunk.selectionCanvas);
                 }
             }
-            
-            // Now draw the selection content onto this chunk's canvas
+
             const sCtx = chunk.selectionCtx;
             sCtx.clearRect(0, 0, chunk.width, chunk.height);
-            
+
             const cxWorld = engine.isStatic ? -engine.staticWidth / 2 : chunk.cx * engine.chunkSize;
             const cyWorld = engine.isStatic ? -engine.staticHeight / 2 : chunk.cy * engine.chunkSize;
-            
+
             sCtx.save();
             sCtx.globalAlpha = opacity;
-            
-            // Translate relative to chunk coordinate space
             sCtx.translate(-cxWorld, -cyWorld);
-            
-            // 1. Pivot point of selection in world coordinates
             sCtx.translate(worldPivotX, worldPivotY);
-            
-            // 2. Rotate
             if (sel.rotation) {
                 sCtx.rotate(sel.rotation);
             }
-            
-            // 3. Scale & Mirror
-            let mX = sel.mirrorX ? -1 : 1;
-            let mY = sel.mirrorY ? -1 : 1;
+            const mX = sel.mirrorX ? -1 : 1;
+            const mY = sel.mirrorY ? -1 : 1;
             sCtx.scale(scX * mX, scY * mY);
-            
-            // 4. Draw centrally
             sCtx.drawImage(sel.canvas, -sel.canvas.width / 2, -sel.canvas.height / 2);
-            
             sCtx.restore();
         });
     }
-    
-    // Create/update the mode selector toolbar at the bottom of the bounding box
-    let toolbar = document.getElementById('selection-mode-toolbar');
 
-    if (!toolbar && engine.selectionOverlay) {
+    // Create/update the screen-aligned floating mode toolbar below the selection's bounding box
+    let toolbar = document.getElementById('selection-mode-toolbar');
+    const toolbarBtns = [
+        { id: 'move', label: 'TRANSFORM' },
+        { id: 'opacity', label: 'OPACITY' },
+        { id: 'deform', label: 'DEFORM' }
+    ];
+
+    if (!toolbar && engine.uiLayer) {
         toolbar = document.createElement('div');
         toolbar.id = 'selection-mode-toolbar';
         toolbar.className = 'absolute pointer-events-auto';
-        toolbar.style.top = '100%';
-        toolbar.style.bottom = 'auto';
-        toolbar.style.left = '50%';
         toolbar.style.display = 'flex';
         toolbar.style.gap = '3px';
         toolbar.style.padding = '3px';
         toolbar.style.backgroundColor = '#ebebeb';
         toolbar.style.border = '2px solid black';
         toolbar.style.boxShadow = 'none';
-        toolbar.style.zIndex = '110';
-        
-        // Mode buttons
+        toolbar.style.zIndex = '115';
+
         const modesContainer = document.createElement('div');
         modesContainer.id = 'selection-modes-container';
         modesContainer.style.display = 'flex';
         modesContainer.style.gap = '3px';
-        
-        const modes = ['move', 'scale', 'rotate', 'opacity', 'deform'];
-        modes.forEach(mode => {
-            const btn = document.createElement('button');
-            btn.className = 'brutal-btn';
-            btn.textContent = mode.toUpperCase();
-            btn.style.fontSize = '9px';
-            btn.style.fontFamily = 'monospace';
-            btn.style.fontWeight = '900';
-            btn.style.padding = '2px 6px';
-            btn.style.height = '20px';
-            btn.style.cursor = 'pointer';
-            
-            const currentMode = engine.transformMode || 'move';
-            if (currentMode === mode) {
-                if (mode === 'scale') {
-                    btn.style.backgroundColor = engine.scaleNonUniform ? '#00ffff' : '#ffff00';
-                } else {
-                    btn.style.backgroundColor = '#ffff00';
-                }
-            } else {
-                btn.style.backgroundColor = '#ffffff';
-            }
-            
-            btn.style.color = '#000000';
-            btn.style.border = '1px solid black';
-            btn.style.boxShadow = '1px 1px 0px 0px black';
-            
+
+        const makeToolbarBtn = (text) => {
+            const b = document.createElement('button');
+            b.className = 'brutal-btn';
+            b.textContent = text;
+            b.style.fontSize = '9px';
+            b.style.fontFamily = 'monospace';
+            b.style.fontWeight = '900';
+            b.style.padding = '2px 6px';
+            b.style.height = '20px';
+            b.style.cursor = 'pointer';
+            b.style.color = '#000000';
+            b.style.border = '1px solid black';
+            b.style.boxShadow = '1px 1px 0px 0px black';
+            b.style.backgroundColor = '#ffffff';
+            return b;
+        };
+
+        toolbarBtns.forEach(item => {
+            const btn = makeToolbarBtn(item.label);
+            btn.dataset.mode = item.id;
             btn.onclick = (e) => {
                 e.stopPropagation();
                 e.preventDefault();
-                
-                if (mode === 'scale') {
-                    if (engine.transformMode === 'scale') {
-                        engine.scaleNonUniform = !engine.scaleNonUniform;
-                    } else {
-                        engine.transformMode = 'scale';
-                        engine.scaleNonUniform = false; // Default to uniform
-                    }
-                } else {
-                    engine.transformMode = mode;
-                }
-                
-                // Update active states
-                const btns = modesContainer.querySelectorAll('button');
-                btns.forEach((b, idx) => {
-                    const m = modes[idx];
-                    if (!m) return;
-                    if (m === engine.transformMode) {
-                        if (m === 'scale') {
-                            b.style.backgroundColor = engine.scaleNonUniform ? '#00ffff' : '#ffff00';
-                        } else {
-                            b.style.backgroundColor = '#ffff00';
-                        }
-                    } else {
-                        b.style.backgroundColor = '#ffffff';
-                    }
-                });
-                
-                if (engine.app && typeof engine.app.setTool === 'function') {
-                    engine.app.setTool('lasso', true);
-                }
+                engine.transformMode = item.id;
                 if (engine._updateSelectionPreview) {
                     engine._updateSelectionPreview();
                 }
@@ -513,71 +860,61 @@ export function updateSelectionPreview(engine) {
             modesContainer.appendChild(btn);
         });
 
-        // Append Mirror Button for easy visual flip access
-        const mirrorBtn = document.createElement('button');
-        mirrorBtn.className = 'brutal-btn';
-        mirrorBtn.textContent = 'MIRROR';
-        mirrorBtn.style.fontSize = '9px';
-        mirrorBtn.style.fontFamily = 'monospace';
-        mirrorBtn.style.fontWeight = '900';
-        mirrorBtn.style.padding = '2px 6px';
-        mirrorBtn.style.height = '20px';
-        mirrorBtn.style.cursor = 'pointer';
-        mirrorBtn.style.backgroundColor = '#ffffff';
-        mirrorBtn.style.color = '#000000';
-        mirrorBtn.style.border = '1px solid black';
-        mirrorBtn.style.boxShadow = '1px 1px 0px 0px black';
+        const mirrorBtn = makeToolbarBtn('MIRROR');
         mirrorBtn.onclick = (e) => {
             e.stopPropagation();
             e.preventDefault();
             engine.toggleFloatingSelectionMirrorX();
         };
         modesContainer.appendChild(mirrorBtn);
-        
+
+        const applyBtn = makeToolbarBtn('APPLY');
+        applyBtn.onclick = (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            engine._applySelection();
+        };
+        modesContainer.appendChild(applyBtn);
+
         toolbar.appendChild(modesContainer);
-        engine.selectionOverlay.appendChild(toolbar);
+        engine.uiLayer.appendChild(toolbar);
     }
+
     if (toolbar) {
         const modesContainer = document.getElementById('selection-modes-container');
-        
-        // Expanded: flat, neat, clean container with a 2px solid black border (no brutal offset shadow)
-        toolbar.style.backgroundColor = '#ebebeb';
-        toolbar.style.border = '2px solid black';
-        toolbar.style.boxShadow = 'none';
-        toolbar.style.padding = '3px';
-        
         if (modesContainer) {
-            modesContainer.style.display = 'flex';
-        }
-
-        const modes = ['move', 'scale', 'rotate', 'opacity', 'deform'];
-        const mContainer = document.getElementById('selection-modes-container');
-        if (mContainer) {
-            const btns = mContainer.querySelectorAll('button');
-            btns.forEach((b, idx) => {
-                const m = modes[idx];
-                if (!m) return; // Skip mirror button
-                if (m === (engine.transformMode || 'move')) {
-                    if (m === 'scale') {
-                        b.style.backgroundColor = engine.scaleNonUniform ? '#00ffff' : '#ffff00';
-                    } else {
-                        b.style.backgroundColor = '#ffff00';
-                    }
-                } else {
-                    b.style.backgroundColor = '#ffffff';
-                }
+            const activeModeKey = unified ? 'move' : currentMode;
+            modesContainer.querySelectorAll('button[data-mode]').forEach(b => {
+                b.style.backgroundColor = (b.dataset.mode === activeModeKey) ? '#ffff00' : '#ffffff';
             });
         }
-        
-        const parentScaleX = (scX * engine.zoom) * mirrorX;
-        const parentScaleY = (scY * engine.zoom) * mirrorY;
-        const invScaleX = 1 / parentScaleX;
-        const invScaleY = 1 / parentScaleY;
-        toolbar.style.transform = `translateX(-50%) translateY(${12 * Math.abs(invScaleY)}px) scale(${invScaleX}, ${invScaleY})`;
+
+        // Anchor horizontally upright below the lowest screen corner of the rotated box
+        const absC = Math.abs(Math.cos(finalRot));
+        const absS = Math.abs(Math.sin(finalRot));
+        const screenHalfSpanY = (boxW * 0.5) * absS + (boxH * 0.5) * absC;
+        const containerRect = engine.getContainerRect();
+        const tbWidth = toolbar.offsetWidth || 260;
+        const tbHeight = toolbar.offsetHeight || 28;
+        const margin = 8;
+
+        const targetX = Math.max(
+            tbWidth * 0.5 + margin,
+            Math.min((containerRect.width || 800) - tbWidth * 0.5 - margin, s.x)
+        );
+        const targetY = Math.max(
+            margin,
+            Math.min((containerRect.height || 600) - tbHeight - margin, s.y + screenHalfSpanY + 14)
+        );
+
+        toolbar.style.left = `${targetX}px`;
+        toolbar.style.top = `${targetY}px`;
+        toolbar.style.bottom = 'auto';
+        toolbar.style.transform = 'translateX(-50%)';
     }
 
     // Update info status
-    const comboScale = scX === scY ? `${Math.round(scX * 100)}%` : `X:${Math.round(scX * 100)}% Y:${Math.round(scY * 100)}%`;
+    const comboScale = Math.abs(scX - scY) < 0.005 ? `${Math.round(scX * 100)}%` : `X:${Math.round(scX * 100)}% Y:${Math.round(scY * 100)}%`;
     engine._status(`TRANSFORM: ${comboScale} | ${Math.round(rot * 180 / Math.PI)}° | OPACITY: ${Math.round(opacity * 100)}%`);
 }
 
@@ -716,6 +1053,7 @@ export function applySelection(engine) {
         selection: { ...engine.floatingSelection } 
     });
     engine.floatingSelection = null;
+    engine._gizmoDrag = null;
     engine.transformHistory = [];
     engine.transformRedoHistory = [];
     engine._updateSelectionPreview();

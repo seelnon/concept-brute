@@ -1453,3 +1453,112 @@ button, input, select {
     100% { transform: scale(0.9); opacity: 0.7; box-shadow: 0 0 0 0 rgba(0, 204, 68, 0); }
 }
 
+/* UNIFIED TRANSFORM GIZMO */
+.gizmo-handles-layer {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+}
+
+.selection-overlay-gpu.gizmo-rotate-hover {
+    box-shadow: 0 0 0 1px #000000, 0 0 0 3px #ffff00 !important;
+}
+
+.gizmo-handle {
+    position: absolute;
+    background: #ffffff;
+    border: 2px solid #000000;
+    box-shadow: 0 0 0 1px #ffffff;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    z-index: 118;
+}
+
+.gizmo-handle-corner {
+    width: 10px;
+    height: 10px;
+}
+
+.gizmo-handle-edge-h {
+    width: 14px;
+    height: 7px;
+}
+
+.gizmo-handle-edge-v {
+    width: 7px;
+    height: 14px;
+}
+
+.gizmo-handle.active-handle {
+    background: #ffff00;
+    transform: translate(-50%, -50%) scale(1.2);
+}
+
+.gizmo-handle.alt-handle {
+    background: #00ffff;
+    transform: translate(-50%, -50%) scale(1.2);
+}
+
+.gizmo-pivot {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 11px;
+    height: 11px;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+}
+
+.gizmo-pivot::before,
+.gizmo-pivot::after {
+    content: '';
+    position: absolute;
+    background: #000000;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.9);
+}
+
+.gizmo-pivot::before {
+    left: 5px;
+    top: 0;
+    width: 1px;
+    height: 11px;
+}
+
+.gizmo-pivot::after {
+    top: 5px;
+    left: 0;
+    height: 1px;
+    width: 11px;
+}
+
+.gizmo-prompt {
+    position: absolute;
+    z-index: 1010;
+    padding: 2px 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 9px;
+    font-weight: 900;
+    line-height: 1.2;
+    letter-spacing: 0.04em;
+    color: #000000;
+    background: #ffffff;
+    border: 2px solid #000000;
+    box-shadow: 2px 2px 0 0 #000000;
+    white-space: nowrap;
+}
+
+.gizmo-prompt[data-accent="active"] {
+    background: #ffff00;
+}
+
+.gizmo-prompt[data-accent="alt"] {
+    background: #00ffff;
+}
+
+.gizmo-prompt[data-accent="muted"] {
+    background: #ebebeb;
+}
+
+.gizmo-prompt.hidden {
+    display: none;
+}

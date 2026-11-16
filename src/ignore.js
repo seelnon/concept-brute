@@ -189,11 +189,18 @@ function showSelectionContextMenu(e, engine) {
             if (engine.refresh) engine.refresh();
         }));
     } else if (engine.floatingSelection) {
-        const modes = ['move', 'scale', 'rotate', 'opacity', 'deform'];
+        const modes = [
+            { id: 'move', label: 'TRANSFORM (GIZMO)' },
+            { id: 'opacity', label: 'OPACITY' },
+            { id: 'deform', label: 'DEFORM' }
+        ];
+        const activeMode = (!engine.transformMode || engine.transformMode === 'scale' || engine.transformMode === 'rotate')
+            ? 'move'
+            : engine.transformMode;
         modes.forEach(m => {
-            const isSel = m === engine.transformMode;
-            menu.appendChild(createBtn(isSel ? `[ ${m.toUpperCase()} ]` : m.toUpperCase(), () => {
-                engine.transformMode = m;
+            const isSel = m.id === activeMode;
+            menu.appendChild(createBtn(isSel ? `[ ${m.label} ]` : m.label, () => {
+                engine.transformMode = m.id;
                 if (engine._updateSelectionPreview) engine._updateSelectionPreview();
                 if (engine.refresh) engine.refresh();
             }));

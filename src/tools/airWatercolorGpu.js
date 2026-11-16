@@ -12,7 +12,7 @@
  */
 
 const TILE_SIZE = 256;
-const WORK_SIZE = 1024;
+export const WORK_SIZE = 1536;
 const MAX_POOL_TILES = 48;
 const MAX_WET_CACHE = 24;
 
@@ -92,22 +92,24 @@ float valueNoise(vec2 p) {
 }
 
 float samplePaperTooth(vec2 wp) {
-  float nCoarse = valueNoise(wp * 0.16);
-  float nMed = valueNoise(wp * 0.38 + vec2(17.3, 9.1));
-  float nFine = valueNoise(wp * 0.78 + vec2(4.7, 23.5));
-  float fibers = sin(wp.x * 0.24 + cos(wp.y * 0.21) * 1.1) * cos(wp.y * 0.27 - sin(wp.x * 0.19) * 1.1);
-  return clamp(0.10 + 0.34 * nCoarse + 0.28 * nMed + 0.18 * nFine + 0.10 * (0.5 + 0.5 * fibers), 0.0, 1.0);
+  vec2 p1 = vec2(wp.x * 0.141 - wp.y * 0.075, wp.x * 0.075 + wp.y * 0.141);
+  vec2 p2 = vec2(-wp.x * 0.237 - wp.y * 0.296, wp.x * 0.296 - wp.y * 0.237) + vec2(17.3, 9.1);
+  vec2 p3 = vec2(wp.x * 0.412 + wp.y * 0.661, -wp.x * 0.661 + wp.y * 0.412) + vec2(4.7, 23.5);
+  float nCoarse = valueNoise(p1);
+  float nMed = valueNoise(p2);
+  float nFine = valueNoise(p3);
+  return clamp(0.08 + 0.38 * nCoarse + 0.32 * nMed + 0.22 * nFine, 0.0, 1.0);
 }
 
 vec2 sampleCurl(vec2 wp, float t, float freq) {
   vec2 p = wp * freq;
-  float p1 = p.x + t * 0.85;
-  float q1 = p.y - t * 0.62;
-  float p2 = 2.07 * p.x - t * 1.1;
-  float q2 = 1.93 * p.y + t * 0.77;
+  float w = valueNoise(vec2(p.x * 0.37 - p.y * 0.28, p.x * 0.28 + p.y * 0.37) + vec2(t * 0.17, -t * 0.13)) * 3.14159;
+  float a1 = sin(p.x * 0.894 + p.y * 0.447 + w + t * 0.85);
+  float a2 = sin(-p.x * 0.618 + p.y * 1.174 - w * 0.72 - t * 0.73);
+  float a3 = sin(-p.x * 1.236 - p.y * 1.568 + w * 0.53 + t * 0.61);
   return vec2(
-    -sin(p1) * sin(q1) + 0.85 * sin(p2) * cos(q2),
-    -(cos(p1) * cos(q1) + 0.92 * cos(p2) * sin(q2))
+    0.48 * a1 + 0.39 * a2 - 0.31 * a3,
+    -0.44 * a1 + 0.42 * a2 + 0.36 * a3
   );
 }
 
@@ -137,10 +139,14 @@ uniform vec2 u_simOrigin;
 uniform vec2 u_from;
 uniform vec2 u_to;
 uniform vec2 u_dir;
-uniform float u_radius;
-uniform vec3 u_color;
-uniform float u_opacity;
-uniform float u_flow;
+uniform float u_radiusFrom;
+uniform float u_radiusTo;
+uniform vec3 u_colorFrom;
+uniform vec3 u_colorTo;
+uniform float u_opacityFrom;
+uniform float u_opacityTo;
+uniform float u_flowFrom;
+uniform float u_flowTo;
 uniform float u_wetness;
 uniform float u_streamFlow;
 uniform float u_bloom;
@@ -177,21 +183,26 @@ void main() {
   vec2 closest = u_from + seg * tSeg;
   float dist = length(worldPos - closest);
 
+  float rLoc = mix(u_radiusFrom, u_radiusTo, tSeg);
+  vec3 colLoc = mix(u_colorFrom, u_colorTo, tSeg);
+  float opLoc = mix(u_opacityFrom, u_opacityTo, tSeg);
+  float flowLoc = mix(u_flowFrom, u_flowTo, tSeg);
+
   float bleedSpread = (u_hasTip == 1)
     ? (0.06 + u_tipPour * (0.20 + u_bloom * 0.28))
     : (0.20 + u_bloom * 0.28);
-  float bleedReach = u_radius * (1.02 + bleedSpread);
+  float bleedReach = rLoc * (1.02 + bleedSpread);
   if (dist >= bleedReach) {
     outPigment = pig;
     outVel = vTex;
     return;
   }
 
-  float curlFreq = 1.0 / max(12.0, u_radius * 0.72);
+  float curlFreq = 1.0 / max(12.0, rLoc * 0.72);
   vec2 curl = sampleCurl(worldPos, u_time, curlFreq);
   float tooth = samplePaperTooth(worldPos);
 
-  float dNormRaw = dist / max(1.0, u_radius);
+  float dNormRaw = dist / max(1.0, rLoc);
   float edgeWobble = (curl.x * 0.10 + (tooth - 0.5) * 0.14) * (0.25 + 0.75 * u_bloom);
   float dNorm = max(0.0, dNormRaw + edgeWobble);
 
@@ -200,7 +211,7 @@ void main() {
   vec2 bestGrad = vec2(0.0);
 
   if (u_hasTip == 1) {
-    float invRadius = 1.0 / max(1.0, u_radius);
+    float invRadius = 1.0 / max(1.0, rLoc);
     vec2 uvWarp = (u_tipPour > 0.03)
       ? ((curl * 0.032 + vec2(tooth - 0.5, 0.5 - tooth) * 0.045) * u_tipPour)
       : vec2(0.0);
@@ -223,7 +234,7 @@ void main() {
       float sMin = max(0.0, proj - bleedReach);
       float sMax = min(u_segLen, proj + bleedReach);
       float sSpan = max(0.0, sMax - sMin);
-      int nSteps = clamp(int(ceil(sSpan / max(1.5, u_radius * 0.16))), 1, 16);
+      int nSteps = clamp(int(ceil(sSpan / max(1.5, rLoc * 0.16))), 1, 24);
       float sStep = sSpan / float(nSteps);
 
       vec2 dtx0 = worldPos - (u_from + u_dir * sMin);
@@ -236,7 +247,7 @@ void main() {
         -(u_dir.x * u_rotSin + u_dir.y * u_rotCos) * invRadius * 0.5 * sStep
       );
 
-      for (int k = 0; k <= 16; k++) {
+      for (int k = 0; k <= 24; k++) {
         if (k > nSteps) break;
         if (curUv.x >= 0.0 && curUv.x <= 1.0 && curUv.y >= 0.0 && curUv.y <= 1.0) {
           vec4 ts = texture(u_tip, curUv);
@@ -278,14 +289,14 @@ void main() {
     meniscus = clamp(mix(drawSilhouette, max(drawSilhouette, pourBody), u_tipPour), 0.0, 1.0);
     dNorm = clamp(1.0 - mix(maxTipA * 0.85, maxTipBump * 0.90, u_tipPour), 0.0, 1.05);
   } else {
-    float aa = max(0.035, 1.6 / max(2.0, u_radius));
+    float aa = max(0.035, 1.6 / max(2.0, rLoc));
     meniscus = 1.0 - smoothstep(1.0 - aa, 1.0 + aa * 0.35, dNorm);
   }
 
   if (meniscus > 0.004) {
     float waterScale = (u_hasTip == 1) ? mix(0.24, 1.0, u_tipPour) : 1.0;
     float tipWaterMass = (u_hasTip == 1) ? mix(maxTipA, max(maxTipA * 0.6, maxTipBump), u_tipPour) : meniscus;
-    float injWater = clamp(tipWaterMass * (0.30 + 0.70 * u_wetness) * (0.50 + 0.50 * u_flow) * waterScale, 0.0, 1.0);
+    float injWater = clamp(tipWaterMass * (0.30 + 0.70 * u_wetness) * (0.50 + 0.50 * flowLoc) * waterScale, 0.0, 1.0);
     if (injWater > water) water = injWater;
 
     if (u_alphaLock == 1 && pig.a <= 0.004) {
@@ -304,13 +315,13 @@ void main() {
     float ribbon = 0.92 + 0.12 * fineCurl.y * (0.25 + 0.75 * u_streamFlow);
     float gran = 1.0 - u_granulation * 0.26 * tooth;
 
-    float targetA = clamp(meniscus * u_opacity * u_flow * centerThin * rimBoost * ribbon * gran, 0.0, 1.0);
+    float targetA = clamp(meniscus * opLoc * flowLoc * centerThin * rimBoost * ribbon * gran, 0.0, 1.0);
     float stepA = (targetA > prevCov && prevCov < 0.992)
       ? clamp((targetA - prevCov) / (1.0 - prevCov), 0.0, 1.0)
       : 0.0;
 
     if (stepA > 0.002) {
-      vec3 srcCol = u_color;
+      vec3 srcCol = colLoc;
       float rimDark = 1.0 - rimMask * u_edge * 0.11 - u_granulation * 0.055 * (1.0 - tooth);
       srcCol *= max(0.82, rimDark);
 
@@ -338,6 +349,13 @@ void main() {
       vec3 outPRClamp = min(clamp(outPR, 0.0, 1.0), vec3(outAClamp));
       pig = vec4(outPRClamp, outAClamp);
       if (targetA > prevCov) prevCov = targetA;
+    } else if (u_alphaLock == 0 && pig.a > 0.015 && water > 0.03 && meniscus > 0.05) {
+      vec3 dstCol = pig.rgb / max(0.001, pig.a);
+      vec3 colDiff = colLoc - dstCol;
+      if (dot(colDiff, colDiff) > 0.0002) {
+        vec3 blended = mix(dstCol, colLoc, meniscus * (0.14 + 0.24 * u_wetness));
+        pig.rgb = min(clamp(blended * pig.a, 0.0, 1.0), vec3(pig.a));
+      }
     }
   }
 
@@ -839,8 +857,10 @@ export class GpuWatercolorSolver {
     this.blitLocs = this._cacheLocs(this.progBlit, ['u_tex']);
     this.prepLocs = this._cacheLocs(this.progPrep, ['u_vel', 'u_decay', 'u_isFloat']);
     this.injectLocs = this._cacheLocs(this.progInject, [
-      'u_pigment', 'u_vel', 'u_tip', 'u_simOrigin', 'u_from', 'u_to', 'u_dir', 'u_radius',
-      'u_color', 'u_opacity', 'u_flow', 'u_wetness', 'u_streamFlow', 'u_bloom', 'u_edge',
+      'u_pigment', 'u_vel', 'u_tip', 'u_simOrigin', 'u_from', 'u_to', 'u_dir',
+      'u_radiusFrom', 'u_radiusTo', 'u_colorFrom', 'u_colorTo',
+      'u_opacityFrom', 'u_opacityTo', 'u_flowFrom', 'u_flowTo',
+      'u_wetness', 'u_streamFlow', 'u_bloom', 'u_edge',
       'u_granulation', 'u_time', 'u_segLen', 'u_maxVel', 'u_isFloat', 'u_alphaLock',
       'u_hasTip', 'u_isDab', 'u_rotCos', 'u_rotSin', 'u_tipPour'
     ]);
@@ -1305,25 +1325,50 @@ export class GpuWatercolorSolver {
   beginStepBatch(engine, minX, minY, maxX, maxY) {
     if (!this.ready || !this.active) return;
     const apron = 8;
-    const workX = Math.floor(minX) - apron;
-    const workY = Math.floor(minY) - apron;
-    const boxW = Math.min(WORK_SIZE, Math.max(16, Math.ceil(maxX) + apron - workX));
-    const boxH = Math.min(WORK_SIZE, Math.max(16, Math.ceil(maxY) + apron - workY));
+    const rawMinX = Math.floor(minX) - apron;
+    const rawMinY = Math.floor(minY) - apron;
+    const rawMaxX = Math.ceil(maxX) + apron;
+    const rawMaxY = Math.ceil(maxY) + apron;
+    const spanX = rawMaxX - rawMinX;
+    const spanY = rawMaxY - rawMinY;
+    const boxW = Math.min(WORK_SIZE, Math.max(16, spanX));
+    const boxH = Math.min(WORK_SIZE, Math.max(16, spanY));
+    const workX = spanX > WORK_SIZE ? Math.floor((rawMinX + rawMaxX - boxW) * 0.5) : rawMinX;
+    const workY = spanY > WORK_SIZE ? Math.floor((rawMinY + rawMaxY - boxH) * 0.5) : rawMinY;
 
     this.batchWorkX = workX;
     this.batchWorkY = workY;
     this.batchBoxW = boxW;
     this.batchBoxH = boxH;
     this.batchApron = apron;
+    if (engine.isStatic) {
+      const halfW = engine.staticWidth * 0.5;
+      const halfH = engine.staticHeight * 0.5;
+      if ((workX + boxW) <= -halfW || workX >= halfW || (workY + boxH) <= -halfH || workY >= halfH) {
+        this.batchTiles = [];
+        this.batchActive = false;
+        return;
+      }
+    }
     this.batchTiles = this._assembleWorkBox(engine, workX, workY, boxW, boxH);
     this.batchActive = this.batchTiles.length > 0;
   }
 
-  injectSegment(engine, from, to, radius, colorRgb, opacity, flow, params, timeSec, tipInfo = null) {
+  injectSegment(engine, from, to, stateFrom, stateTo, params, timeSec, tipInfo = null) {
     if (!this.ready || !this.active) return;
 
+    const rFrom = stateFrom.radius;
+    const rTo = stateTo ? stateTo.radius : rFrom;
+    const colFrom = stateFrom.color;
+    const colTo = stateTo ? stateTo.color : colFrom;
+    const opFrom = stateFrom.opacity;
+    const opTo = stateTo ? stateTo.opacity : opFrom;
+    const flowFrom = stateFrom.flow;
+    const flowTo = stateTo ? stateTo.flow : flowFrom;
+
+    const maxR = Math.max(rFrom, rTo);
     const tipPour = tipInfo ? tipInfo.tipPour : (params.tipPour ?? 0.25);
-    const pad = Math.ceil(radius * (1.10 + params.bloom * 0.35 + tipPour * 0.22)) + 16;
+    const pad = Math.ceil(maxR * (1.06 + 0.22 + params.bloom * 0.30 + tipPour * 0.22)) + 24;
 
     let standalone = false;
     let workX = this.batchWorkX;
@@ -1336,10 +1381,23 @@ export class GpuWatercolorSolver {
     if (!this.batchActive) {
       standalone = true;
       apron = 6;
-      workX = Math.floor(Math.min(from.x, to.x) - pad) - apron;
-      workY = Math.floor(Math.min(from.y, to.y) - pad) - apron;
-      boxW = Math.min(WORK_SIZE, Math.max(16, Math.ceil(Math.max(from.x, to.x) + pad) + apron - workX));
-      boxH = Math.min(WORK_SIZE, Math.max(16, Math.ceil(Math.max(from.y, to.y) + pad) + apron - workY));
+      const rawMinX = Math.floor(Math.min(from.x, to.x) - pad) - apron;
+      const rawMinY = Math.floor(Math.min(from.y, to.y) - pad) - apron;
+      const rawMaxX = Math.ceil(Math.max(from.x, to.x) + pad) + apron;
+      const rawMaxY = Math.ceil(Math.max(from.y, to.y) + pad) + apron;
+      const spanX = rawMaxX - rawMinX;
+      const spanY = rawMaxY - rawMinY;
+      boxW = Math.min(WORK_SIZE, Math.max(16, spanX));
+      boxH = Math.min(WORK_SIZE, Math.max(16, spanY));
+      workX = spanX > WORK_SIZE ? Math.floor((rawMinX + rawMaxX - boxW) * 0.5) : rawMinX;
+      workY = spanY > WORK_SIZE ? Math.floor((rawMinY + rawMaxY - boxH) * 0.5) : rawMinY;
+      if (engine.isStatic) {
+        const halfW = engine.staticWidth * 0.5;
+        const halfH = engine.staticHeight * 0.5;
+        if ((workX + boxW) <= -halfW || workX >= halfW || (workY + boxH) <= -halfH || workY >= halfH) {
+          return;
+        }
+      }
       tiles = this._assembleWorkBox(engine, workX, workY, boxW, boxH);
       if (tiles.length === 0) return;
     }
@@ -1381,10 +1439,14 @@ export class GpuWatercolorSolver {
     gl.uniform2f(this.injectLocs.u_from, from.x, from.y);
     gl.uniform2f(this.injectLocs.u_to, to.x, to.y);
     gl.uniform2f(this.injectLocs.u_dir, dirX, dirY);
-    gl.uniform1f(this.injectLocs.u_radius, radius);
-    gl.uniform3f(this.injectLocs.u_color, colorRgb.r / 255.0, colorRgb.g / 255.0, colorRgb.b / 255.0);
-    gl.uniform1f(this.injectLocs.u_opacity, opacity);
-    gl.uniform1f(this.injectLocs.u_flow, flow);
+    gl.uniform1f(this.injectLocs.u_radiusFrom, rFrom);
+    gl.uniform1f(this.injectLocs.u_radiusTo, rTo);
+    gl.uniform3f(this.injectLocs.u_colorFrom, colFrom.r / 255.0, colFrom.g / 255.0, colFrom.b / 255.0);
+    gl.uniform3f(this.injectLocs.u_colorTo, colTo.r / 255.0, colTo.g / 255.0, colTo.b / 255.0);
+    gl.uniform1f(this.injectLocs.u_opacityFrom, opFrom);
+    gl.uniform1f(this.injectLocs.u_opacityTo, opTo);
+    gl.uniform1f(this.injectLocs.u_flowFrom, flowFrom);
+    gl.uniform1f(this.injectLocs.u_flowTo, flowTo);
     gl.uniform1f(this.injectLocs.u_wetness, params.wetness);
     gl.uniform1f(this.injectLocs.u_streamFlow, params.streamFlow);
     gl.uniform1f(this.injectLocs.u_bloom, params.bloom);
@@ -1422,10 +1484,16 @@ export class GpuWatercolorSolver {
 
     if (!this.batchActive) {
       apron = 8;
-      workX = Math.floor(minX) - apron;
-      workY = Math.floor(minY) - apron;
-      boxW = Math.min(WORK_SIZE, Math.max(16, Math.ceil(maxX) + apron - workX));
-      boxH = Math.min(WORK_SIZE, Math.max(16, Math.ceil(maxY) + apron - workY));
+      const rawMinX = Math.floor(minX) - apron;
+      const rawMinY = Math.floor(minY) - apron;
+      const rawMaxX = Math.ceil(maxX) + apron;
+      const rawMaxY = Math.ceil(maxY) + apron;
+      const spanX = rawMaxX - rawMinX;
+      const spanY = rawMaxY - rawMinY;
+      boxW = Math.min(WORK_SIZE, Math.max(16, spanX));
+      boxH = Math.min(WORK_SIZE, Math.max(16, spanY));
+      workX = spanX > WORK_SIZE ? Math.floor((rawMinX + rawMaxX - boxW) * 0.5) : rawMinX;
+      workY = spanY > WORK_SIZE ? Math.floor((rawMinY + rawMaxY - boxH) * 0.5) : rawMinY;
       tiles = this._assembleWorkBox(engine, workX, workY, boxW, boxH);
     }
 
@@ -1689,7 +1757,6 @@ export class GpuWatercolorSolver {
         for (let cy = sCY; cy <= eCY; cy++) {
           const chunk = engine._getChunk(cx, cy);
           if (!chunk) continue;
-          this._ensureBackedUp(engine, chunk, cx, cy);
 
           const lx = engine.isStatic ? -engine.staticWidth * 0.5 : cx * engine.chunkSize;
           const ly = engine.isStatic ? -engine.staticHeight * 0.5 : cy * engine.chunkSize;
@@ -1700,6 +1767,7 @@ export class GpuWatercolorSolver {
           const ow = ox2 - ox;
           const oh = oy2 - oy;
           if (ow <= 0 || oh <= 0) continue;
+          this._ensureBackedUp(engine, chunk, cx, cy);
 
           // Sync live GPU chunk texture with sharpened edge finish
           if (chunk.gpuTextures && chunk.gpuTextures[layer]) {

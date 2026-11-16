@@ -1,11 +1,12 @@
 import { TOOLS } from '../constants.js';
-import { paintWireframeIncrementally } from '../tools/wireframe.js';
+import { paintWireframeIncrementally, startWireframeStroke, paintWireframeMove, endWireframeStroke } from '../tools/wireframe.js';
 import { paintSmudgeOnChunks, startSmudgeStroke, endSmudgeStroke } from '../tools/smudge.js';
 import { paintFluidOnChunks, startFluidPaintStroke, endFluidPaintStroke, cancelFluidAfterEffect } from '../tools/fluidPaint.js';
 import { startLiquifyStroke, paintLiquifyStroke, endLiquifyStroke } from '../tools/liquify.js';
 import { paintAirIncrementally, clearAirParticles, startAirPaintStroke, endAirPaintStroke } from '../tools/airPaint.js';
 import { isMobileDevice } from '../colorUtils.js';
 import { wasmCore } from '../wasm/wasmBridge.js';
+import { hitTestTransformGizmo, updateGizmoHoverUI } from '../tools/selection.js';
 
 export function _startStroke(e) {
   this.lastMousePos = { x: e.clientX, y: e.clientY };
@@ -13,8 +14,8 @@ export function _startStroke(e) {
   if (this.isExportMode) return;
 
   // Expanded UI shielding to prevent drawing through panels
-  const target = e.target;
-  if (target.closest('.ui-panel') || target.closest('button') || target.closest('input') || target.closest('#top-bar')) {
+  const target = e.target instanceof Element ? e.target : null;
+  if (target && (target.closest('.ui-panel') || target.closest('#selection-mode-toolbar') || target.closest('button') || target.closest('input') || target.closest('#top-bar'))) {
       return;
   }
 
@@ -44,8 +45,8 @@ export function _startStroke(e) {
       return; // STOP HERE, don't start drawing
   }
 
-  // NEW: Handle Alt-Click for picking
-  if (e.altKey && this.brush.type !== TOOLS.LASSO) {
+  // NEW: Handle Alt-Click for picking (disabled during active floating selection transform where Alt toggles non-uniform scale)
+  if (e.altKey && this.brush.type !== TOOLS.LASSO && !this.floatingSelection) {
       const color = this.pickColor(e.clientX, e.clientY);
       this._notifyPicker(e.clientX, e.clientY, color, true); // true = SET color now
       return; // STOP HERE, don't start drawing
@@ -74,43 +75,68 @@ export function _startStroke(e) {
       return; // STOP HERE, don't start drawing/painting/selection on a hidden layer
   }
 
-  // Selection Apply Check: If we have a selection and click away, apply it
+  // Selection Transform Gizmo Hit Test (Move inside, Scale corner/side, Rotate outside, Apply far outside)
   if (this.floatingSelection) {
-      const m = this._getMousePos(e);
-      const wx = m.wx;
-      const wy = m.wy;
-      const sel = this.floatingSelection;
-      
-      const scX = sel.scaleX !== undefined ? sel.scaleX : (sel.scale || 1);
-      const scY = sel.scaleY !== undefined ? sel.scaleY : (sel.scale || 1);
-      const rot = sel.rotation || 0;
-      
-      const cx = sel.x + sel.canvas.width / 2;
-      const cy = sel.y + sel.canvas.height / 2;
-      
-      const dx = wx - cx;
-      const dy = wy - cy;
-      
-      const localX = dx * Math.cos(-rot) - dy * Math.sin(-rot);
-      const localY = dx * Math.sin(-rot) + dy * Math.cos(-rot);
-      
-      const hw = (sel.canvas.width * scX) / 2;
-      const hh = (sel.canvas.height * scY) / 2;
-      
-      // Pad by 10 pixels in world units for comfortable grabbing
-      const isInside = (localX >= -hw - 10 && localX <= hw + 10 && localY >= -hh - 10 && localY <= hh + 10);
-      
-      if (isInside) {
-          // Click inside selection: start moving regardless of tool
+      const hit = hitTestTransformGizmo(this, e.clientX, e.clientY);
+      if (hit && hit.zone !== 'apply') {
           if (this.onDrawStart) this.onDrawStart();
           this.isDrawing = true;
           this.lastMousePos = { x: e.clientX, y: e.clientY };
           this._transformStateBeforeDrag = this.captureFloatingSelectionState ? this.captureFloatingSelectionState() : null;
+
+          const sel = this.floatingSelection;
+          const selW = hit.selW;
+          const selH = hit.selH;
+          const scX = hit.scX;
+          const scY = hit.scY;
+          const rot = hit.rot;
+          const pivotX = sel.x + selW * 0.5;
+          const pivotY = sel.y + selH * 0.5;
+
+          const dragInfo = {
+              zone: hit.zone,
+              handleKind: hit.handleKind || null,
+              handle: hit.handle || null,
+              hx: hit.hx || 0,
+              hy: hit.hy || 0,
+              ax: hit.ax || 0,
+              ay: hit.ay || 0,
+              cursorAngle: hit.cursorAngle || 0,
+              startSelX: sel.x,
+              startSelY: sel.y,
+              startScX: scX,
+              startScY: scY,
+              startRot: rot,
+              rawRot: rot,
+              startOpacity: sel.opacity !== undefined ? sel.opacity : 1,
+              selW,
+              selH,
+              pivotX,
+              pivotY,
+              startWx: hit.wx,
+              startWy: hit.wy,
+              prevWx: hit.wx,
+              prevWy: hit.wy,
+              startClientY: e.clientY
+          };
+
+          if (hit.zone === 'scale') {
+              const cosR = Math.cos(rot);
+              const sinR = Math.sin(rot);
+              const aOffX = dragInfo.ax * (selW * scX) * 0.5;
+              const aOffY = dragInfo.ay * (selH * scY) * 0.5;
+              dragInfo.anchorWorldX = pivotX + aOffX * cosR - aOffY * sinR;
+              dragInfo.anchorWorldY = pivotY + aOffX * sinR + aOffY * cosR;
+              dragInfo.origSpanX = (dragInfo.hx - dragInfo.ax) * (selW * scX) * 0.5;
+              dragInfo.origSpanY = (dragInfo.hy - dragInfo.ay) * (selH * scY) * 0.5;
+          }
+
+          this._gizmoDrag = dragInfo;
+          updateGizmoHoverUI(this, e.clientX, e.clientY, Boolean(e.altKey || this.keys['alt']), hit);
           return;
       } else {
-          // Click outside selection: apply it
+          // Click far outside selection: apply it and fall through
           this._applySelection();
-          // Don't return, let it start a new stroke (e.g. new lasso)
       }
   }
 
@@ -207,6 +233,8 @@ export function _startStroke(e) {
       startLiquifyStroke(this, worldPos);
   } else if (this.brush.type === TOOLS.AIR) {
       startAirPaintStroke(this);
+  } else if (this.brush.type === TOOLS.WIREFRAME) {
+      startWireframeStroke(this, worldPos);
   } else if (this.brush.type === TOOLS.BRUSH || this.brush.type === TOOLS.ERASER) {
       // Pre-warm tip cache for main brush so first drag move executes with 0 lag
       if (this.brush.tip && this.brush.type === TOOLS.BRUSH) {
@@ -219,20 +247,29 @@ export function _startStroke(e) {
               this._updateTipCache(cacheSize, airbrush, this.brush.color);
           }
       }
-      // Pre-backup initial chunk under cursor during pointerdown (0 lag during drag!)
-      const sCX = this.isStatic ? 0 : Math.floor(worldPos.x / this.chunkSize);
-      const sCY = this.isStatic ? 0 : Math.floor(worldPos.y / this.chunkSize);
-      const startChunk = this._getChunk(sCX, sCY);
-      if (startChunk) {
-          const id = `${sCX},${sCY}`;
-          if (!this.currentStrokeDirtyChunks.has(id)) {
-              const srcCanvas = startChunk.canvases[this.activeLayer];
-              const backup = document.createElement('canvas');
-              backup.width = srcCanvas.width;
-              backup.height = srcCanvas.height;
-              backup.getContext('2d').drawImage(srcCanvas, 0, 0);
-              this.currentStrokeDirtyChunks.set(id, { layer: this.activeLayer, canvas: backup });
-              this._markDirty(id, this.activeLayer);
+      // Pre-backup initial chunk under cursor during pointerdown if it overlaps static bounds (0 lag during drag!)
+      const halfSpan = (initSize || 10) * 0.75 + 15;
+      const overlapsStatic = !this.isStatic || (
+          (worldPos.x + halfSpan) >= (-this.staticWidth * 0.5) &&
+          (worldPos.x - halfSpan) <= (this.staticWidth * 0.5) &&
+          (worldPos.y + halfSpan) >= (-this.staticHeight * 0.5) &&
+          (worldPos.y - halfSpan) <= (this.staticHeight * 0.5)
+      );
+      if (overlapsStatic) {
+          const sCX = this.isStatic ? 0 : Math.floor(worldPos.x / this.chunkSize);
+          const sCY = this.isStatic ? 0 : Math.floor(worldPos.y / this.chunkSize);
+          const startChunk = this._getChunk(sCX, sCY);
+          if (startChunk) {
+              const id = `${sCX},${sCY}`;
+              if (!this.currentStrokeDirtyChunks.has(id)) {
+                  const srcCanvas = startChunk.canvases[this.activeLayer];
+                  const backup = document.createElement('canvas');
+                  backup.width = srcCanvas.width;
+                  backup.height = srcCanvas.height;
+                  backup.getContext('2d').drawImage(srcCanvas, 0, 0);
+                  this.currentStrokeDirtyChunks.set(id, { layer: this.activeLayer, canvas: backup });
+                  this._markDirty(id, this.activeLayer);
+              }
           }
       }
   }
@@ -289,54 +326,130 @@ export function _moveStroke(e) {
 
   if (this.floatingSelection && this.isDrawing) {
       const sel = this.floatingSelection;
-      const m1 = this._getMousePos({ clientX: this.lastMousePos.x, clientY: this.lastMousePos.y });
-      const m2 = this._getMousePos(e);
-      const dwx = m2.wx - m1.wx;
-      const dwy = m2.wy - m1.wy;
+      const drag = this._gizmoDrag;
+      const rect = this.getContainerRect();
+      const sx = e.clientX - rect.left;
+      const sy = e.clientY - rect.top;
+      const world = this._screenToWorld(sx, sy);
+      const wx = world.wx;
+      const wy = world.wy;
+      const isAltDown = Boolean(e.altKey || this.keys['alt']);
+      const isShiftDown = Boolean(e.shiftKey || this.keys['shift']);
 
-      const isOpacity = this.keys['t'] || this.transformMode === 'opacity';
-      const isScale = this.keys['shift'] || this.transformMode === 'scale';
-      const isRotate = this.keys['alt'] || this.keys['control'] || this.transformMode === 'rotate';
+      if (drag && drag.zone === 'opacity') {
+          const dy = e.clientY - drag.startClientY;
+          sel.opacity = Math.max(0, Math.min(1, drag.startOpacity - dy * 0.005));
+      } else if (drag && drag.zone === 'scale') {
+          const rot = drag.startRot;
+          const cosN = Math.cos(-rot);
+          const sinN = Math.sin(-rot);
+          const dxA = wx - drag.anchorWorldX;
+          const dyA = wy - drag.anchorWorldY;
+          const relX = dxA * cosN - dyA * sinN;
+          const relY = dxA * sinN + dyA * cosN;
 
-      if (isOpacity) {
-          // Opacity
-          const dy = e.clientY - this.lastMousePos.y;
-          const opDelta = -dy * 0.01;
-          sel.opacity = Math.max(0, Math.min(1, (sel.opacity !== undefined ? sel.opacity : 1) + opDelta));
-          this._status(`OPACITY: ${Math.round(sel.opacity * 100)}%`);
-            } else if (isScale) {
-          const dx = e.clientX - this.lastMousePos.x;
-          const dy = e.clientY - this.lastMousePos.y;
-          const scX = sel.scaleX !== undefined ? sel.scaleX : (sel.scale || 1);
-          const scY = sel.scaleY !== undefined ? sel.scaleY : (sel.scale || 1);
-          
-          if (!this.scaleNonUniform) {
-              // Uniform scale: scale X and Y by the same unified factor
-              const factor = 1 + (dx - dy) * 0.005;
-              sel.scaleX = Math.max(0.01, scX * factor);
-              sel.scaleY = Math.max(0.01, scY * factor);
-              sel.scale = sel.scaleX;
-          } else {
-              // Non-uniform Scale: Horizontal movement scales X, Vertical movement scales Y
-              const factorX = 1 + dx * 0.01;
-              const factorY = 1 - dy * 0.01;
-              sel.scaleX = Math.max(0.01, scX * factorX);
-              sel.scaleY = Math.max(0.01, scY * factorY);
-              sel.scale = (sel.scaleX + sel.scaleY) / 2; // Keep compatibility fallback
+          const minScale = 0.02;
+          let newScX = drag.startScX;
+          let newScY = drag.startScY;
+
+          if (drag.hx !== 0 && drag.hy !== 0) {
+              // Corner handle: uniform by default, hold Alt for non-uniform
+              if (isAltDown) {
+                  const rx = Math.abs(drag.origSpanX) > 1e-4 ? (relX / drag.origSpanX) : 1;
+                  const ry = Math.abs(drag.origSpanY) > 1e-4 ? (relY / drag.origSpanY) : 1;
+                  newScX = Math.max(minScale, drag.startScX * rx);
+                  newScY = Math.max(minScale, drag.startScY * ry);
+              } else {
+                  const denom = drag.origSpanX * drag.origSpanX + drag.origSpanY * drag.origSpanY;
+                  const uRatio = denom > 1e-4
+                      ? (relX * drag.origSpanX + relY * drag.origSpanY) / denom
+                      : 1;
+                  const ratioFloor = Math.max(minScale / Math.max(0.01, drag.startScX), minScale / Math.max(0.01, drag.startScY));
+                  const clamped = Math.max(ratioFloor, uRatio);
+                  newScX = drag.startScX * clamped;
+                  newScY = drag.startScY * clamped;
+              }
+          } else if (drag.hx !== 0) {
+              // Left / Right side handle
+              const rx = Math.abs(drag.origSpanX) > 1e-4 ? (relX / drag.origSpanX) : 1;
+              if (isAltDown) {
+                  newScX = Math.max(minScale, drag.startScX * rx);
+                  newScY = drag.startScY;
+              } else {
+                  const ratioFloor = Math.max(minScale / Math.max(0.01, drag.startScX), minScale / Math.max(0.01, drag.startScY));
+                  const clamped = Math.max(ratioFloor, rx);
+                  newScX = drag.startScX * clamped;
+                  newScY = drag.startScY * clamped;
+              }
+          } else if (drag.hy !== 0) {
+              // Top / Bottom side handle
+              const ry = Math.abs(drag.origSpanY) > 1e-4 ? (relY / drag.origSpanY) : 1;
+              if (isAltDown) {
+                  newScX = drag.startScX;
+                  newScY = Math.max(minScale, drag.startScY * ry);
+              } else {
+                  const ratioFloor = Math.max(minScale / Math.max(0.01, drag.startScX), minScale / Math.max(0.01, drag.startScY));
+                  const clamped = Math.max(ratioFloor, ry);
+                  newScX = drag.startScX * clamped;
+                  newScY = drag.startScY * clamped;
+              }
           }
-      } else if (isRotate) {
-          // Rotate (5x slower sensitivity as requested)
-          const dx = e.clientX - this.lastMousePos.x;
-          const factor = dx * 0.01;
-          sel.rotation = (sel.rotation || 0) + factor;
-      } else {
-          // Move using world space deltas
-          sel.x += dwx;
-          sel.y += dwy;
+
+          sel.scaleX = newScX;
+          sel.scaleY = newScY;
+          sel.scale = (newScX + newScY) * 0.5;
+
+          // Keep the opposite anchor fixed in world space
+          const cosP = Math.cos(rot);
+          const sinP = Math.sin(rot);
+          const newAOffX = drag.ax * (drag.selW * newScX) * 0.5;
+          const newAOffY = drag.ay * (drag.selH * newScY) * 0.5;
+          const rotOffX = newAOffX * cosP - newAOffY * sinP;
+          const rotOffY = newAOffX * sinP + newAOffY * cosP;
+          const newPivotX = drag.anchorWorldX - rotOffX;
+          const newPivotY = drag.anchorWorldY - rotOffY;
+          sel.x = newPivotX - drag.selW * 0.5;
+          sel.y = newPivotY - drag.selH * 0.5;
+
+          drag.cursorAngle = Math.atan2(sy - this._worldToScreen(newPivotX, newPivotY).y, sx - this._worldToScreen(newPivotX, newPivotY).x);
+      } else if (drag && drag.zone === 'rotate') {
+          const prevAngle = Math.atan2(drag.prevWy - drag.pivotY, drag.prevWx - drag.pivotX);
+          const curAngle = Math.atan2(wy - drag.pivotY, wx - drag.pivotX);
+          let dAngle = curAngle - prevAngle;
+          if (dAngle > Math.PI) dAngle -= Math.PI * 2;
+          if (dAngle < -Math.PI) dAngle += Math.PI * 2;
+          drag.rawRot += dAngle;
+          drag.prevWx = wx;
+          drag.prevWy = wy;
+
+          if (isShiftDown) {
+              const step = Math.PI / 12; // 15 deg snap
+              sel.rotation = Math.round(drag.rawRot / step) * step;
+          } else {
+              sel.rotation = drag.rawRot;
+          }
+          const pivotScreen = this._worldToScreen(drag.pivotX, drag.pivotY);
+          drag.cursorAngle = Math.atan2(sy - pivotScreen.y, sx - pivotScreen.x) + Math.PI * 0.5;
+      } else if (drag && drag.zone === 'move') {
+          if (this.keys['t']) {
+              const dy = e.clientY - this.lastMousePos.y;
+              sel.opacity = Math.max(0, Math.min(1, (sel.opacity !== undefined ? sel.opacity : 1) - dy * 0.01));
+          } else {
+              sel.x = drag.startSelX + (wx - drag.startWx);
+              sel.y = drag.startSelY + (wy - drag.startWy);
+          }
       }
-      
+
       this.lastMousePos = { x: e.clientX, y: e.clientY };
       this._updateSelectionPreview();
+      if (drag) {
+          updateGizmoHoverUI(this, e.clientX, e.clientY, isAltDown, {
+              zone: drag.zone,
+              handleKind: drag.handleKind,
+              handle: drag.handle,
+              cursorAngle: drag.cursorAngle
+          });
+      }
       return;
   }
 
@@ -514,17 +627,13 @@ export function _moveStroke(e) {
   };
 
   if (this.brush.type === TOOLS.WIREFRAME) {
-      // Point density normalization: only store points if we moved significantly in world space
-      const lastP = this.strokePoints[this.strokePoints.length - 1];
-      const worldDist = Math.sqrt((worldPos.x - lastP.x)**2 + (worldPos.y - lastP.y)**2);
-      
-      // Minimal distance between points in buffer (e.g., 2 pixels at size 20)
-      const minBufferDist = Math.max(2, dynamicSize * 0.15);
-      
-      if (worldDist > minBufferDist) {
-          this.strokePoints.push(worldPos);
-          this._paintWireframeIncrementally(this.strokePoints.length - 1);
+      if ((this.brush.jitterHue || 0) > 0) {
+          worldPos.color = this._shiftColor(worldPos.color, (Math.random() - 0.5) * (this.brush.jitterHue || 0) * 360, 0);
       }
+      if ((this.brush.jitterSize || 0) > 0) {
+          worldPos.size = Math.max(1, worldPos.size * (1 + (Math.random() - 0.5) * this.brush.jitterSize));
+      }
+      paintWireframeMove(this, worldPos);
   } else if (this.brush.type === TOOLS.FLUID) {
       const lastP = this.strokePoints[this.strokePoints.length - 1];
       const dist = Math.hypot(worldTo.x - lastP.x, worldTo.y - lastP.y);
@@ -623,6 +732,10 @@ export function _endStroke(e = null) {
   } else if (this.isDrawing && this.brush.type !== TOOLS.LASSO && this.strokePoints.length === 1 && this.brush.type !== TOOLS.WIREFRAME && this.brush.type !== TOOLS.LIQUIFY && this.brush.type !== TOOLS.FLUID && this.brush.type !== TOOLS.AIR) {
       const p = this.strokePoints[0];
       this._paintOnChunks(p, p, p.size, p.opacity, p.color);
+  }
+
+  if (this.isDrawing && this.brush.type === TOOLS.WIREFRAME) {
+      endWireframeStroke(this);
   }
 
   // 1. Calculate bounding box of this stroke based on actual generated/scattered stamp bounds
@@ -949,10 +1062,13 @@ export function _endStroke(e = null) {
       }
   }
   this._transformStateBeforeDrag = null;
+  this._gizmoDrag = null;
 
   if (this.onDrawEnd && this.isDrawing) this.onDrawEnd();
   
   this.isDrawing = false;
+  this._activeStrokePointerId = null;
+  this._activeStrokePointerType = null;
   this._fluidBristles = null;
   this.isPanning = false;
   this.isZooming = false;
@@ -1133,9 +1249,18 @@ export function _paintOnChunks(from, to, size, opacity, color) {
 
   // 4. Find Affected Chunks
   const affectedChunks = new Map();
+  const staticHalfW = this.isStatic ? this.staticWidth * 0.5 : 0;
+  const staticHalfH = this.isStatic ? this.staticHeight * 0.5 : 0;
 
   for (const s of stamps) {
       const sR = s.size / 2;
+      if (this.isStatic) {
+          const boundR = sR * 1.45 + 2;
+          if ((s.x + boundR) < -staticHalfW || (s.x - boundR) > staticHalfW ||
+              (s.y + boundR) < -staticHalfH || (s.y - boundR) > staticHalfH) {
+              continue;
+          }
+      }
       const sCX = this.isStatic ? 0 : Math.floor((s.x - sR) / this.chunkSize);
       const eCX = this.isStatic ? 0 : Math.floor((s.x + sR) / this.chunkSize);
       const sCY = this.isStatic ? 0 : Math.floor((s.y - sR) / this.chunkSize);

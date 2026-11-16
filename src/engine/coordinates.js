@@ -59,22 +59,12 @@ export function _getMousePos(e) {
   const y = e.clientY - rect.top;
   
   const world = this._screenToWorld(x, y);
-  let wx = world.wx;
-  let wy = world.wy;
-  
-  const isRefMove = this.brush && this.brush.type === 'ref_move';
-  const isPicker = (this.brush && this.brush.type === 'picker') || (e && e.altKey);
-  
-  if (this.isStatic && !isRefMove && !isPicker) {
-      wx = Math.max(-this.staticWidth / 2, Math.min(this.staticWidth / 2, wx));
-      wy = Math.max(-this.staticHeight / 2, Math.min(this.staticHeight / 2, wy));
-  }
   
   return {
       x: x, 
       y: y,
-      wx: wx,
-      wy: wy
+      wx: world.wx,
+      wy: world.wy
   };
 }
 
