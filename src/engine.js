@@ -398,9 +398,18 @@ export class Engine {
 
     const recoverOrphanedActiveState = (e) => {
         if (!e || e.buttons !== 0 || e.pointerType === 'touch') return;
+        const target = e.target;
+        if (target && typeof target.hasPointerCapture === 'function' && e.pointerId !== undefined) {
+            try {
+                if (target.hasPointerCapture(e.pointerId)) {
+                    target.releasePointerCapture(e.pointerId);
+                }
+            } catch (_) {}
+        }
         pruneStaleNonTouchPointers(e.pointerType);
-        const isSimulatedMouse = e.pointerType === 'mouse' && this.lastPenTouchTime && (performance.now() - this.lastPenTouchTime < 120);
-        if (isSimulatedMouse) return;
+        const now = performance.now();
+        const isSimulatedMouse = e.pointerType === 'mouse' && this.lastPenTouchTime && (now - this.lastPenTouchTime < 80);
+        if (isSimulatedMouse && (this.isDrawing || this.activePointers.size > 0)) return;
 
         if (this.isPanning || this.isZooming) {
             this.isPanning = false;
@@ -409,7 +418,9 @@ export class Engine {
             this._updateCursor();
         }
         if (this.isDrawing && this._activeStrokePointerType !== 'touch') {
-            if (this._activeStrokePointerId == null || e.pointerId === this._activeStrokePointerId || e.pointerType === this._activeStrokePointerType) {
+            const lastStrokeTs = this._activeStrokePointerId != null ? (this._pointerTimes.get(this._activeStrokePointerId) || 0) : 0;
+            const staleActive = this.activePointers.size === 0 && (now - lastStrokeTs > 120);
+            if (this._activeStrokePointerId == null || e.pointerId === this._activeStrokePointerId || e.pointerType === this._activeStrokePointerType || staleActive) {
                 this.isMouseDown = false;
                 this._endStroke(e);
             }
@@ -427,6 +438,22 @@ export class Engine {
     };
 
     this.container.addEventListener('pointerenter', handleContainerEnter);
+    this.container.addEventListener('mouseenter', (e) => {
+        this._containerRect = null;
+        if (e.buttons === 0) {
+            if (this.isPanning || this.isZooming) {
+                this.isPanning = false;
+                this.isZooming = false;
+                this.isMouseDown = false;
+            }
+            if (this.isDrawing && this._activeStrokePointerType !== 'touch') {
+                this.isMouseDown = false;
+                this._endStroke(e);
+            }
+        }
+        this._updateCursor();
+        this._updateBrushCursor(e);
+    });
     this.container.addEventListener('pointerover', (e) => {
         if (e.target === this.container && e.buttons === 0 && e.pointerType !== 'touch') {
             this._containerRect = null;
@@ -506,6 +533,12 @@ export class Engine {
             }
         }
         
+        // Clean up any orphaned non-touch stroke from a missed pointerup before starting a new stroke
+        if (this.isDrawing && this._activeStrokePointerType !== 'touch' && this._activeStrokePointerId !== e.pointerId && e.pointerType !== 'touch') {
+            this.isMouseDown = false;
+            this._endStroke(e);
+        }
+
         // Prioritize non-mouse pointers (Pen/Touch)
         const pointers = Array.from(this.activePointers.values());
         const hasNonMouse = pointers.some(p => p.pointerType !== 'mouse');
@@ -622,9 +655,13 @@ export class Engine {
           this._pointerTimes.set(e.pointerId, now);
       }
 
-      // Ignore simulated mouse events right after pen/touch press/release to prevent cursor teleportation
-      if (e.pointerType === 'mouse' && this.lastPenTouchTime && (now - this.lastPenTouchTime < 100)) {
-          return;
+      // Ignore simulated mouse events right after pen/touch press/release ONLY if an active pointer/stroke exists or pointer didn't move
+      if (e.pointerType === 'mouse' && this.lastPenTouchTime && (now - this.lastPenTouchTime < 80)) {
+          const movedDuringHover = (e.buttons === 0 && !this.isDrawing && this.activePointers.size === 0 &&
+              Math.hypot((e.clientX || 0) - (this.lastMousePos?.x || 0), (e.clientY || 0) - (this.lastMousePos?.y || 0)) > 2);
+          if (!movedDuringHover) {
+              return;
+          }
       }
 
       // Ignore mouse moves over canvas ONLY if a non-mouse canvas pointer is genuinely active right now
@@ -685,24 +722,26 @@ export class Engine {
           return;
       }
 
-      // Use coalesced events for smoother line input, but dispatch single frame for simulation brushes (Liquify, Fluid, Air)
-      const isSimulationBrush = this.brush.type === TOOLS.LIQUIFY || this.brush.type === TOOLS.FLUID || this.brush.type === TOOLS.AIR;
-      const rawEvents = e.getCoalescedEvents ? e.getCoalescedEvents() : null;
-      const events = (rawEvents && rawEvents.length > 0) ? rawEvents : [e];
-      
-      if (isSimulationBrush) {
-          this._moveStroke(events[events.length - 1]);
-      } else {
-          const maxEvents = 12; 
-          const step = Math.max(1, Math.ceil(events.length / maxEvents));
+      // Skip unnecessary coalesced stroke traversal while merely hovering idle
+      if (this.isDrawing || this.isPanning || this.isZooming) {
+          const isSimulationBrush = this.brush.type === TOOLS.LIQUIFY || this.brush.type === TOOLS.FLUID || this.brush.type === TOOLS.AIR;
+          const rawEvents = e.getCoalescedEvents ? e.getCoalescedEvents() : null;
+          const events = (rawEvents && rawEvents.length > 0) ? rawEvents : [e];
           
-          for (let i = 0; i < events.length; i += step) {
-              this._moveStroke(events[i]);
-          }
-          
-          // Always process the final event to ensure accuracy
-          if ((events.length - 1) % step !== 0) {
+          if (isSimulationBrush) {
               this._moveStroke(events[events.length - 1]);
+          } else {
+              const maxEvents = 12; 
+              const step = Math.max(1, Math.ceil(events.length / maxEvents));
+              
+              for (let i = 0; i < events.length; i += step) {
+                  this._moveStroke(events[i]);
+              }
+              
+              // Always process the final event to ensure accuracy
+              if ((events.length - 1) % step !== 0) {
+                  this._moveStroke(events[events.length - 1]);
+              }
           }
       }
 
@@ -710,13 +749,28 @@ export class Engine {
       this._updateBrushCursor(e);
     });
 
-    // Hover fallback: if Windows Ink / Chromium pauses pointermove right after returning from Settings
+    // High-reliability idle hover recovery via pointerrawupdate (bypasses Windows Ink / range slider coalescing stalls)
+    if ('onpointerrawupdate' in window) {
+        window.addEventListener('pointerrawupdate', (e) => {
+            if (this.isDrawing || this.isPanning || this.isZooming || this.isGesture) return;
+            if (e.buttons !== 0 || e.pointerType === 'touch') return;
+            const now = performance.now();
+            if (now - (this._lastPointerMoveTime || 0) <= 14) return;
+            this._lastPointerMoveTime = now;
+            recoverOrphanedActiveState(e);
+            this._handlePickerMove(e);
+            this._updateBrushCursor(e);
+        });
+    }
+
+    // Hover fallback: if Windows Ink / Chromium pauses pointermove right after returning from Settings/sliders
     // or switching tablet-as-mouse mode, mousemove keeps the hover cursor alive instead of freezing.
     window.addEventListener('mousemove', (e) => {
         if (this.isDrawing || this.isPanning || this.isZooming || this.isGesture) return;
         const now = performance.now();
-        if (now - (this._lastPointerMoveTime || 0) <= 25) return;
-        if (this.lastPenTouchTime && (now - this.lastPenTouchTime < 120)) return;
+        if (now - (this._lastPointerMoveTime || 0) <= 20) return;
+        const moved = Math.hypot((e.clientX || 0) - (this.lastMousePos?.x || 0), (e.clientY || 0) - (this.lastMousePos?.y || 0)) > 2;
+        if (this.lastPenTouchTime && (now - this.lastPenTouchTime < 80) && (this.activePointers.size > 0 || !moved)) return;
         this._handlePickerMove(e);
         this._updateBrushCursor(e);
     });
@@ -2038,8 +2092,12 @@ export class Engine {
 
     this._updateCursor();
 
-    if (e && e.pointerType === 'mouse' && this.lastPenTouchTime && (performance.now() - this.lastPenTouchTime < 100)) {
-        return;
+    if (e && e.pointerType === 'mouse' && this.lastPenTouchTime && (performance.now() - this.lastPenTouchTime < 80)) {
+        const movedDuringHover = (e.buttons === 0 && !this.isDrawing && this.activePointers.size === 0 &&
+            Math.hypot((e.clientX || 0) - (this.lastMousePos?.x || 0), (e.clientY || 0) - (this.lastMousePos?.y || 0)) > 2);
+        if (!movedDuringHover) {
+            return;
+        }
     }
 
     if (e && e.clientX !== undefined && e.clientY !== undefined) {
@@ -2060,14 +2118,23 @@ export class Engine {
 
     const rect = this.getContainerRect();
 
-    // Hide if mouse is over UI
+    // Hide if mouse is over UI (guard stale INPUT target after dragging slider off onto canvas)
     const targetEl = (e && e.target instanceof Element) ? e.target : null;
     if (targetEl && (targetEl.closest('.ui-panel') || targetEl.closest('#selection-mode-toolbar') || targetEl.closest('button') || targetEl.closest('input') || targetEl.closest('select') || targetEl.closest('textarea') || targetEl.closest('#top-bar') || targetEl.closest('#top-bar-ref'))) {
-        this.brushCursor.style.display = 'none';
-        if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
-        clearGizmoHoverUI(this);
-        if (this.container) this.container.style.cursor = 'default';
-        return;
+        let isStaleReleasedSlider = false;
+        if (e.buttons === 0 && targetEl.tagName === 'INPUT') {
+            const uiRect = targetEl.getBoundingClientRect();
+            if (mouseX < uiRect.left - 2 || mouseX > uiRect.right + 2 || mouseY < uiRect.top - 2 || mouseY > uiRect.bottom + 2) {
+                isStaleReleasedSlider = true;
+            }
+        }
+        if (!isStaleReleasedSlider) {
+            this.brushCursor.style.display = 'none';
+            if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
+            clearGizmoHoverUI(this);
+            if (this.container) this.container.style.cursor = 'default';
+            return;
+        }
     }
 
     // Position relative to container

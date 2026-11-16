@@ -49,8 +49,141 @@ export class TimelapseRecorder {
     this.playbackIntervalId = null;
     this.playbackFps = 12;
 
+    // Buffered capture & deferred encode/save state (prevents lag during rapid strokes)
+    this._workCanvas = null;
+    this._workCtx = null;
+    this._hasUnsavedChanges = false;
+    this._encodeTimer = null;
+    this._isEncodingBuffer = false;
+    this._flushPromise = null;
+    this._maxBufferedRawFrames = 18;
+
     this._initStyles();
     this.resetSession();
+  }
+
+  _isPanelVisible() {
+    const panel = document.getElementById('panel-recording');
+    return Boolean(panel && !panel.classList.contains('hidden'));
+  }
+
+  _disposeFrameItem(item) {
+    if (item && typeof item === 'object' && item.canvas) {
+      item.canvas.width = 1;
+      item.canvas.height = 1;
+      item.canvas = null;
+    }
+  }
+
+  _disposeAllBufferedFrames() {
+    if (!Array.isArray(this.frames)) return;
+    for (let i = 0; i < this.frames.length; i++) {
+      this._disposeFrameItem(this.frames[i]);
+    }
+  }
+
+  _hasBufferedFrames() {
+    if (!Array.isArray(this.frames)) return false;
+    for (let i = 0; i < this.frames.length; i++) {
+      if (this.frames[i] && typeof this.frames[i] === 'object' && this.frames[i].__buffered) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  hasPendingSave() {
+    return Boolean(this._hasUnsavedChanges || this._hasBufferedFrames());
+  }
+
+  _clearEncodeTimer() {
+    if (this._encodeTimer) {
+      clearTimeout(this._encodeTimer);
+      this._encodeTimer = null;
+    }
+  }
+
+  _scheduleIdleEncode(delayMs = 700) {
+    this._clearEncodeTimer();
+    if (!this._hasBufferedFrames()) return;
+    this._encodeTimer = setTimeout(() => {
+      this._encodeTimer = null;
+      this._drainOneBufferedFrameIdle();
+    }, delayMs);
+  }
+
+  async _drainOneBufferedFrameIdle() {
+    if (this._isEncodingBuffer || this._flushPromise) return;
+    if (this.engine && (this.engine.isDrawing || this.engine.isPanning || this.engine.isZooming || this.engine.isGesture)) {
+      this._scheduleIdleEncode(700);
+      return;
+    }
+
+    const idx = this.frames.findIndex(f => f && typeof f === 'object' && f.__buffered && f.canvas);
+    if (idx === -1) return;
+
+    this._isEncodingBuffer = true;
+    try {
+      const item = this.frames[idx];
+      if (item && item.canvas) {
+        const dataUrl = await canvasToDataURLAsync(item.canvas, 'image/jpeg', 0.8);
+        if (this.frames[idx] === item) {
+          this.frames[idx] = dataUrl;
+          this._disposeFrameItem(item);
+        }
+      }
+    } catch (e) {
+      console.warn('Idle timelapse encode failed', e);
+    } finally {
+      this._isEncodingBuffer = false;
+      if (this._hasBufferedFrames()) {
+        this._scheduleIdleEncode(60);
+      }
+    }
+  }
+
+  async flushBufferedFrames() {
+    if (this._flushPromise) return this._flushPromise;
+    this._clearEncodeTimer();
+    if (!this._hasBufferedFrames()) return;
+
+    this._flushPromise = (async () => {
+      while (this._isEncodingBuffer) {
+        await new Promise(r => setTimeout(r, 10));
+      }
+      for (let i = 0; i < this.frames.length; i++) {
+        const item = this.frames[i];
+        if (item && typeof item === 'object' && item.__buffered && item.canvas) {
+          try {
+            const dataUrl = await canvasToDataURLAsync(item.canvas, 'image/jpeg', 0.8);
+            this.frames[i] = dataUrl;
+          } catch (e) {
+            console.warn('Flush encode failed for frame', i, e);
+          } finally {
+            this._disposeFrameItem(item);
+          }
+        }
+      }
+    })();
+
+    try {
+      await this._flushPromise;
+    } finally {
+      this._flushPromise = null;
+    }
+  }
+
+  _getFramePreviewSrc(frame) {
+    if (!frame) return '';
+    if (typeof frame === 'string') return frame;
+    if (frame.__buffered && frame.canvas) {
+      try {
+        return frame.canvas.toDataURL('image/jpeg', 0.8);
+      } catch (_) {
+        return '';
+      }
+    }
+    return '';
   }
 
   _initStyles() {
@@ -110,10 +243,13 @@ export class TimelapseRecorder {
   }
 
   resetSession() {
+    this._clearEncodeTimer();
+    this._disposeAllBufferedFrames();
     this.sessionId = 'REC-' + new Date().toISOString().replace(/[-:T]/g, '').slice(2, 14);
     this.frames = [];
     this.currentFrameIdx = 0;
     this.strokeCounter = 0;
+    this._hasUnsavedChanges = false;
     this.isPlaying = false;
     if (this.playbackIntervalId) {
       clearInterval(this.playbackIntervalId);
@@ -124,6 +260,7 @@ export class TimelapseRecorder {
 
   async saveCurrentSession(explicitProjectId = null) {
     if (!this.app || !this.app.storage) return;
+    await this.flushBufferedFrames();
     const data = {
       sessionId: this.sessionId,
       frames: this.frames,
@@ -136,6 +273,9 @@ export class TimelapseRecorder {
     };
     try {
       await this.app.storage.saveSetting('timelapse_data', data, explicitProjectId);
+      if (!explicitProjectId || explicitProjectId === this.app.currentProjectId) {
+        this._hasUnsavedChanges = false;
+      }
     } catch (e) {
       console.warn("Failed saving timelapse_data session", e);
     }
@@ -151,6 +291,7 @@ export class TimelapseRecorder {
 
   toggleRecording() {
     this.isRecording = !this.isRecording;
+    this._hasUnsavedChanges = true;
     this.updateRecordingIndicator();
     if (this.isRecording) {
       // Auto show selection box if in infinite mode
@@ -447,7 +588,7 @@ export class TimelapseRecorder {
     }
   }
 
-  async captureFrame() {
+  captureFrame() {
     try {
       let cropX = 0;
       let cropY = 0;
@@ -468,87 +609,102 @@ export class TimelapseRecorder {
 
       if (cropW <= 0 || cropH <= 0) return;
 
-      const exactW = cropW;
-      const exactH = cropH;
+      const outW = Math.max(1, Math.round(cropW * this.qualityScale));
+      const outH = Math.max(1, Math.round(cropH * this.qualityScale));
+      const scaleX = outW / cropW;
+      const scaleY = outH / cropH;
 
-      // Create primary snapshot canvas at cropped bounding dimensions
-      const tempCanvas = document.createElement('canvas');
-      tempCanvas.width = exactW;
-      tempCanvas.height = exactH;
-      const tempCtx = tempCanvas.getContext('2d');
-      if (!tempCtx) return;
+      // Reuse pooled small output canvas (zero multi-MB full-res allocation during strokes)
+      if (!this._workCanvas) {
+        this._workCanvas = document.createElement('canvas');
+        this._workCtx = this._workCanvas.getContext('2d', { alpha: false });
+      }
+      const outCanvas = this._workCanvas;
+      const outCtx = this._workCtx;
+      if (!outCtx) return;
 
-      // Disable image smoothing on tempCtx for the 1:1 tile composition.
-      // This prevents subpixel anti-aliasing / blurry interpolation at chunk edges!
-      tempCtx.imageSmoothingEnabled = false;
-
-      // Fill Background color
-      tempCtx.fillStyle = this.engine.canvasBg || '#ffffff';
-      tempCtx.fillRect(0, 0, exactW, exactH);
-
-      // Render References if visible
-      if (this.engine.layerSettings[0] && this.engine.layerSettings[0].visible) {
-        tempCtx.save();
-        tempCtx.translate(-cropX, -cropY);
-        this.engine.referenceImages.forEach(ref => {
-          tempCtx.save();
-          tempCtx.translate(ref.x, ref.y);
-          tempCtx.rotate(ref.rotation);
-          tempCtx.scale(ref.scale, ref.scale);
-          if (ref.mirrorX) tempCtx.scale(-1, 1);
-          if (ref.mirrorY) tempCtx.scale(1, -1);
-          tempCtx.globalAlpha = ref.opacity;
-          tempCtx.drawImage(ref.img, -ref.img.width/2, -ref.img.height/2);
-          tempCtx.restore();
-        });
-        tempCtx.restore();
+      if (outCanvas.width !== outW || outCanvas.height !== outH) {
+        outCanvas.width = outW;
+        outCanvas.height = outH;
       }
 
-      // Render Active paint chunks
+      outCtx.imageSmoothingEnabled = this.qualityScale < 1.0;
+      if (outCtx.imageSmoothingEnabled) {
+        outCtx.imageSmoothingQuality = 'low';
+      }
+
+      // Fill background color
+      outCtx.fillStyle = this.engine.canvasBg || '#ffffff';
+      outCtx.fillRect(0, 0, outW, outH);
+
+      // Render references if visible
+      if (this.engine.layerSettings[0] && this.engine.layerSettings[0].visible && this.engine.referenceImages.length > 0) {
+        outCtx.save();
+        outCtx.scale(scaleX, scaleY);
+        outCtx.translate(-cropX, -cropY);
+        for (let rIdx = 0; rIdx < this.engine.referenceImages.length; rIdx++) {
+          const ref = this.engine.referenceImages[rIdx];
+          if (!ref || !ref.img) continue;
+          outCtx.save();
+          outCtx.translate(ref.x, ref.y);
+          outCtx.rotate(ref.rotation);
+          outCtx.scale(ref.scale, ref.scale);
+          if (ref.mirrorX) outCtx.scale(-1, 1);
+          if (ref.mirrorY) outCtx.scale(1, -1);
+          outCtx.globalAlpha = ref.opacity;
+          outCtx.drawImage(ref.img, -ref.img.width / 2, -ref.img.height / 2);
+          outCtx.restore();
+        }
+        outCtx.restore();
+      }
+
+      // Render non-empty visible chunks directly at output scale with shared integer seams
+      const isStatic = this.engine.isStatic;
+      const chunkSize = this.engine.chunkSize;
       this.engine.chunks.forEach(chunk => {
-        const lx = Math.round(this.engine.isStatic ? -this.engine.staticWidth / 2 : chunk.cx * this.engine.chunkSize);
-        const ly = Math.round(this.engine.isStatic ? -this.engine.staticHeight / 2 : chunk.cy * this.engine.chunkSize);
-        const chunkW = Math.round(this.engine.isStatic ? this.engine.staticWidth : this.engine.chunkSize);
-        const chunkH = Math.round(this.engine.isStatic ? this.engine.staticHeight : this.engine.chunkSize);
+        const lx = Math.round(isStatic ? -this.engine.staticWidth / 2 : chunk.cx * chunkSize);
+        const ly = Math.round(isStatic ? -this.engine.staticHeight / 2 : chunk.cy * chunkSize);
+        const chunkW = Math.round(isStatic ? this.engine.staticWidth : chunkSize);
+        const chunkH = Math.round(isStatic ? this.engine.staticHeight : chunkSize);
 
         if (lx < (cropX + cropW) && lx + chunkW > cropX &&
             ly < (cropY + cropH) && ly + chunkH > cropY) {
-          
+          const destX = Math.round((lx - cropX) * scaleX);
+          const destY = Math.round((ly - cropY) * scaleY);
+          const destW = Math.round((lx + chunkW - cropX) * scaleX) - destX;
+          const destH = Math.round((ly + chunkH - cropY) * scaleY) - destY;
+
           for (let i = 1; i < LAYERS_COUNT; i++) {
-            if (this.engine.layerSettings[i] && !this.engine.layerSettings[i].visible) {
-              continue;
-            }
-            // Align destination coordinates perfectly on integer pixels to avoid boundary seams/lines
-            const destX = lx - cropX;
-            const destY = ly - cropY;
-            tempCtx.drawImage(chunk.canvases[i], destX, destY, chunkW, chunkH);
+            if (this.engine.layerSettings[i] && !this.engine.layerSettings[i].visible) continue;
+            if (chunk.isEmpty && chunk.isEmpty[i]) continue;
+            const layerCanvas = chunk.canvases[i];
+            if (!layerCanvas || layerCanvas.width === 0 || layerCanvas.height === 0) continue;
+            outCtx.drawImage(layerCanvas, destX, destY, destW, destH);
           }
         }
       });
 
-      // Downscale for saving storage & processing memory fast
-      const outW = Math.max(1, Math.round(exactW * this.qualityScale));
-      const outH = Math.max(1, Math.round(exactH * this.qualityScale));
+      // Buffer lightweight scaled canvas snapshot in RAM (~0.3ms, zero JPEG/IndexedDB work mid-hatching)
+      const snapCanvas = document.createElement('canvas');
+      snapCanvas.width = outW;
+      snapCanvas.height = outH;
+      const snapCtx = snapCanvas.getContext('2d', { alpha: false });
+      if (!snapCtx) return;
+      snapCtx.drawImage(outCanvas, 0, 0);
 
-      const outCanvas = document.createElement('canvas');
-      outCanvas.width = outW;
-      outCanvas.height = outH;
-      const outCtx = outCanvas.getContext('2d');
-      if (!outCtx) return;
-
-      outCtx.imageSmoothingEnabled = true;
-      outCtx.imageSmoothingQuality = 'medium';
-      outCtx.drawImage(tempCanvas, 0, 0, exactW, exactH, 0, 0, outW, outH);
-
-      // Compress to high performance low-weight JPEG asynchronously
-      const dataUrl = await canvasToDataURLAsync(outCanvas, 'image/jpeg', 0.8);
-      
-      // Append to timeline frames list
-      this.frames.push(dataUrl);
+      this.frames.push({ __buffered: true, canvas: snapCanvas });
       this.currentFrameIdx = this.frames.length - 1;
+      this._hasUnsavedChanges = true;
 
-      this.updateUI();
-      this.asyncSave();
+      // Skip DOM & image updates while panel is closed; flush/encode lazily when idle or saving
+      if (this._isPanelVisible()) {
+        this.updateUI();
+      }
+      if (this.frames.length >= this._maxBufferedRawFrames && !this._isEncodingBuffer) {
+        this._scheduleIdleEncode(350);
+      } else {
+        this._scheduleIdleEncode(700);
+      }
     } catch (e) {
       console.error('Timelapse Frame Capture Failed:', e);
     }
@@ -557,8 +713,10 @@ export class TimelapseRecorder {
   deleteCurrentFrame() {
     if (this.frames.length === 0) return;
     if (this.isPlaying) this.togglePlayback();
-    this.frames.splice(this.currentFrameIdx, 1);
+    const removed = this.frames.splice(this.currentFrameIdx, 1);
+    if (removed && removed[0]) this._disposeFrameItem(removed[0]);
     this.currentFrameIdx = Math.max(0, Math.min(this.currentFrameIdx, this.frames.length - 1));
+    this._hasUnsavedChanges = true;
     this.updateUI();
     this.asyncSave();
   }
@@ -566,8 +724,12 @@ export class TimelapseRecorder {
   trimTimelineStart() {
     if (this.frames.length === 0) return;
     if (this.isPlaying) this.togglePlayback();
+    for (let i = 0; i < this.currentFrameIdx; i++) {
+      this._disposeFrameItem(this.frames[i]);
+    }
     this.frames = this.frames.slice(this.currentFrameIdx);
     this.currentFrameIdx = 0;
+    this._hasUnsavedChanges = true;
     this.updateUI();
     this.asyncSave();
   }
@@ -575,8 +737,12 @@ export class TimelapseRecorder {
   trimTimelineEnd() {
     if (this.frames.length === 0) return;
     if (this.isPlaying) this.togglePlayback();
+    for (let i = this.currentFrameIdx + 1; i < this.frames.length; i++) {
+      this._disposeFrameItem(this.frames[i]);
+    }
     this.frames = this.frames.slice(0, this.currentFrameIdx + 1);
     this.currentFrameIdx = this.frames.length - 1;
+    this._hasUnsavedChanges = true;
     this.updateUI();
     this.asyncSave();
   }
@@ -588,7 +754,10 @@ export class TimelapseRecorder {
     }
   }
 
-  togglePlayback() {
+  async togglePlayback() {
+    if (!this.isPlaying) {
+      await this.flushBufferedFrames();
+    }
     this.isPlaying = !this.isPlaying;
     const btn = document.getElementById('btn-player-play');
     if (!btn) return;
@@ -621,11 +790,13 @@ export class TimelapseRecorder {
     }
   }
 
-  downloadSequence() {
+  async downloadSequence() {
     if (this.frames.length === 0) {
       alert('There are no frames captured yet. Start drawing to snap elements!');
       return;
     }
+
+    await this.flushBufferedFrames();
 
     try {
       const payload = {
@@ -656,8 +827,10 @@ export class TimelapseRecorder {
       return;
     }
 
+    await this.flushBufferedFrames();
+
     if (this.isPlaying) {
-      this.togglePlayback();
+      await this.togglePlayback();
     }
 
     const btn = document.getElementById('btn-rec-export-video');
@@ -833,7 +1006,7 @@ export class TimelapseRecorder {
 
     if (this.frames.length > 0) {
       if (previewScreen) {
-        previewScreen.src = this.frames[this.currentFrameIdx];
+        previewScreen.src = this._getFramePreviewSrc(this.frames[this.currentFrameIdx]);
         previewScreen.style.display = 'block';
       }
       if (previewEmpty) previewEmpty.style.display = 'none';
@@ -862,8 +1035,10 @@ export class TimelapseRecorder {
         if (panel) {
           const wasHidden = panel.classList.toggle('hidden');
           if (!wasHidden) {
-            // Reposition selection bounds or show selection helper
             this.updateUI();
+            this.flushBufferedFrames().then(() => {
+              if (this._isPanelVisible()) this.updateUI();
+            });
           } else {
             this.toggleSelectionBox(false);
           }
@@ -1042,9 +1217,23 @@ export class TimelapseRecorder {
   }
 
   async onProjectSwitched(explicitProjectId = null) {
+    this._clearEncodeTimer();
+    this._disposeAllBufferedFrames();
+    this._hasUnsavedChanges = false;
+
     // 1. If currently playing, stop it cleanly
     if (this.isPlaying) {
-      this.togglePlayback();
+      this.isPlaying = false;
+      if (this.playbackIntervalId) {
+        clearInterval(this.playbackIntervalId);
+        this.playbackIntervalId = null;
+      }
+      const playBtn = document.getElementById('btn-player-play');
+      if (playBtn) {
+        playBtn.innerText = '▶ PLAY';
+        playBtn.style.background = '#333';
+        playBtn.style.color = '#fff';
+      }
     }
     
     // Purge active preview screen image to prevent RAM/GPU leaks

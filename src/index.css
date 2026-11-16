@@ -810,6 +810,10 @@ button, input, select {
     pointer-events: auto;
 }
 
+input[type="range"] {
+    touch-action: none !important;
+}
+
 /* ZOOM & STATUS */
 .status-indicator {
     font-size: 8px;

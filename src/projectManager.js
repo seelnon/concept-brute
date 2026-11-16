@@ -1178,7 +1178,8 @@ export async function saveProject(app, force = false, targetProjectId = null) {
         app.engine._endStroke();
     }
 
-    const isDirty = (app.engine.dirtyChunks && app.engine.dirtyChunks.size > 0) || app.engine.refsDirty;
+    const hasPendingTimelapse = !!(app.recorder && typeof app.recorder.hasPendingSave === 'function' && app.recorder.hasPendingSave());
+    const isDirty = (app.engine.dirtyChunks && app.engine.dirtyChunks.size > 0) || app.engine.refsDirty || hasPendingTimelapse;
     if (!isDirty && !force) {
         app._status('SAVED');
         app._showSaved();
@@ -1196,7 +1197,9 @@ export async function saveProject(app, force = false, targetProjectId = null) {
 
     try {
         if (app.recorder && typeof app.recorder.saveCurrentSession === 'function') {
-            await app.recorder.saveCurrentSession(projId);
+            if (force || hasPendingTimelapse) {
+                await app.recorder.saveCurrentSession(projId);
+            }
         }
 
         if (app.engine && app.engine.saveHistoryStackToStorage) {

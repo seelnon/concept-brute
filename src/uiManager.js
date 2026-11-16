@@ -15,9 +15,9 @@ export function setupUI(app) {
                 window.focus();
             }
         }
-        if (targetEl && targetEl.closest('button, [role="button"], input[type="range"]')) {
+        if (targetEl && targetEl.closest('button, [role="button"]')) {
             setTimeout(() => {
-                if (document.activeElement && document.activeElement !== document.body && document.activeElement.tagName !== 'SELECT') {
+                if (document.activeElement && document.activeElement !== document.body && document.activeElement.tagName !== 'SELECT' && document.activeElement.type !== 'range') {
                     document.activeElement.blur();
                 }
             }, 50);
@@ -627,19 +627,23 @@ export function setupUI(app) {
 
     if (autosaveSlider) {
         autosaveSlider.oninput = (e) => {
-            const v = parseInt(e.target.value);
+            const parsed = Number(e.target.value);
+            const v = Number.isFinite(parsed) ? Math.max(0, Math.min(100, Math.round(parsed))) : 0;
             // Exponential mapping: 4 * pow(300/4, v/100)
             const seconds = Math.round(4 * Math.pow(300 / 4, v / 100));
             app.autosaveDelay = seconds * 1000;
-            autosaveVal.innerText = `${seconds}s`;
+            if (autosaveVal) autosaveVal.innerText = `${seconds}s`;
+            try { localStorage.setItem('global_autosaveDelaySlider', String(v)); } catch (_) {}
             app.storage.saveSetting('autosaveDelaySlider', v);
         };
     }
 
     if (autosaveEnable) {
         autosaveEnable.onchange = (e) => {
-            app.autosaveEnabled = e.target.checked;
-            app.storage.saveSetting('autosaveEnabled', e.target.checked);
+            const checked = Boolean(e.target.checked);
+            app.autosaveEnabled = checked;
+            try { localStorage.setItem('global_autosaveEnabled', String(checked)); } catch (_) {}
+            app.storage.saveSetting('autosaveEnabled', checked);
             if (!app.autosaveEnabled) app._clearSaveTimer();
         };
     }

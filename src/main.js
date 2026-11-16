@@ -272,16 +272,15 @@ class App {
     this.recorder = new TimelapseRecorder(this);
     this.recorder.initEventListeners();
 
-    // Global UI focus prevention
+    // Global UI focus cleanup ONLY after interaction completes (never mid-drag on pointerdown)
     document.addEventListener('pointerup', (e) => {
-        const btn = (e.target instanceof Element) ? e.target.closest('button') : null;
-        if (btn) {
-            // Delay slightly to allow the click/action to complete if needed
+        const ctrl = (e.target instanceof Element) ? e.target.closest('button, [role="button"], input[type="range"]') : null;
+        if (ctrl) {
             setTimeout(() => {
-                if (document.activeElement instanceof HTMLElement) {
+                if (document.activeElement === ctrl && document.activeElement instanceof HTMLElement) {
                     document.activeElement.blur();
                 }
-            }, 50);
+            }, 0);
         }
     }, true);
   }
@@ -454,6 +453,7 @@ class App {
   _triggerAutoSave() {
     this._clearSaveTimer();
     if (this.autosaveEnabled) {
+        const delayMs = Number.isFinite(this.autosaveDelay) ? Math.max(1000, this.autosaveDelay) : 4000;
         this.saveTimeout = setTimeout(() => {
             const isBusy = this.isCapturingTip || 
                            (this.engine && (this.engine.isDrawing || this.engine.isPanning || this.engine.isPanningMode));
@@ -463,7 +463,7 @@ class App {
             } else {
                 this.save();
             }
-        }, this.autosaveDelay);
+        }, delayMs);
     }
   }
 
@@ -563,22 +563,55 @@ class App {
             settings = await this.storage.loadSettingsBatch(keys, pid);
         }
 
-        // Load autosave settings
-        const savedAutosaveSlider = settings['autosaveDelaySlider'];
-        const savedAutosaveEnabled = settings['autosaveEnabled'];
-        if (savedAutosaveSlider !== null) {
-            const sliderEl = document.getElementById('settings-autosave');
-            if (sliderEl) sliderEl.value = savedAutosaveSlider;
-            const seconds = Math.round(4 * Math.pow(300 / 4, savedAutosaveSlider / 100));
-            this.autosaveDelay = seconds * 1000;
-            const valEl = document.getElementById('autosave-val');
-            if (valEl) valEl.innerText = `${seconds}s`;
+        // Load autosave settings safely (guard undefined, null, NaN across new/transferred projects)
+        const rawSlider = settings['autosaveDelaySlider'];
+        const rawEnabled = settings['autosaveEnabled'];
+
+        let sliderVal = null;
+        if (rawSlider !== null && rawSlider !== undefined && rawSlider !== '') {
+            const parsed = Number(rawSlider);
+            if (Number.isFinite(parsed)) {
+                sliderVal = Math.max(0, Math.min(100, parsed));
+            }
         }
-        if (savedAutosaveEnabled !== null) {
-            this.autosaveEnabled = savedAutosaveEnabled;
-            const enableEl = document.getElementById('settings-autosave-enable');
-            if (enableEl) enableEl.checked = savedAutosaveEnabled;
+        if (sliderVal === null) {
+            try {
+                const globalRaw = localStorage.getItem('global_autosaveDelaySlider');
+                if (globalRaw !== null && globalRaw !== '') {
+                    const parsedGlobal = Number(globalRaw);
+                    if (Number.isFinite(parsedGlobal)) {
+                        sliderVal = Math.max(0, Math.min(100, parsedGlobal));
+                    }
+                }
+            } catch (_) {}
         }
+        if (sliderVal === null) sliderVal = 0;
+
+        const seconds = Math.round(4 * Math.pow(300 / 4, sliderVal / 100));
+        this.autosaveDelay = (Number.isFinite(seconds) ? seconds : 4) * 1000;
+        const sliderEl = document.getElementById('settings-autosave');
+        if (sliderEl) sliderEl.value = sliderVal;
+        const valEl = document.getElementById('autosave-val');
+        if (valEl) valEl.innerText = `${Number.isFinite(seconds) ? seconds : 4}s`;
+
+        let enabledVal = null;
+        if (typeof rawEnabled === 'boolean') {
+            enabledVal = rawEnabled;
+        } else if (rawEnabled === 'true' || rawEnabled === 'false') {
+            enabledVal = (rawEnabled === 'true');
+        } else {
+            try {
+                const globalEn = localStorage.getItem('global_autosaveEnabled');
+                if (globalEn === 'true' || globalEn === 'false') {
+                    enabledVal = (globalEn === 'true');
+                }
+            } catch (_) {}
+        }
+        if (enabledVal === null) enabledVal = true;
+
+        this.autosaveEnabled = enabledVal;
+        const enableEl = document.getElementById('settings-autosave-enable');
+        if (enableEl) enableEl.checked = enabledVal;
 
         const savedPalette = settings['palette'];
         if (savedPalette) this.palette.baseColors = savedPalette;
