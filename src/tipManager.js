@@ -214,7 +214,7 @@ export class TipManager {
         
         if (type === 'triangle') {
             try {
-                const resp = await fetch('./_main_brushtip.png');
+                const resp = await fetch('./main_brushtip.png');
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                 const blob = await resp.blob();
                 const objUrl = URL.createObjectURL(blob);
@@ -234,7 +234,7 @@ export class TipManager {
                     URL.revokeObjectURL(objUrl);
                 }
             } catch (e) {
-                console.warn('Could not load ./_main_brushtip.png, falling back to shape:', e);
+                console.warn('Could not load ./main_brushtip.png, falling back to shape:', e);
                 canvas = this._createShape(type);
             }
         } else {
