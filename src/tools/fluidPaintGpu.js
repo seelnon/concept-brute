@@ -1024,6 +1024,9 @@ export class GpuFluidSolver {
         const id = `${cx},${cy}`;
         this.touchedChunks.set(id, { cx, cy, chunk });
 
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, this.workLit.tex);
+
         gl.bindFramebuffer(gl.FRAMEBUFFER, this.chunkBlitFbo);
         gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, chunk.gpuTextures[layer], 0);
         gl.viewport(0, 0, texW, texH);

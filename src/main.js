@@ -99,12 +99,12 @@ class App {
             wireDensity: 30,
             wireRange: 4.0,
             wireMinDist: 0.5,
-            airWetness: 80,
-            airStreamFlow: 65,
-            airBloom: 60,
-            airEdge: 50,
-            airGranulation: 25,
-            airTipPour: 25,
+            airWetness: 100,
+            airStreamFlow: 100,
+            airBloom: 50,
+            airEdge: 30,
+            airGranulation: 30,
+            airTipPour: 100,
             airFollowStroke: false,
             airTipAngle: 0,
             airTipHardness: 55,
@@ -113,17 +113,23 @@ class App {
             spacing: 0.05,
             pressureEnabled: true,
             pressureInfluence: 1.0,
+            pressureOpacityInfluence: 1.0,
+            pressureSizeInfluence: 1.0,
             jitterSize: 0,
             jitterAngle: 0,
             jitterPos: 0,
-            jitterHue: 0
+            jitterHue: 0,
+            _defaultsCalibratedV3: true,
+            _defaultsCalibratedV4: true
         };
     });
     // Set some defaults
     this.brushSettings[TOOLS.ERASER].opacity = 1.0;
-    this.brushSettings[TOOLS.SMUDGE].opacity = 0.5;
-    this.brushSettings[TOOLS.SMUDGE].flow = 0.5;
+    this.brushSettings[TOOLS.SMUDGE].opacity = 1.0;
+    this.brushSettings[TOOLS.SMUDGE].flow = 1.0;
+    this.brushSettings[TOOLS.SMUDGE].pressureOpacityInfluence = 0.0;
     this.brushSettings[TOOLS.WIREFRAME].size = 20;
+    this.brushSettings[TOOLS.WIREFRAME].pressureOpacityInfluence = 0.0;
     this.brushSettings[TOOLS.LIQUIFY].size = 85;
     this.brushSettings[TOOLS.LIQUIFY].flow = 0.40; // 40% strength is a great sweet spot!
     this.brushSettings[TOOLS.LIQUIFY].falloff = 0.50; // default 50% falloff
@@ -131,16 +137,17 @@ class App {
     
     // Fluid default settings
     this.brushSettings[TOOLS.FLUID].size = 50;
-    this.brushSettings[TOOLS.FLUID].flow = 0.70;
+    this.brushSettings[TOOLS.FLUID].opacity = 1.0;
+    this.brushSettings[TOOLS.FLUID].flow = 1.0;
     this.brushSettings[TOOLS.FLUID].fluidity = 80;
-    this.brushSettings[TOOLS.FLUID].bristles = 50;
+    this.brushSettings[TOOLS.FLUID].bristles = 10;
     this.brushSettings[TOOLS.FLUID].fluidFlow = 100;
-    this.brushSettings[TOOLS.FLUID].fluidVortex = 55;
-    this.brushSettings[TOOLS.FLUID].fluidTurb = 40;
-    this.brushSettings[TOOLS.FLUID].fluidRetention = 35;
-    this.brushSettings[TOOLS.FLUID].fluidPickup = 45;
-    this.brushSettings[TOOLS.FLUID].fluidDepth = 75;
-    this.brushSettings[TOOLS.FLUID].fluidGloss = 45;
+    this.brushSettings[TOOLS.FLUID].fluidVortex = 8;
+    this.brushSettings[TOOLS.FLUID].fluidTurb = 8;
+    this.brushSettings[TOOLS.FLUID].fluidRetention = 80;
+    this.brushSettings[TOOLS.FLUID].fluidPickup = 80;
+    this.brushSettings[TOOLS.FLUID].fluidDepth = 30;
+    this.brushSettings[TOOLS.FLUID].fluidGloss = 100;
     this.brushSettings[TOOLS.FLUID].fluidShading = true;
     this.brushSettings[TOOLS.FLUID].fluidFollowStroke = false;
     this.brushSettings[TOOLS.FLUID].fluidTipAngle = 0;
@@ -153,12 +160,12 @@ class App {
     this.brushSettings[TOOLS.AIR].size = 70;
     this.brushSettings[TOOLS.AIR].opacity = 0.55;
     this.brushSettings[TOOLS.AIR].flow = 0.70;
-    this.brushSettings[TOOLS.AIR].airWetness = 80;
-    this.brushSettings[TOOLS.AIR].airStreamFlow = 65;
-    this.brushSettings[TOOLS.AIR].airBloom = 60;
-    this.brushSettings[TOOLS.AIR].airEdge = 50;
-    this.brushSettings[TOOLS.AIR].airGranulation = 25;
-    this.brushSettings[TOOLS.AIR].airTipPour = 25;
+    this.brushSettings[TOOLS.AIR].airWetness = 100;
+    this.brushSettings[TOOLS.AIR].airStreamFlow = 100;
+    this.brushSettings[TOOLS.AIR].airBloom = 50;
+    this.brushSettings[TOOLS.AIR].airEdge = 30;
+    this.brushSettings[TOOLS.AIR].airGranulation = 30;
+    this.brushSettings[TOOLS.AIR].airTipPour = 100;
     this.brushSettings[TOOLS.AIR].airFollowStroke = false;
     this.brushSettings[TOOLS.AIR].airTipAngle = 0;
     this.brushSettings[TOOLS.AIR].airTipHardness = 55;
@@ -208,7 +215,7 @@ class App {
                 // Spacing, Pressure, Jitter
                 this.engine.brush.spacing = tipSettings.spacing ?? 0.05;
                 this.engine.brush.pressureEnabled = tipSettings.pressureEnabled ?? true;
-                this.engine.brush.pressureOpacityInfluence = tipSettings.pressureOpacityInfluence ?? 1.0;
+                this.engine.brush.pressureOpacityInfluence = tipSettings.pressureOpacityInfluence ?? ((tool === TOOLS.SMUDGE || tool === TOOLS.WIREFRAME) ? 0.0 : 1.0);
                 this.engine.brush.pressureSizeInfluence = tipSettings.pressureSizeInfluence ?? 1.0;
                 this.engine.brush.jitterSize = (tipSettings.jitterSize ?? 0) / 100;
                 this.engine.brush.jitterAngle = ((tipSettings.jitterAngle ?? 0) * Math.PI) / 180;
@@ -239,6 +246,9 @@ class App {
             }
         }
 
+        if (this.engine) {
+            this.engine._updateBrushCursor();
+        }
         this._updateBrushSettingsUI(tool);
         if (!skipStorage) {
             this._saveBrushSettings();
@@ -752,6 +762,56 @@ class App {
                         }
                         migrated._smudgeCalibratedV2 = true;
                     }
+                    if (!migrated._defaultsCalibratedV3) {
+                        const patchToolDefaults = (obj) => {
+                            if (!obj) return;
+                            if (tool === TOOLS.SMUDGE) {
+                                obj.opacity = 1.0;
+                                obj.flow = 1.0;
+                                obj.pressureOpacityInfluence = 0.0;
+                            } else if (tool === TOOLS.WIREFRAME) {
+                                obj.pressureOpacityInfluence = 0.0;
+                            } else if (tool === TOOLS.FLUID) {
+                                obj.opacity = 1.0;
+                                obj.flow = 1.0;
+                                obj.fluidity = 80;
+                                obj.bristles = 10;
+                                obj.fluidFlow = 100;
+                                obj.fluidVortex = 8;
+                                obj.fluidTurb = 8;
+                                obj.fluidRetention = 80;
+                                obj.fluidPickup = 80;
+                                obj.fluidDepth = 30;
+                                obj.fluidGloss = 100;
+                            } else if (tool === TOOLS.AIR) {
+                                obj.airWetness = 50;
+                                obj.airStreamFlow = 50;
+                                obj.airBloom = 50;
+                                obj.airEdge = 30;
+                                obj.airGranulation = 30;
+                                obj.airTipPour = 100;
+                            }
+                        };
+                        patchToolDefaults(migrated);
+                        if (migrated.tips) {
+                            Object.keys(migrated.tips).forEach(tid => patchToolDefaults(migrated.tips[tid]));
+                        }
+                        migrated._defaultsCalibratedV3 = true;
+                    }
+                    if (!migrated._defaultsCalibratedV4) {
+                        if (tool === TOOLS.AIR) {
+                            const patchAirV4 = (obj) => {
+                                if (!obj) return;
+                                obj.airWetness = 100;
+                                obj.airStreamFlow = 100;
+                            };
+                            patchAirV4(migrated);
+                            if (migrated.tips) {
+                                Object.keys(migrated.tips).forEach(tid => patchAirV4(migrated.tips[tid]));
+                            }
+                        }
+                        migrated._defaultsCalibratedV4 = true;
+                    }
                     this.brushSettings[tool] = { ...this.brushSettings[tool], ...migrated };
                 }
             });
@@ -767,14 +827,14 @@ class App {
                 return Number.isFinite(n) ? n : def;
             };
             fluidCfg.fluidity = readLegacyNum('fluid_setting_slider-fluidity', fluidCfg.fluidity ?? 80);
-            fluidCfg.bristles = readLegacyNum('fluid_setting_slider-bristles', fluidCfg.bristles ?? 50);
+            fluidCfg.bristles = readLegacyNum('fluid_setting_slider-bristles', fluidCfg.bristles ?? 10);
             fluidCfg.fluidFlow = readLegacyNum('fluid_setting_slider-fluid-flow', fluidCfg.fluidFlow ?? 100);
-            fluidCfg.fluidVortex = readLegacyNum('fluid_setting_slider-fluid-vortex', fluidCfg.fluidVortex ?? 55);
-            fluidCfg.fluidTurb = readLegacyNum('fluid_setting_slider-fluid-turb', fluidCfg.fluidTurb ?? 40);
-            fluidCfg.fluidRetention = readLegacyNum('fluid_setting_slider-fluid-retention', fluidCfg.fluidRetention ?? 35);
-            fluidCfg.fluidPickup = readLegacyNum('fluid_setting_slider-fluid-pickup', fluidCfg.fluidPickup ?? 45);
-            fluidCfg.fluidDepth = readLegacyNum('fluid_setting_slider-fluid-depth', fluidCfg.fluidDepth ?? 75);
-            fluidCfg.fluidGloss = readLegacyNum('fluid_setting_slider-fluid-gloss', fluidCfg.fluidGloss ?? 45);
+            fluidCfg.fluidVortex = readLegacyNum('fluid_setting_slider-fluid-vortex', fluidCfg.fluidVortex ?? 8);
+            fluidCfg.fluidTurb = readLegacyNum('fluid_setting_slider-fluid-turb', fluidCfg.fluidTurb ?? 8);
+            fluidCfg.fluidRetention = readLegacyNum('fluid_setting_slider-fluid-retention', fluidCfg.fluidRetention ?? 80);
+            fluidCfg.fluidPickup = readLegacyNum('fluid_setting_slider-fluid-pickup', fluidCfg.fluidPickup ?? 80);
+            fluidCfg.fluidDepth = readLegacyNum('fluid_setting_slider-fluid-depth', fluidCfg.fluidDepth ?? 30);
+            fluidCfg.fluidGloss = readLegacyNum('fluid_setting_slider-fluid-gloss', fluidCfg.fluidGloss ?? 100);
             const rawShade = localStorage.getItem('fluid_setting_chk-surface-shading');
             if (rawShade !== null) fluidCfg.fluidShading = (rawShade === 'true');
         }
@@ -897,27 +957,13 @@ class App {
         case 'g':
           this.setTool(TOOLS.LIQUIFY);
           break;
+        case '7':
         case 'f':
           this.setTool(TOOLS.FLUID);
           break;
         case '8':
         case 'a':
           this.setTool(TOOLS.AIR);
-          break;
-        case '7':
-          this.setTool(TOOLS.LASSO);
-          if (this.engine.floatingSelection) {
-              this.engine.transformMode = 'deform';
-              this.engine._updateSelectionPreview();
-              this._status('PUPPET DEFORM ACTIVE');
-          } else if (this.engine.activeSelectionPath) {
-              this.engine.startTransform();
-              this.engine.transformMode = 'deform';
-              this.engine._updateSelectionPreview();
-              this._status('PUPPET DEFORM ACTIVE');
-          } else {
-              this._status('LASSO AN AREA FIRST THEN DEFORM');
-          }
           break;
         case 'i':
           if (this.engine.activeLayer === 0) {
@@ -1568,13 +1614,13 @@ class App {
             }
         };
 
-        syncAirUi('adv-air-wetness', 'adv-air-wetness-val', 'airWetness', 80);
-        syncAirUi('adv-air-stream', 'adv-air-stream-val', 'airStreamFlow', 65);
-        syncAirUi('adv-air-bloom', 'adv-air-bloom-val', 'airBloom', 60);
-        syncAirUi('adv-air-edge', 'adv-air-edge-val', 'airEdge', 50);
-        syncAirUi('adv-air-granulation', 'adv-air-granulation-val', 'airGranulation', 25);
+        syncAirUi('adv-air-wetness', 'adv-air-wetness-val', 'airWetness', 100);
+        syncAirUi('adv-air-stream', 'adv-air-stream-val', 'airStreamFlow', 100);
+        syncAirUi('adv-air-bloom', 'adv-air-bloom-val', 'airBloom', 50);
+        syncAirUi('adv-air-edge', 'adv-air-edge-val', 'airEdge', 30);
+        syncAirUi('adv-air-granulation', 'adv-air-granulation-val', 'airGranulation', 30);
 
-        const airPourVal = getVal('airTipPour', 25);
+        const airPourVal = getVal('airTipPour', 100);
         const airPourAdv = document.getElementById('adv-air-tip-pour');
         const airPourAdvLbl = document.getElementById('adv-air-tip-pour-val');
         const airPourPanel = document.getElementById('slider-air-tip-pour');
@@ -1618,7 +1664,8 @@ class App {
 
         const pressureOpacityInf = document.getElementById('settings-pressure-opacity-influence');
         if (pressureOpacityInf) {
-            const opVal = getVal('pressureOpacityInfluence', 1.0);
+            const defOpInf = (tool === TOOLS.SMUDGE || tool === TOOLS.WIREFRAME) ? 0.0 : 1.0;
+            const opVal = getVal('pressureOpacityInfluence', defOpInf);
             pressureOpacityInf.value = opVal;
             const valEl = document.getElementById('pressure-opacity-val');
             if (valEl) valEl.innerText = opVal.toFixed(1);
@@ -1697,7 +1744,7 @@ class App {
 
         const brsEl = document.getElementById('slider-bristles');
         if (brsEl) {
-            const brsValue = getVal('bristles', 50);
+            const brsValue = getVal('bristles', 10);
             brsEl.value = brsValue;
             const brsValDisplay = document.getElementById('val-bristles');
             if (brsValDisplay) brsValDisplay.innerText = Math.round(brsValue);
@@ -1715,12 +1762,12 @@ class App {
         };
 
         syncFluidUiSlider('slider-fluid-flow', 'val-fluid-flow', 'fluidFlow', 100);
-        syncFluidUiSlider('slider-fluid-vortex', 'val-fluid-vortex', 'fluidVortex', 55);
-        syncFluidUiSlider('slider-fluid-turb', 'val-fluid-turb', 'fluidTurb', 40);
-        syncFluidUiSlider('slider-fluid-retention', 'val-fluid-retention', 'fluidRetention', 35);
-        syncFluidUiSlider('slider-fluid-pickup', 'val-fluid-pickup', 'fluidPickup', 45);
-        syncFluidUiSlider('slider-fluid-depth', 'val-fluid-depth', 'fluidDepth', 75);
-        syncFluidUiSlider('slider-fluid-gloss', 'val-fluid-gloss', 'fluidGloss', 45);
+        syncFluidUiSlider('slider-fluid-vortex', 'val-fluid-vortex', 'fluidVortex', 8);
+        syncFluidUiSlider('slider-fluid-turb', 'val-fluid-turb', 'fluidTurb', 8);
+        syncFluidUiSlider('slider-fluid-retention', 'val-fluid-retention', 'fluidRetention', 80);
+        syncFluidUiSlider('slider-fluid-pickup', 'val-fluid-pickup', 'fluidPickup', 80);
+        syncFluidUiSlider('slider-fluid-depth', 'val-fluid-depth', 'fluidDepth', 30);
+        syncFluidUiSlider('slider-fluid-gloss', 'val-fluid-gloss', 'fluidGloss', 100);
 
         const chkShading = document.getElementById('chk-surface-shading');
         if (chkShading) {
@@ -1809,25 +1856,25 @@ class App {
             jitterAngle: settings.jitterAngle ?? 0,
             jitterPos: settings.jitterPos ?? 0,
             jitterHue: settings.jitterHue ?? 0,
-            airWetness: settings.airWetness ?? 80,
-            airStreamFlow: settings.airStreamFlow ?? 65,
-            airBloom: settings.airBloom ?? 60,
-            airEdge: settings.airEdge ?? 50,
-            airGranulation: settings.airGranulation ?? 25,
-            airTipPour: settings.airTipPour ?? 25,
+            airWetness: settings.airWetness ?? 100,
+            airStreamFlow: settings.airStreamFlow ?? 100,
+            airBloom: settings.airBloom ?? 50,
+            airEdge: settings.airEdge ?? 30,
+            airGranulation: settings.airGranulation ?? 30,
+            airTipPour: settings.airTipPour ?? 100,
             airFollowStroke: settings.airFollowStroke ?? false,
             airTipAngle: settings.airTipAngle ?? 0,
             airTipHardness: settings.airTipHardness ?? 55,
             airPressureFlow: settings.airPressureFlow ?? 35,
             fluidity: settings.fluidity ?? 80,
-            bristles: settings.bristles ?? 50,
+            bristles: settings.bristles ?? 10,
             fluidFlow: settings.fluidFlow ?? 100,
-            fluidVortex: settings.fluidVortex ?? 55,
-            fluidTurb: settings.fluidTurb ?? 40,
-            fluidRetention: settings.fluidRetention ?? 35,
-            fluidPickup: settings.fluidPickup ?? 45,
-            fluidDepth: settings.fluidDepth ?? 75,
-            fluidGloss: settings.fluidGloss ?? 45,
+            fluidVortex: settings.fluidVortex ?? 8,
+            fluidTurb: settings.fluidTurb ?? 8,
+            fluidRetention: settings.fluidRetention ?? 80,
+            fluidPickup: settings.fluidPickup ?? 80,
+            fluidDepth: settings.fluidDepth ?? 30,
+            fluidGloss: settings.fluidGloss ?? 100,
             fluidShading: settings.fluidShading ?? true,
             fluidFollowStroke: settings.fluidFollowStroke ?? false,
             fluidTipAngle: settings.fluidTipAngle ?? 0,
@@ -2134,19 +2181,28 @@ class App {
 
     const settings = this.brushSettings[this.activeTool];
     if (settings) {
-        if (this.activeTool === TOOLS.FLUID) {
+        if (this.activeTool === TOOLS.SMUDGE) {
+            settings.opacity = 1.0;
+            settings.flow = 1.0;
+            settings.pressureOpacityInfluence = 0.0;
+        } else if (this.activeTool === TOOLS.WIREFRAME) {
+            settings.size = 20;
+            settings.opacity = 1.0;
+            settings.flow = 1.0;
+            settings.pressureOpacityInfluence = 0.0;
+        } else if (this.activeTool === TOOLS.FLUID) {
             settings.size = 50;
-            settings.flow = 0.70;
+            settings.flow = 1.0;
             settings.opacity = 1.0;
             settings.fluidity = 80;
-            settings.bristles = 50;
+            settings.bristles = 10;
             settings.fluidFlow = 100;
-            settings.fluidVortex = 55;
-            settings.fluidTurb = 40;
-            settings.fluidRetention = 35;
-            settings.fluidPickup = 45;
-            settings.fluidDepth = 75;
-            settings.fluidGloss = 45;
+            settings.fluidVortex = 8;
+            settings.fluidTurb = 8;
+            settings.fluidRetention = 80;
+            settings.fluidPickup = 80;
+            settings.fluidDepth = 30;
+            settings.fluidGloss = 100;
             settings.fluidShading = true;
             settings.fluidFollowStroke = false;
             settings.fluidTipAngle = 0;
@@ -2158,12 +2214,12 @@ class App {
             settings.size = 70;
             settings.opacity = 0.55;
             settings.flow = 0.70;
-            settings.airWetness = 80;
-            settings.airStreamFlow = 65;
-            settings.airBloom = 60;
-            settings.airEdge = 50;
-            settings.airGranulation = 25;
-            settings.airTipPour = 25;
+            settings.airWetness = 100;
+            settings.airStreamFlow = 100;
+            settings.airBloom = 50;
+            settings.airEdge = 30;
+            settings.airGranulation = 30;
+            settings.airTipPour = 100;
             settings.airFollowStroke = false;
             settings.airTipAngle = 0;
             settings.airTipHardness = 55;

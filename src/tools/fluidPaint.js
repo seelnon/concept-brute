@@ -19,14 +19,14 @@ const TIP_RES = 64;
 // Module-level cached tuning settings (0 DOM lookups during drawing)
 export const fluidSettings = {
   flow: 100,
-  vortex: 55,
-  turb: 40,
-  retention: 35,
-  pickup: 45,
-  depth: 75,
-  gloss: 45,
+  vortex: 8,
+  turb: 8,
+  retention: 80,
+  pickup: 80,
+  depth: 30,
+  gloss: 100,
   fluidity: 80,
-  bristles: 50,
+  bristles: 10,
   shading: true,
   followStroke: false,
   tipAngle: 0,
@@ -39,14 +39,14 @@ export const fluidSettings = {
 export function syncFluidSettingsFromTip(tipSettings) {
   if (!tipSettings) return;
   fluidSettings.flow = tipSettings.fluidFlow ?? 100;
-  fluidSettings.vortex = tipSettings.fluidVortex ?? 55;
-  fluidSettings.turb = tipSettings.fluidTurb ?? 40;
-  fluidSettings.retention = tipSettings.fluidRetention ?? 35;
-  fluidSettings.pickup = tipSettings.fluidPickup ?? 45;
-  fluidSettings.depth = tipSettings.fluidDepth ?? 75;
-  fluidSettings.gloss = tipSettings.fluidGloss ?? 45;
+  fluidSettings.vortex = tipSettings.fluidVortex ?? 8;
+  fluidSettings.turb = tipSettings.fluidTurb ?? 8;
+  fluidSettings.retention = tipSettings.fluidRetention ?? 80;
+  fluidSettings.pickup = tipSettings.fluidPickup ?? 80;
+  fluidSettings.depth = tipSettings.fluidDepth ?? 30;
+  fluidSettings.gloss = tipSettings.fluidGloss ?? 100;
   fluidSettings.fluidity = tipSettings.fluidity ?? 80;
-  fluidSettings.bristles = tipSettings.bristles ?? 50;
+  fluidSettings.bristles = tipSettings.bristles ?? 10;
   fluidSettings.shading = tipSettings.fluidShading !== undefined ? !!tipSettings.fluidShading : true;
   fluidSettings.followStroke = !!tipSettings.fluidFollowStroke;
   fluidSettings.tipAngle = tipSettings.fluidTipAngle ?? 0;
@@ -185,12 +185,12 @@ export function initFluidPaint(app) {
   };
 
   setupSlider('slider-fluid-flow', 'val-fluid-flow', 'flow', 'fluidFlow', 100);
-  setupSlider('slider-fluid-vortex', 'val-fluid-vortex', 'vortex', 'fluidVortex', 55);
-  setupSlider('slider-fluid-turb', 'val-fluid-turb', 'turb', 'fluidTurb', 40);
-  setupSlider('slider-fluid-retention', 'val-fluid-retention', 'retention', 'fluidRetention', 35);
-  setupSlider('slider-fluid-pickup', 'val-fluid-pickup', 'pickup', 'fluidPickup', 45);
-  setupSlider('slider-fluid-depth', 'val-fluid-depth', 'depth', 'fluidDepth', 75);
-  setupSlider('slider-fluid-gloss', 'val-fluid-gloss', 'gloss', 'fluidGloss', 45);
+  setupSlider('slider-fluid-vortex', 'val-fluid-vortex', 'vortex', 'fluidVortex', 8);
+  setupSlider('slider-fluid-turb', 'val-fluid-turb', 'turb', 'fluidTurb', 8);
+  setupSlider('slider-fluid-retention', 'val-fluid-retention', 'retention', 'fluidRetention', 80);
+  setupSlider('slider-fluid-pickup', 'val-fluid-pickup', 'pickup', 'fluidPickup', 80);
+  setupSlider('slider-fluid-depth', 'val-fluid-depth', 'depth', 'fluidDepth', 30);
+  setupSlider('slider-fluid-gloss', 'val-fluid-gloss', 'gloss', 'fluidGloss', 100);
 
   setupCheckbox('chk-surface-shading', 'shading', 'fluidShading', true);
 }

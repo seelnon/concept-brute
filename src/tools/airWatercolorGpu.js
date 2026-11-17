@@ -92,22 +92,32 @@ float valueNoise(vec2 p) {
 }
 
 float samplePaperTooth(vec2 wp) {
-  float nCoarse = valueNoise(wp * 0.16);
-  float nMed = valueNoise(wp * 0.38 + vec2(17.3, 9.1));
-  float nFine = valueNoise(wp * 0.78 + vec2(4.7, 23.5));
-  float fibers = sin(wp.x * 0.24 + cos(wp.y * 0.21) * 1.1) * cos(wp.y * 0.27 - sin(wp.x * 0.19) * 1.1);
-  return clamp(0.10 + 0.34 * nCoarse + 0.28 * nMed + 0.18 * nFine + 0.10 * (0.5 + 0.5 * fibers), 0.0, 1.0);
+  // Golden-angle rotated 2-octave domain-warped value noise (zero diamond/grid artifacts, faster than trig fibers)
+  vec2 p1 = vec2(wp.x * 0.80 - wp.y * 0.60, wp.x * 0.60 + wp.y * 0.80) * 0.11;
+  float nCoarse = valueNoise(p1);
+  vec2 p2 = vec2(wp.x * 0.39 + wp.y * 0.92, -wp.x * 0.92 + wp.y * 0.39) * 0.31;
+  float nFine = valueNoise(p2 + vec2(nCoarse * 1.35 + 17.3, nCoarse * 0.95 + 9.1));
+  return clamp(0.12 + 0.54 * nCoarse + 0.34 * nFine, 0.0, 1.0);
 }
 
 vec2 sampleCurl(vec2 wp, float t, float freq) {
+  // 3 non-orthogonal rotated & mutually warped wave directions (~22 deg, ~123 deg, ~251 deg) — no 45-deg rhombi
   vec2 p = wp * freq;
-  float p1 = p.x + t * 0.85;
-  float q1 = p.y - t * 0.62;
-  float p2 = 2.07 * p.x - t * 1.1;
-  float q2 = 1.93 * p.y + t * 0.77;
+  float a = (p.x * 0.927 + p.y * 0.375) + t * 0.68;
+  float b = (-p.x * 0.545 + p.y * 0.838) * 1.37 - t * 0.53;
+  float c = (-p.x * 0.312 - p.y * 0.950) * 2.13 + t * 0.81;
+
+  float sa = sin(a);
+  float sb = sin(b + 0.62 * sa);
+  float sc = sin(c + 0.58 * sb);
+
+  float w1 = cos(a + 0.55 * sc);
+  float w2 = cos(b + 0.62 * sa);
+  float w3 = cos(c + 0.58 * sb);
+
   return vec2(
-    -sin(p1) * sin(q1) + 0.85 * sin(p2) * cos(q2),
-    -(cos(p1) * cos(q1) + 0.92 * cos(p2) * sin(q2))
+    0.72 * w1 - 0.64 * w2 + 0.48 * w3,
+    -0.58 * w1 - 0.71 * w2 - 0.52 * w3
   );
 }
 
@@ -297,11 +307,12 @@ void main() {
     float rimMask = (u_hasTip == 1)
       ? smoothstep(0.18, 0.72, dNorm) * meniscus * (1.0 - 0.55 * maxTipBump * (1.0 - u_tipPour))
       : smoothstep(0.68, 0.96, dNorm) * meniscus;
-    float centerThin = 1.0 - u_edge * 0.18 * (1.0 - smoothstep(0.0, 0.85, dNorm)) * u_wetness;
+    float centerThin = clamp(1.0 - u_edge * 0.18 * (1.0 - smoothstep(0.0, 0.85, dNorm)) * u_wetness, 0.25, 1.0);
     float rimBoost = 1.0 + rimMask * u_edge * 0.22;
 
-    vec2 fineCurl = sampleCurl(worldPos + curl * 6.0, u_time * 0.4, curlFreq * 2.3);
-    float ribbon = 0.92 + 0.12 * fineCurl.y * (0.25 + 0.75 * u_streamFlow);
+    vec2 fineCurl = sampleCurl(worldPos + curl * 6.0, u_time * 0.4, curlFreq * 1.65);
+    float mottle = (tooth - 0.5) * 0.65 + fineCurl.y * 0.35;
+    float ribbon = 0.94 + 0.08 * mottle * (0.25 + 0.75 * u_streamFlow);
     float gran = 1.0 - u_granulation * 0.26 * tooth;
 
     float targetA = clamp(meniscus * u_opacity * u_flow * centerThin * rimBoost * ribbon * gran, 0.0, 1.0);
@@ -318,7 +329,7 @@ void main() {
       if (pig.a > 0.015) {
         vec3 dstCol = pig.rgb / max(0.001, pig.a);
         vec3 multCol = dstCol * srcCol;
-        float optW = 0.28 + 0.44 * u_wetness;
+        float optW = clamp(0.28 + 0.44 * u_wetness, 0.0, 1.0);
         mixedCol = mix(srcCol, multCol, optW);
       }
 
@@ -505,7 +516,7 @@ void main() {
   vel -= 0.5 * vec2(pR - pL, pB - pT);
   vel = clamp(vel, vec2(-u_maxVel), vec2(u_maxVel));
 
-  float damp = 0.78 + 0.16 * u_wetness;
+  float damp = min(0.97, 0.78 + 0.16 * u_wetness);
   vec2 advVelUv = clamp(v_uv - vel * u_texel * 0.65 * u_dt, u_uvClamp.xy, u_uvClamp.zw);
   vec2 velNext = decodeVel(texture(u_vel, advVelUv), u_isFloat, u_maxVel) * damp;
 
@@ -528,7 +539,7 @@ void main() {
   float mob = smoothstep(0.015, 0.40, maxNbW) * (0.20 + 0.80 * u_wetness);
 
   float spd = length(vel);
-  float advScale = (0.35 + 0.95 * u_streamFlow) * mob * u_dt;
+  float advScale = min(3.5, (0.35 + 0.95 * u_streamFlow) * mob * u_dt);
   vec2 backUv = clamp(v_uv - vel * u_texel * advScale, u_uvClamp.xy, u_uvClamp.zw);
   vec4 pigAdv = texture(u_pigment, backUv);
   float waterAdv = texture(u_vel, backUv).z;
@@ -632,7 +643,7 @@ void main() {
   vec3 sharpStraight = clamp(cStraight + (cStraight - avgStraight) * sharpAmt, 0.0, 1.0);
   vec4 sharp = vec4(sharpStraight * c.a, c.a);
 
-  float nextWater = water * (0.45 + 0.45 * u_wetness);
+  float nextWater = min(1.0, water * (0.45 + 0.45 * u_wetness));
   outPigment = sharp;
   outVel = vec4(vTex.xy, nextWater, 0.0);
 }
@@ -1266,6 +1277,10 @@ export class GpuWatercolorSolver {
         const id = `${cx},${cy}`;
         this.touchedChunks.set(id, { cx, cy, chunk });
 
+        // Re-bind pigTex on TEXTURE0 because _createOrUpdateTexture binds chunk.gpuTextures[layer]
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, pigTex);
+
         gl.bindFramebuffer(gl.FRAMEBUFFER, this.chunkBlitFbo);
         gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, chunk.gpuTextures[layer], 0);
         gl.viewport(0, 0, texW, texH);
@@ -1328,7 +1343,7 @@ export class GpuWatercolorSolver {
   injectSegment(engine, from, to, radius, colorRgb, opacity, flow, params, timeSec, tipInfo = null) {
     if (!this.ready || !this.active) return;
 
-    const tipPour = tipInfo ? tipInfo.tipPour : (params.tipPour ?? 0.25);
+    const tipPour = tipInfo ? tipInfo.tipPour : (params.tipPour ?? 1.0);
     const pad = Math.ceil(radius * (1.10 + params.bloom * 0.35 + tipPour * 0.22)) + 16;
 
     let standalone = false;
@@ -1655,8 +1670,8 @@ export class GpuWatercolorSolver {
       gl.uniform1i(this.drySharpenLocs.u_vel, 1);
       gl.uniform2f(this.drySharpenLocs.u_texel, texel, texel);
       gl.uniform4f(this.drySharpenLocs.u_uvClamp, 0.5 * texel, 0.5 * texel, (boxW - 0.5) * texel, (boxH - 0.5) * texel);
-      gl.uniform1f(this.drySharpenLocs.u_edge, params ? params.edge : 0.45);
-      gl.uniform1f(this.drySharpenLocs.u_wetness, params ? params.wetness : 0.65);
+      gl.uniform1f(this.drySharpenLocs.u_edge, params ? params.edge : 0.30);
+      gl.uniform1f(this.drySharpenLocs.u_wetness, params ? params.wetness : 1.0);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
 
       // Update tile.vel from workVelB and snapshot into wetCache for next stroke's wet-on-wet!

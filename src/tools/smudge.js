@@ -686,3 +686,19 @@ export function endSmudgeStroke(engine) {
     engine.smudgeDirty = false;
   }
 }
+
+export function cancelSmudgeStroke(engine) {
+  if (!engine) return;
+  if (engine.useGpuSmudge) {
+    const solver = engine.gpuRenderer && engine.gpuRenderer.smudgeSolver;
+    if (solver && typeof solver.cancel === 'function') {
+      solver.cancel(engine);
+    }
+    engine.useGpuSmudge = false;
+  }
+  if (engine.smudgeTiles) {
+    engine.smudgeTiles.clear();
+  }
+  engine.smudgeDirty = false;
+}
+

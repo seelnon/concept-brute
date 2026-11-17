@@ -19,6 +19,28 @@ body {
     touch-action: none;
 }
 
+button, input, select, textarea {
+    font-family: inherit;
+    color: inherit;
+    -webkit-touch-callout: none;
+}
+
+button {
+    color: black;
+}
+
+select {
+    color: black;
+    background-color: white;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+img, svg {
+    -webkit-user-drag: none;
+    -webkit-touch-callout: none;
+}
+
 button:focus, input:focus, select:focus, .tool-btn:focus, .brutal-btn:focus, .mini-btn:focus {
     outline: none !important;
     box-shadow: inherit; /* Don't add default blue glows */
@@ -86,6 +108,10 @@ button:focus, input:focus, select:focus, .tool-btn:focus, .brutal-btn:focus, .mi
     -webkit-user-select: none;
 }
 
+#canvas-wrapper *, #fluid-canvas {
+    touch-action: none;
+}
+
 #brush-cursor {
     position: absolute;
     pointer-events: none;
@@ -130,54 +156,74 @@ button:focus, input:focus, select:focus, .tool-btn:focus, .brutal-btn:focus, .mi
 #panel-brush-tips {
     top: 60px;
     right: 220px;
-    width: 160px;
-    max-height: 80vh;
+    width: 168px;
+    max-height: 82vh;
 }
 
 #tips-content {
     display: flex;
     flex-direction: column;
-    overflow: hidden;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 6px;
 }
 
 #tip-editor-container {
     position: relative;
     width: 100%;
-    aspect-ratio: 1;
+    aspect-ratio: 1 / 1;
     background: #fff;
-    border-bottom: 2px solid #000;
+    border: 2px solid #000;
     cursor: crosshair;
     touch-action: none;
     flex-shrink: 0;
+    box-sizing: border-box;
+    overflow: hidden;
 }
 
 #tip-editor-canvas {
+    display: block;
     width: 100%;
     height: 100%;
     image-rendering: auto;
     touch-action: none;
 }
 
+#tip-editor-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 4px;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
 #tip-editor-controls {
-    position: absolute;
-    bottom: 4px;
-    right: 4px;
+    display: flex;
+    gap: 2px;
 }
 
 #tip-palette {
-    padding: 8px;
-    flex-grow: 1;
-    overflow-y: auto;
+    padding: 6px 0 0 0;
+    flex-shrink: 0;
 }
 
 .tip-grid {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-auto-rows: auto;
     gap: 4px;
+    width: 100%;
 }
 
 .tip-swatch {
-    aspect-ratio: 1;
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    min-width: 0;
+    min-height: 0;
     border: 2px solid #000;
     background: #fff;
     cursor: pointer;
@@ -185,11 +231,18 @@ button:focus, input:focus, select:focus, .tool-btn:focus, .brutal-btn:focus, .mi
     align-items: center;
     justify-content: center;
     padding: 2px;
+    box-sizing: border-box;
+    overflow: hidden;
 }
 
 .tip-swatch canvas {
+    display: block;
     width: 100%;
     height: 100%;
+    min-width: 0;
+    min-height: 0;
+    aspect-ratio: 1 / 1;
+    object-fit: contain;
     image-rendering: auto;
 }
 
@@ -214,6 +267,7 @@ button:focus, input:focus, select:focus, .tool-btn:focus, .brutal-btn:focus, .mi
 .panel-toggle {
     background: none;
     border: none;
+    color: black;
     font-family: inherit;
     font-weight: bold;
     cursor: pointer;
@@ -274,6 +328,7 @@ button:focus, input:focus, select:focus, .tool-btn:focus, .brutal-btn:focus, .mi
     justify-content: center;
     cursor: pointer;
     background-color: white;
+    color: black;
 }
 
 .tool-btn:hover {
@@ -426,6 +481,7 @@ button:focus, input:focus, select:focus, .tool-btn:focus, .brutal-btn:focus, .mi
 .dots-btn {
     background: none;
     border: none;
+    color: black;
     font-size: 20px;
     cursor: pointer;
     padding: 0 4px;
@@ -743,6 +799,7 @@ button:focus, input:focus, select:focus, .tool-btn:focus, .brutal-btn:focus, .mi
     padding: 8px;
     padding-right: 64px; /* Space for controls */
     background-color: white;
+    color: black;
     cursor: pointer;
     font-weight: 900;
     text-transform: uppercase;
@@ -942,6 +999,8 @@ input[type="range"] {
     width: 100%;
     padding: 8px 0;
     border: 2px dashed black;
+    background-color: white;
+    color: black;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1132,6 +1191,7 @@ input[type="range"] {
 .settings-tab {
     flex: 1;
     background: #fff;
+    color: #000;
     border: none;
     border-right: 2px solid #000;
     padding: 6px;

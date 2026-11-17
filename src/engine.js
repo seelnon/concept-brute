@@ -36,6 +36,7 @@ import {
   _startStroke,
   _moveStroke,
   _endStroke,
+  _cancelStroke,
   _paintCurveOnChunks,
   _paintWireframeIncrementally,
   _paintOnChunks
@@ -155,6 +156,7 @@ export class Engine {
     this._lastPointerMoveTime = 0;
     this._activeStrokePointerId = null;
     this._activeStrokePointerType = null;
+    this._gestureLockedUntilRelease = false;
     this._gridTexture = null;
     this._lastGridParams = null;
     this.worldCenter = 200000;
@@ -376,20 +378,52 @@ export class Engine {
   }
 
   _initEvents() {
-    const pruneStaleNonTouchPointers = (eventPointerType = null) => {
+    const isUiElement = (el) => {
+        if (!(el instanceof Element)) return false;
+        return Boolean(el.closest('.ui-panel, .tool-btn, .brutal-btn, .dots-btn, #top-bar, #top-bar-ref, #selection-mode-toolbar, .brutal-range, button, input, select, textarea, #recording-selection-box, .rec-handle, #modal-new-project, #modal-export, #modal-ref-editor'));
+    };
+
+    const countTouchPointers = () => {
+        let count = 0;
+        for (const p of this.activePointers.values()) {
+            if (p.pointerType === 'touch') count++;
+        }
+        return count;
+    };
+
+    const clearTouchPointers = () => {
+        for (const [id, p] of this.activePointers) {
+            if (p.pointerType === 'touch') {
+                this.activePointers.delete(id);
+                this._pointerTimes.delete(id);
+            }
+        }
+    };
+
+    const pruneStalePointers = (eventPointerType = null, maxTouchAgeMs = Infinity) => {
         const now = performance.now();
         for (const [id, p] of this.activePointers) {
-            if (p.pointerType === 'touch') continue;
-            if (!eventPointerType || p.pointerType === eventPointerType) {
+            const ts = this._pointerTimes.get(id) || 0;
+            if (p.pointerType === 'touch') {
+                if (now - ts > maxTouchAgeMs) {
+                    this.activePointers.delete(id);
+                    this._pointerTimes.delete(id);
+                }
+            } else if (!eventPointerType || p.pointerType === eventPointerType) {
                 this.activePointers.delete(id);
                 this._pointerTimes.delete(id);
             } else if (eventPointerType === 'mouse' && p.pointerType === 'pen') {
-                const ts = this._pointerTimes.get(id) || 0;
                 if (now - ts > 180) {
                     this.activePointers.delete(id);
                     this._pointerTimes.delete(id);
                 }
+            } else if (eventPointerType === 'pen' && p.pointerType === 'mouse') {
+                this.activePointers.delete(id);
+                this._pointerTimes.delete(id);
             }
+        }
+        if (countTouchPointers() === 0) {
+            this._gestureLockedUntilRelease = false;
         }
         if (this.activePointers.size === 0) {
             this.isGesture = false;
@@ -397,23 +431,34 @@ export class Engine {
     };
 
     const recoverOrphanedActiveState = (e) => {
-        if (!e || e.buttons !== 0 || e.pointerType === 'touch') return;
-        pruneStaleNonTouchPointers(e.pointerType);
-        const isSimulatedMouse = e.pointerType === 'mouse' && this.lastPenTouchTime && (performance.now() - this.lastPenTouchTime < 120);
-        if (isSimulatedMouse) return;
+        if (!e || e.buttons !== 0 || e.pointerType === 'touch') return false;
+        const now = performance.now();
+        const isSimulatedMouse = e.pointerType === 'mouse' && this.lastPenTouchTime && (now - this.lastPenTouchTime < 150);
+        if (isSimulatedMouse) return false;
 
-        if (this.isPanning || this.isZooming) {
+        pruneStalePointers(e.pointerType, e.pointerType === 'mouse' ? 1200 : 1200);
+
+        let recovered = false;
+        if ((this.isPanning || this.isZooming) && this._activeStrokePointerType !== 'touch') {
             this.isPanning = false;
             this.isZooming = false;
             this.isMouseDown = false;
+            this._activeStrokePointerId = null;
+            this._activeStrokePointerType = null;
             this._updateCursor();
+            recovered = true;
         }
         if (this.isDrawing && this._activeStrokePointerType !== 'touch') {
-            if (this._activeStrokePointerId == null || e.pointerId === this._activeStrokePointerId || e.pointerType === this._activeStrokePointerType) {
-                this.isMouseDown = false;
-                this._endStroke(e);
-            }
+            this.isMouseDown = false;
+            this._endStroke(e);
+            recovered = true;
+        } else if (!this.isDrawing && this.isMouseDown && this._activeStrokePointerType !== 'touch') {
+            this.isMouseDown = false;
+            this._activeStrokePointerId = null;
+            this._activeStrokePointerType = null;
+            recovered = true;
         }
+        return recovered;
     };
 
     const handleContainerEnter = (e) => {
@@ -428,7 +473,7 @@ export class Engine {
 
     this.container.addEventListener('pointerenter', handleContainerEnter);
     this.container.addEventListener('pointerover', (e) => {
-        if (e.target === this.container && e.buttons === 0 && e.pointerType !== 'touch') {
+        if (!isUiElement(e.target) && e.buttons === 0 && e.pointerType !== 'touch') {
             this._containerRect = null;
             recoverOrphanedActiveState(e);
             this._updateBrushCursor(e);
@@ -462,7 +507,7 @@ export class Engine {
         }
 
         // UI SHIELD: Ignore if hitting any UI element
-        if (targetEl && e.target !== this.container && targetEl.closest('.ui-panel, .tool-btn, .brutal-btn, .dots-btn, #top-bar, #top-bar-ref, #selection-mode-toolbar, .brutal-range, button, input, select, textarea, #recording-selection-box, .rec-handle, #modal-new-project, #modal-export, #modal-ref-editor')) {
+        if (targetEl && e.target !== this.container && isUiElement(targetEl)) {
             return;
         }
 
@@ -492,17 +537,21 @@ export class Engine {
         // Stop browser gestures, drag-outs, selection, especially for Alt-click and Windows Ink
         if (e.cancelable) e.preventDefault();
 
-        // Prune stale non-mouse pointers if mouse arrives >250ms after any pen activity
+        const now = performance.now();
+        // Prune stale non-mouse/abandoned pointers when real mouse clicks down
         if (e.pointerType === 'mouse') {
-            const now = performance.now();
             for (const [id, p] of this.activePointers) {
-                if (p.pointerType === 'pen') {
-                    const ts = this._pointerTimes.get(id) || 0;
-                    if (!this.isDrawing || (now - ts > 250)) {
-                        this.activePointers.delete(id);
-                        this._pointerTimes.delete(id);
-                    }
+                const ts = this._pointerTimes.get(id) || 0;
+                if (p.pointerType === 'pen' && (!this.isDrawing || (now - ts > 250))) {
+                    this.activePointers.delete(id);
+                    this._pointerTimes.delete(id);
+                } else if (p.pointerType === 'touch' && (now - ts > 600)) {
+                    this.activePointers.delete(id);
+                    this._pointerTimes.delete(id);
                 }
+            }
+            if (countTouchPointers() === 0) {
+                this._gestureLockedUntilRelease = false;
             }
         }
         
@@ -512,6 +561,12 @@ export class Engine {
         
         // If we have an active pen/touch, ignore simulated mouse downs
         if (hasNonMouse && e.pointerType === 'mouse') return;
+
+        // Clear any leftover non-touch active stroke if this is a fresh mouse/pen click
+        if (e.pointerType !== 'touch' && this.isDrawing && this._activeStrokePointerType !== 'touch' && this._activeStrokePointerId !== e.pointerId) {
+            this.isMouseDown = false;
+            this._endStroke(e);
+        }
         
         // If this is a pen/touch down, clear any ghost mouse pointers
         if (e.pointerType !== 'mouse') {
@@ -523,11 +578,18 @@ export class Engine {
             }
         }
 
+        // If no touches remain before this press, clear any prior pinch lock
+        if (e.pointerType === 'touch' && countTouchPointers() === 0) {
+            this._gestureLockedUntilRelease = false;
+            this.isGesture = false;
+        }
+
         this.activePointers.set(e.pointerId, e);
-        this._pointerTimes.set(e.pointerId, performance.now());
+        this._pointerTimes.set(e.pointerId, now);
 
         const currentPointers = Array.from(this.activePointers.values());
         const hasPen = currentPointers.some(p => p.pointerType === 'pen');
+        const touchCount = countTouchPointers();
 
         // IF we have a pen, IGNORE ALL touch pointers in the map (and from event)
         if (hasPen && e.pointerType === 'touch') {
@@ -539,6 +601,7 @@ export class Engine {
         if (hasPen) {
             // Pen always takes full priority over gestures and touches
             this.isGesture = false;
+            this._gestureLockedUntilRelease = false;
             for (const [id, p] of this.activePointers) {
                 if (p.pointerType !== 'pen') {
                     this.activePointers.delete(id);
@@ -546,18 +609,28 @@ export class Engine {
                 }
             }
             if (e.pointerType !== 'pen') return;
-        } else if (this.activePointers.size > 1) {
-            // Only allow gestures if ALL active pointers are touch (no pen interfering)
-            const allTouch = currentPointers.every(p => p.pointerType === 'touch');
-            if (allTouch) {
-                // Cancel current stroke if a second finger is added
-                if (this.isDrawing) {
+        } else if (touchCount > 1 && currentPointers.every(p => p.pointerType === 'touch')) {
+            // Multi-touch pinch/pan/rotate: cancel any accidental initial finger mark instead of committing stray lines
+            this._gestureLockedUntilRelease = true;
+            if (this.isDrawing) {
+                const isEarlyPinchTouch = (this._activeStrokePointerType === 'touch') &&
+                    ((now - (this._strokeStartTime || 0) < 600) || !this.strokePoints || this.strokePoints.length <= 20);
+                if (isEarlyPinchTouch) {
+                    this._cancelStroke();
+                } else {
                     this._endStroke();
                 }
-                this.isGesture = true;
-                this._initGesture();
-                return;
             }
+            this.isPanning = false;
+            this.isZooming = false;
+            this.isMouseDown = false;
+            this._activeStrokePointerId = null;
+            this._activeStrokePointerType = null;
+            this.isGesture = true;
+            this._initGesture();
+            return;
+        } else if (e.pointerType === 'touch' && (this.isGesture || this._gestureLockedUntilRelease)) {
+            return;
         }
 
         if (this.isExportMode) {
@@ -603,7 +676,8 @@ export class Engine {
       this._lastPointerMoveTime = now;
 
       // Only suppress browser gestures while actively pressing/touching on canvas (keep hover intact for Windows Ink)
-      if (e.cancelable && e.target === this.container && (e.buttons > 0 || e.pointerType === 'touch')) e.preventDefault();
+      const inCanvas = e.target === this.container || (e.target instanceof Node && this.container.contains(e.target));
+      if (e.cancelable && inCanvas && !isUiElement(e.target) && (e.buttons > 0 || e.pointerType === 'touch')) e.preventDefault();
       if (this.perfMonitor) this.perfMonitor.markInteraction();
 
       // Update pen/touch activity timestamp only when actively pressed or touching, not passive pen hover
@@ -629,7 +703,7 @@ export class Engine {
 
       // Ignore mouse moves over canvas ONLY if a non-mouse canvas pointer is genuinely active right now
       const hasNonMouse = Array.from(this.activePointers.values()).some(p => p.pointerType !== 'mouse');
-      if (hasNonMouse && e.pointerType === 'mouse' && e.target === this.container) return;
+      if (hasNonMouse && e.pointerType === 'mouse' && inCanvas && !isUiElement(e.target)) return;
 
       const pointers = Array.from(this.activePointers.values());
       const hasPen = pointers.some(p => p.pointerType === 'pen') || e.pointerType === 'pen';
@@ -642,6 +716,7 @@ export class Engine {
       if (e.pointerType === 'pen') {
           // Stylus pen active - cancel any gesture lock and remove touch pointers
           this.isGesture = false;
+          this._gestureLockedUntilRelease = false;
           for (const [id, p] of this.activePointers) {
               if (p.pointerType !== 'pen') {
                   this.activePointers.delete(id);
@@ -650,16 +725,23 @@ export class Engine {
           }
       }
 
-      // Filter pointers list again after set/prune
-      const currentPointers = Array.from(this.activePointers.values());
-      const nonMouseCount = currentPointers.filter(p => p.pointerType !== 'mouse').length;
-      
-      if (this.isGesture && nonMouseCount > 1 && !hasPen) {
+      const touchCount = countTouchPointers();
+      if (this.isGesture && touchCount >= 2 && !hasPen) {
           this._handleGesture();
           return;
       }
 
-      if (this.isGesture) return;
+      if (this.isGesture || (this._gestureLockedUntilRelease && e.pointerType === 'touch')) {
+          return;
+      }
+
+      if ((this.isDrawing || this.isPanning || this.isZooming) && this._activeStrokePointerId != null && e.pointerId !== this._activeStrokePointerId) {
+          if (e.pointerType !== 'touch') {
+              this._handlePickerMove(e);
+              this._updateBrushCursor(e);
+          }
+          return;
+      }
 
       if (this.isExportMode && this.isDrawing) {
           const m = this._getMousePos(e);
@@ -711,10 +793,15 @@ export class Engine {
     });
 
     // Hover fallback: if Windows Ink / Chromium pauses pointermove right after returning from Settings
-    // or switching tablet-as-mouse mode, mousemove keeps the hover cursor alive instead of freezing.
+    // or switching tablet-as-mouse mode, mousemove keeps the hover cursor alive and recovers stuck states.
     window.addEventListener('mousemove', (e) => {
-        if (this.isDrawing || this.isPanning || this.isZooming || this.isGesture) return;
         const now = performance.now();
+        if (e.buttons === 0 && (this.isDrawing || this.isPanning || this.isZooming) && this._activeStrokePointerType !== 'touch') {
+            if (!this.lastPenTouchTime || (now - this.lastPenTouchTime > 150)) {
+                recoverOrphanedActiveState(e);
+            }
+        }
+        if (this.isDrawing || this.isPanning || this.isZooming || this.isGesture) return;
         if (now - (this._lastPointerMoveTime || 0) <= 25) return;
         if (this.lastPenTouchTime && (now - this.lastPenTouchTime < 120)) return;
         this._handlePickerMove(e);
@@ -729,12 +816,28 @@ export class Engine {
             this.lastPenTouchTime = performance.now();
         }
         
-        if (this.activePointers.size < 2) {
+        const remainingTouch = countTouchPointers();
+        if (remainingTouch < 2) {
             const wasGesture = this.isGesture;
             this.isGesture = false;
             if (wasGesture) {
                 this.refresh();
             }
+        }
+        if (remainingTouch === 0) {
+            this._gestureLockedUntilRelease = false;
+        }
+
+        const matchesActiveStroke = (this._activeStrokePointerId != null && e.pointerId === this._activeStrokePointerId);
+        const fallbackEnd = (this._activeStrokePointerId == null && !this.isGesture && !this._gestureLockedUntilRelease);
+        const orphanedNonTouchEnd = (this.activePointers.size === 0 && (this.isDrawing || this.isPanning || this.isZooming) && e.pointerType !== 'touch' && this._activeStrokePointerType !== 'touch');
+
+        if (!matchesActiveStroke && !fallbackEnd && !orphanedNonTouchEnd) {
+            if (e.pointerType === 'touch') {
+                if (this.brushCursor) this.brushCursor.style.display = 'none';
+                if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
+            }
+            return;
         }
 
         if (this.isExportMode && this.isDrawing) {
@@ -764,20 +867,41 @@ export class Engine {
 
     window.addEventListener('pointerup', endHandler);
     window.addEventListener('pointercancel', endHandler);
+
+    // Touch-event fallback: ensures no abandoned touch pointers remain if browser swallows a pointerup/pointercancel
+    const touchSafetyEnd = (e) => {
+        if (!e.touches || e.touches.length === 0) {
+            const wasGestureOrLocked = this.isGesture || this._gestureLockedUntilRelease;
+            clearTouchPointers();
+            this.isGesture = false;
+            this._gestureLockedUntilRelease = false;
+            if (this.isDrawing && this._activeStrokePointerType === 'touch') {
+                this.isMouseDown = false;
+                if (wasGestureOrLocked) {
+                    this._cancelStroke();
+                } else {
+                    this._endStroke();
+                }
+            }
+        }
+    };
+    window.addEventListener('touchend', touchSafetyEnd, { passive: true });
+    window.addEventListener('touchcancel', touchSafetyEnd, { passive: true });
+
     window.addEventListener('pointerout', (e) => {
-        this.activePointers.delete(e.pointerId);
-        this._pointerTimes.delete(e.pointerId);
-        if (e.pointerType === 'touch') {
+        if (e.pointerType === 'touch' && e.target !== window && e.target !== document) {
+            // Only clear touch cursors, wait for pointerup/touchend for active multi-touch tracking
             if (this.brushCursor) this.brushCursor.style.display = 'none';
             if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
         }
     });
     window.addEventListener('pointerleave', (e) => {
-        this.activePointers.delete(e.pointerId);
-        this._pointerTimes.delete(e.pointerId);
         if (e.pointerType === 'touch') {
             if (this.brushCursor) this.brushCursor.style.display = 'none';
             if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
+        } else if (e.target === document || e.target === document.documentElement) {
+            this.activePointers.delete(e.pointerId);
+            this._pointerTimes.delete(e.pointerId);
         }
     });
 
@@ -794,6 +918,7 @@ export class Engine {
         this.isPanning = false;
         this.isZooming = false;
         this.isGesture = false;
+        this._gestureLockedUntilRelease = false;
         this.isMouseDown = false;
         this.keys = {};
         this._updateCursor();
@@ -805,7 +930,10 @@ export class Engine {
         if (!this.isDrawing) {
             this.activePointers.clear();
             this._pointerTimes.clear();
+            this._activeStrokePointerId = null;
+            this._activeStrokePointerType = null;
             this.isGesture = false;
+            this._gestureLockedUntilRelease = false;
             this.isPanning = false;
             this.isZooming = false;
             this.isMouseDown = false;
@@ -2031,6 +2159,10 @@ export class Engine {
 
   _endStroke(e = null) {
      return _endStroke.call(this, e);
+  }
+
+  _cancelStroke() {
+     return _cancelStroke.call(this);
   }
 
   _updateBrushCursor(e) {

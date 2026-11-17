@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="format-detection" content="telephone=no, date=no, address=no, email=no" />
     <title>CONCEPT_BRUTE</title>
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='black'/><rect x='20' y='20' width='60' height='60' fill='white'/></svg>">
     <link rel="stylesheet" href="./src/index.css">
@@ -45,10 +46,10 @@
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" stroke-linejoin="bevel"><path d="M12 2v20M17 2c-3 5-3 15 0 20M7 2c3 5 3 15 0 20M2 12h20M2 17c5-3 15-3 20 0M2 7c5 3 15 3 20 0" /></svg>
           </button>
           <button id="btn-fluid" class="tool-btn" title="Fluid Paint (7) / (F)">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" stroke-linejoin="miter"><path d="M12 2s8 6 8 11a8 8 0 0 1-16 0c0-5 8-11 8-11z"/></svg>
-          </button>
-          <button id="btn-air" class="tool-btn" title="Air Paint (8) / (A)">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.59 4.59A2 2 0 1 1 11 8H2m10.59 11.41A2 2 0 1 0 14 16H2M15.59 12A2 2 0 1 1 17 9H2"/></svg>
+          </button>
+          <button id="btn-air" class="tool-btn" title="Watercolor (8) / (A)">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" stroke-linejoin="miter"><path d="M12 2s8 6 8 11a8 8 0 0 1-16 0c0-5 8-11 8-11z"/></svg>
           </button>
 
           <button id="btn-ref_move" class="tool-btn" title="Ref Move" style="display: none;">
@@ -102,9 +103,9 @@
             <div class="slider-container" id="control-bristles" style="display: none;">
                 <div class="slider-header">
                     <label class="slider-label">BRISTLES</label>
-                    <span id="val-bristles" class="slider-value">50</span>
+                    <span id="val-bristles" class="slider-value">10</span>
                 </div>
-                <input type="range" id="slider-bristles" min="10" max="100" value="50" class="brutal-range main-range">
+                <input type="range" id="slider-bristles" min="10" max="100" value="10" class="brutal-range main-range">
             </div>
         </div>
 
@@ -283,12 +284,14 @@
              <!-- TIP PREVIEW / EDITOR -->
              <div id="tip-editor-container">
                 <canvas id="tip-editor-canvas" width="128" height="128"></canvas>
+             </div>
+             <div id="tip-editor-toolbar">
+                <button id="btn-tip-capture" class="mini-btn" title="Sample from Canvas">T</button>
                 <div id="tip-editor-controls">
-                   <button id="btn-tip-eraser" class="mini-btn">E</button>
-                   <button id="btn-tip-reset" class="mini-btn">R</button>
-                   <button id="btn-tip-clear" class="mini-btn">C</button>
+                   <button id="btn-tip-eraser" class="mini-btn" title="Tip Eraser">E</button>
+                   <button id="btn-tip-reset" class="mini-btn" title="Reset Tip">R</button>
+                   <button id="btn-tip-clear" class="mini-btn" title="Clear Tip">C</button>
                 </div>
-                <button id="btn-tip-capture" class="mini-btn" title="Sample from Canvas" style="position: absolute; bottom: 4px; left: 4px;">T</button>
              </div>
              <!-- TEXTURE SWATCHES -->
               <div class="brush-settings-container" style="padding: 0 8px;">
@@ -945,14 +948,14 @@
                    <div class="settings-group">
                       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
                           <label class="settings-label">TIP MODE (DRAW ↔ POUR)</label>
-                          <span id="adv-air-tip-pour-val" style="font-size: 9px; font-weight: 900;">25%</span>
+                          <span id="adv-air-tip-pour-val" style="font-size: 9px; font-weight: 900;">100%</span>
                       </div>
                       <div style="display: flex; gap: 4px; margin-bottom: 5px;">
                           <button id="btn-air-mode-draw" class="brutal-btn" style="flex: 1; font-size: 8px; height: 19px; padding: 0;">DRAW</button>
                           <button id="btn-air-mode-mix" class="brutal-btn" style="flex: 1; font-size: 8px; height: 19px; padding: 0;">MIX</button>
-                          <button id="btn-air-mode-pour" class="brutal-btn" style="flex: 1; font-size: 8px; height: 19px; padding: 0;">POUR</button>
+                          <button id="btn-air-mode-pour" class="brutal-btn active-btn" style="flex: 1; font-size: 8px; height: 19px; padding: 0;">POUR</button>
                       </div>
-                      <input type="range" id="adv-air-tip-pour" min="0" max="100" step="1" value="25" class="brutal-range" style="width: 100%;">
+                      <input type="range" id="adv-air-tip-pour" min="0" max="100" step="1" value="100" class="brutal-range" style="width: 100%;">
                    </div>
                    <div class="settings-group">
                       <div class="settings-row" style="margin-bottom: 8px;">
@@ -1270,7 +1273,7 @@
     <!-- FLUID PAINTING PANEL -->
     <div id="panel-fluid" class="ui-panel hidden" style="width: 180px; left: 20px; top: 120px; z-index: 10002;">
       <div id="handle-fluid" class="panel-handle">
-        <span class="panel-title" style="letter-spacing: 0.05em; font-weight: 1000; font-size: 8px;">💧 FLUID TUNING</span>
+        <span class="panel-title" style="letter-spacing: 0.05em; font-weight: 1000; font-size: 8px; display: inline-flex; align-items: center; gap: 4px;"><svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.59 4.59A2 2 0 1 1 11 8H2m10.59 11.41A2 2 0 1 0 14 16H2M15.59 12A2 2 0 1 1 17 9H2"/></svg><span>PAINT SETTINGS</span></span>
         <button id="btn-fluid-collapse" class="panel-toggle">_</button>
       </div>
       <div id="fluid-content" class="panel-content" style="padding: 10px; display: flex; flex-direction: column; gap: 8px;">
@@ -1289,54 +1292,54 @@
           <div class="slider-container">
             <div class="slider-header">
               <label class="slider-label" style="font-size: 8px;">VORTEX SWIRL FORCE</label>
-              <span id="val-fluid-vortex" class="slider-value" style="font-size: 8px; font-weight: bold;">50%</span>
+              <span id="val-fluid-vortex" class="slider-value" style="font-size: 8px; font-weight: bold;">8%</span>
             </div>
-            <input type="range" id="slider-fluid-vortex" min="0" max="100" value="50" class="brutal-range">
+            <input type="range" id="slider-fluid-vortex" min="0" max="100" value="8" class="brutal-range">
           </div>
 
           <!-- TURBULENCE CHAOS -->
           <div class="slider-container">
             <div class="slider-header">
               <label class="slider-label" style="font-size: 8px;">TURBULENCE (CHAOS)</label>
-              <span id="val-fluid-turb" class="slider-value" style="font-size: 8px; font-weight: bold;">50%</span>
+              <span id="val-fluid-turb" class="slider-value" style="font-size: 8px; font-weight: bold;">8%</span>
             </div>
-            <input type="range" id="slider-fluid-turb" min="0" max="100" value="50" class="brutal-range">
+            <input type="range" id="slider-fluid-turb" min="0" max="100" value="8" class="brutal-range">
           </div>
 
           <!-- COLOR RETENTION -->
           <div class="slider-container">
             <div class="slider-header">
               <label class="slider-label" style="font-size: 8px;">COLOUR RETENTION</label>
-              <span id="val-fluid-retention" class="slider-value" style="font-size: 8px; font-weight: bold;">0%</span>
+              <span id="val-fluid-retention" class="slider-value" style="font-size: 8px; font-weight: bold;">80%</span>
             </div>
-            <input type="range" id="slider-fluid-retention" min="0" max="100" value="0" class="brutal-range">
+            <input type="range" id="slider-fluid-retention" min="0" max="100" value="80" class="brutal-range">
           </div>
 
           <!-- PAINT PICKUP -->
           <div class="slider-container">
             <div class="slider-header">
               <label class="slider-label" style="font-size: 8px;">WET PAINT PICKUP</label>
-              <span id="val-fluid-pickup" class="slider-value" style="font-size: 8px; font-weight: bold;">75%</span>
+              <span id="val-fluid-pickup" class="slider-value" style="font-size: 8px; font-weight: bold;">80%</span>
             </div>
-            <input type="range" id="slider-fluid-pickup" min="0" max="100" value="75" class="brutal-range">
+            <input type="range" id="slider-fluid-pickup" min="0" max="100" value="80" class="brutal-range">
           </div>
 
           <!-- IMPASTO THICKNESS -->
           <div class="slider-container">
             <div class="slider-header">
               <label class="slider-label" style="font-size: 8px;">IMPASTO BUILD-UP</label>
-              <span id="val-fluid-depth" class="slider-value" style="font-size: 8px; font-weight: bold;">75%</span>
+              <span id="val-fluid-depth" class="slider-value" style="font-size: 8px; font-weight: bold;">30%</span>
             </div>
-            <input type="range" id="slider-fluid-depth" min="0" max="100" value="75" class="brutal-range">
+            <input type="range" id="slider-fluid-depth" min="0" max="100" value="30" class="brutal-range">
           </div>
 
           <!-- SPECULAR GLOSS -->
           <div class="slider-container">
             <div class="slider-header">
               <label class="slider-label" style="font-size: 8px;">3D SPECULAR GLOSS</label>
-              <span id="val-fluid-gloss" class="slider-value" style="font-size: 8px; font-weight: bold;">5%</span>
+              <span id="val-fluid-gloss" class="slider-value" style="font-size: 8px; font-weight: bold;">100%</span>
             </div>
-            <input type="range" id="slider-fluid-gloss" min="0" max="100" value="5" class="brutal-range">
+            <input type="range" id="slider-fluid-gloss" min="0" max="100" value="100" class="brutal-range">
           </div>
 
           <!-- SURFACE SHADING CHECKBOX -->
@@ -1364,7 +1367,7 @@
     <!-- AIR PAINTING PANEL (WATERCOLOR N-S) -->
     <div id="panel-air" class="ui-panel hidden" style="width: 184px; left: 20px; top: 120px; z-index: 10002;">
       <div id="handle-air" class="panel-handle">
-        <span class="panel-title" style="letter-spacing: 0.04em; font-weight: 1000; font-size: 8px;">💧 AIR TUNING · WATERCOLOR</span>
+        <span class="panel-title" style="letter-spacing: 0.04em; font-weight: 1000; font-size: 8px; display: inline-flex; align-items: center; gap: 4px;"><svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" stroke-linejoin="miter"><path d="M12 2s8 6 8 11a8 8 0 0 1-16 0c0-5 8-11 8-11z"/></svg><span>WATERCOLOR SETTINGS</span></span>
         <button id="btn-air-collapse" class="panel-toggle">_</button>
       </div>
       <div id="air-content" class="panel-content" style="padding: 10px; display: flex; flex-direction: column; gap: 8px;">
@@ -1374,54 +1377,54 @@
           <div class="slider-container">
             <div class="slider-header">
               <label class="slider-label" style="font-size: 8px;">WATER WETNESS</label>
-              <span id="adv-air-wetness-val" class="slider-value" style="font-size: 8px; font-weight: bold;">80%</span>
+              <span id="adv-air-wetness-val" class="slider-value" style="font-size: 8px; font-weight: bold;">100%</span>
             </div>
-            <input type="range" id="adv-air-wetness" min="0" max="100" value="80" class="brutal-range">
+            <input type="range" id="adv-air-wetness" min="0" max="100" value="100" class="brutal-range">
           </div>
 
           <!-- STREAM FLOW (NAVIER-STOKES) -->
           <div class="slider-container">
             <div class="slider-header">
               <label class="slider-label" style="font-size: 8px;">STREAM FLOW (N-S)</label>
-              <span id="adv-air-stream-val" class="slider-value" style="font-size: 8px; font-weight: bold;">65%</span>
+              <span id="adv-air-stream-val" class="slider-value" style="font-size: 8px; font-weight: bold;">100%</span>
             </div>
-            <input type="range" id="adv-air-stream" min="0" max="100" value="65" class="brutal-range">
+            <input type="range" id="adv-air-stream" min="0" max="100" value="100" class="brutal-range">
           </div>
 
           <!-- BLOOM & BLEED -->
           <div class="slider-container">
             <div class="slider-header">
-              <label class="slider-label" style="font-size: 8px;">BLOOM & BLEED</label>
-              <span id="adv-air-bloom-val" class="slider-value" style="font-size: 8px; font-weight: bold;">60%</span>
+              <label class="slider-label" style="font-size: 8px;">BLOOM &amp; BLEED</label>
+              <span id="adv-air-bloom-val" class="slider-value" style="font-size: 8px; font-weight: bold;">50%</span>
             </div>
-            <input type="range" id="adv-air-bloom" min="0" max="100" value="60" class="brutal-range">
+            <input type="range" id="adv-air-bloom" min="0" max="100" value="50" class="brutal-range">
           </div>
 
           <!-- PIGMENT EDGE -->
           <div class="slider-container">
             <div class="slider-header">
               <label class="slider-label" style="font-size: 8px;">PIGMENT EDGE</label>
-              <span id="adv-air-edge-val" class="slider-value" style="font-size: 8px; font-weight: bold;">50%</span>
+              <span id="adv-air-edge-val" class="slider-value" style="font-size: 8px; font-weight: bold;">30%</span>
             </div>
-            <input type="range" id="adv-air-edge" min="0" max="100" value="50" class="brutal-range">
+            <input type="range" id="adv-air-edge" min="0" max="100" value="30" class="brutal-range">
           </div>
 
           <!-- GRANULATION -->
           <div class="slider-container">
             <div class="slider-header">
               <label class="slider-label" style="font-size: 8px;">GRANULATION</label>
-              <span id="adv-air-granulation-val" class="slider-value" style="font-size: 8px; font-weight: bold;">25%</span>
+              <span id="adv-air-granulation-val" class="slider-value" style="font-size: 8px; font-weight: bold;">30%</span>
             </div>
-            <input type="range" id="adv-air-granulation" min="0" max="100" value="25" class="brutal-range">
+            <input type="range" id="adv-air-granulation" min="0" max="100" value="30" class="brutal-range">
           </div>
 
           <!-- TIP POUR / DRAW -->
           <div class="slider-container">
             <div class="slider-header">
               <label class="slider-label" style="font-size: 8px;">TIP POUR (DRAW ↔ POUR)</label>
-              <span id="air-tip-pour-val" class="slider-value" style="font-size: 8px; font-weight: bold;">25%</span>
+              <span id="air-tip-pour-val" class="slider-value" style="font-size: 8px; font-weight: bold;">100%</span>
             </div>
-            <input type="range" id="slider-air-tip-pour" min="0" max="100" value="25" class="brutal-range">
+            <input type="range" id="slider-air-tip-pour" min="0" max="100" value="100" class="brutal-range">
           </div>
 
           <!-- PER-BRUSH-TIP PRESET CONTROLS -->

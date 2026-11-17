@@ -39,12 +39,12 @@ export class TipManager {
     t.wireDensity = saved.wireDensity ?? 30;
     t.wireRange = saved.wireRange ?? 4.0;
     t.wireMinDist = saved.wireMinDist ?? 0.5;
-    t.airWetness = saved.airWetness ?? 80;
-    t.airStreamFlow = saved.airStreamFlow ?? 65;
-    t.airBloom = saved.airBloom ?? 60;
-    t.airEdge = saved.airEdge ?? 50;
-    t.airGranulation = saved.airGranulation ?? 25;
-    t.airTipPour = saved.airTipPour ?? 25;
+    t.airWetness = saved.airWetness ?? 100;
+    t.airStreamFlow = saved.airStreamFlow ?? 100;
+    t.airBloom = saved.airBloom ?? 50;
+    t.airEdge = saved.airEdge ?? 30;
+    t.airGranulation = saved.airGranulation ?? 30;
+    t.airTipPour = saved.airTipPour ?? 100;
     t.airFollowStroke = saved.airFollowStroke ?? false;
     t.airTipAngle = saved.airTipAngle ?? 0;
     t.airTipHardness = saved.airTipHardness ?? 55;
@@ -214,26 +214,27 @@ export class TipManager {
         
         if (type === 'triangle') {
             try {
-                canvas = await new Promise((resolve, reject) => {
-                    const img = new Image();
-                    const timer = setTimeout(() => {
-                        img.src = '';
-                        reject(new Error('Timeout loading default brush tip'));
-                    }, 300);
-                    img.onload = () => {
-                        clearTimeout(timer);
-                        const tc = document.createElement('canvas');
-                        tc.width = 128; tc.height = 128;
-                        tc.getContext('2d').drawImage(img, 0, 0, 128, 128);
-                        resolve(tc);
-                    };
-                    img.onerror = () => {
-                        clearTimeout(timer);
-                        reject(new Error('Error loading default brush tip'));
-                    };
-                    img.src = './_main_brushtip.png'; 
-                });
+                const resp = await fetch('./_main_brushtip.png');
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const blob = await resp.blob();
+                const objUrl = URL.createObjectURL(blob);
+                try {
+                    canvas = await new Promise((resolve, reject) => {
+                        const img = new Image();
+                        img.onload = () => {
+                            const tc = document.createElement('canvas');
+                            tc.width = 128; tc.height = 128;
+                            tc.getContext('2d').drawImage(img, 0, 0, 128, 128);
+                            resolve(tc);
+                        };
+                        img.onerror = () => reject(new Error('Error decoding _main_brushtip.png'));
+                        img.src = objUrl;
+                    });
+                } finally {
+                    URL.revokeObjectURL(objUrl);
+                }
             } catch (e) {
+                console.warn('Could not load ./_main_brushtip.png, falling back to shape:', e);
                 canvas = this._createShape(type);
             }
         } else {
@@ -333,7 +334,7 @@ export class TipManager {
     document.getElementById('btn-tips-collapse').onclick = () => {
         const content = document.getElementById('tips-content');
         const isHidden = content.style.display === 'none';
-        content.style.display = isHidden ? 'block' : 'none';
+        content.style.display = isHidden ? '' : 'none';
         document.getElementById('btn-tips-collapse').innerText = isHidden ? '_' : '+';
     };
 
@@ -347,15 +348,19 @@ export class TipManager {
         if (btn) {
             btn.onclick = () => {
                 for (let row = 0; row < 3; row++) {
-                    this._regenerateSlot(row * 3 + col);
+                    this._regenerateSlot(row * 3 + col, false);
                 }
-                this._renderPalette();
+                this._renderPalette(true);
                 if (this.activeGeneratedIndex >= 0 && (this.activeGeneratedIndex % 3 === col)) {
                     this.selectedTipCanvas = this.generatedTips[this.activeGeneratedIndex].canvas;
-                    this.editorCtx.clearRect(0,0,128,128);
+                    this.editorCtx.save();
+                    this.editorCtx.globalCompositeOperation = 'source-over';
+                    this.editorCtx.clearRect(0, 0, 128, 128);
                     this.editorCtx.drawImage(this.selectedTipCanvas, 0, 0);
+                    this.editorCtx.restore();
                     this._updateActiveTip();
                 }
+                this._saveToStorage();
             };
         }
     }
@@ -368,10 +373,14 @@ export class TipManager {
     ctx.drawImage(canvas, 0, 0, 128, 128);
     
     this.selectedTipCanvas = c;
-    if (this.activeBankIndex >= 0) {
+    if (this.activeBankIndex >= 0 && this.tips[this.activeBankIndex]) {
         this.tips[this.activeBankIndex].canvas = c;
-    } else if (this.activeGeneratedIndex >= 0) {
+    } else if (this.activeGeneratedIndex >= 0 && this.generatedTips[this.activeGeneratedIndex]) {
         this.generatedTips[this.activeGeneratedIndex].canvas = c;
+    } else if (this.tips[0]) {
+        this.activeBankIndex = 0;
+        this.activeGeneratedIndex = -1;
+        this.tips[0].canvas = c;
     }
     
     this.editorCtx.save();
@@ -380,7 +389,7 @@ export class TipManager {
     this.editorCtx.drawImage(c, 0, 0);
     this.editorCtx.restore();
     
-    this._renderPalette();
+    this._renderPalette(true);
     this._updateActiveTip();
     this._saveToStorage();
   }
@@ -403,13 +412,13 @@ export class TipManager {
     c.getContext('2d').drawImage(this.editorCanvas, 0, 0);
     this.selectedTipCanvas = c;
     
-    if (this.activeBankIndex >= 0) {
+    if (this.activeBankIndex >= 0 && this.tips[this.activeBankIndex]) {
         this.tips[this.activeBankIndex].canvas = c;
-    } else if (this.activeGeneratedIndex >= 0) {
+    } else if (this.activeGeneratedIndex >= 0 && this.generatedTips[this.activeGeneratedIndex]) {
         this.generatedTips[this.activeGeneratedIndex].canvas = c;
     }
     
-    this._renderPalette();
+    this._renderPalette(true);
     this._updateActiveTip();
     this._saveToStorage();
   }
@@ -418,9 +427,19 @@ export class TipManager {
     const mainGrid = document.getElementById('tip-main-slots');
     if (mainGrid) {
       const existingMain = mainGrid.querySelectorAll('.tip-swatch');
-      if (!forceRedraw && existingMain.length === this.tips.length) {
+      if (existingMain.length === this.tips.length) {
         existingMain.forEach((slot, i) => {
           slot.classList.toggle('active-swatch', this.activeBankIndex === i);
+          const tipCanvas = this.tips[i]?.canvas;
+          if (tipCanvas && (forceRedraw || slot._drawnCanvas !== tipCanvas)) {
+            const thumb = slot.querySelector('canvas');
+            if (thumb) {
+              const tctx = thumb.getContext('2d');
+              tctx.clearRect(0, 0, 64, 64);
+              tctx.drawImage(tipCanvas, 0, 0, 64, 64);
+              slot._drawnCanvas = tipCanvas;
+            }
+          }
         });
       } else {
         mainGrid.innerHTML = '';
@@ -432,6 +451,7 @@ export class TipManager {
           const thumb = document.createElement('canvas');
           thumb.width = 64; thumb.height = 64;
           thumb.getContext('2d').drawImage(tip.canvas, 0, 0, 64, 64);
+          slot._drawnCanvas = tip.canvas;
           slot.appendChild(thumb);
           
           slot.onclick = () => {
@@ -455,9 +475,19 @@ export class TipManager {
     const genGrid = document.getElementById('tip-generated-slots');
     if (genGrid) {
       const existingGen = genGrid.querySelectorAll('.tip-swatch');
-      if (!forceRedraw && existingGen.length === this.generatedTips.length) {
+      if (existingGen.length === this.generatedTips.length) {
         existingGen.forEach((slot, i) => {
           slot.classList.toggle('active-swatch', this.activeGeneratedIndex === i);
+          const tipCanvas = this.generatedTips[i]?.canvas;
+          if (tipCanvas && (forceRedraw || slot._drawnCanvas !== tipCanvas)) {
+            const thumb = slot.querySelector('canvas');
+            if (thumb) {
+              const tctx = thumb.getContext('2d');
+              tctx.clearRect(0, 0, 64, 64);
+              tctx.drawImage(tipCanvas, 0, 0, 64, 64);
+              slot._drawnCanvas = tipCanvas;
+            }
+          }
         });
       } else {
         genGrid.innerHTML = '';
@@ -468,6 +498,7 @@ export class TipManager {
             const thumb = document.createElement('canvas');
             thumb.width = 64; thumb.height = 64;
             thumb.getContext('2d').drawImage(tip.canvas, 0, 0, 64, 64);
+            slot._drawnCanvas = tip.canvas;
             slot.appendChild(thumb);
             
             slot.onclick = () => {
@@ -576,12 +607,12 @@ export class TipManager {
           wireDensity: t.wireDensity ?? 30,
           wireRange: t.wireRange ?? 4.0,
           wireMinDist: t.wireMinDist ?? 0.5,
-          airWetness: t.airWetness ?? 80,
-          airStreamFlow: t.airStreamFlow ?? 65,
-          airBloom: t.airBloom ?? 60,
-          airEdge: t.airEdge ?? 50,
-          airGranulation: t.airGranulation ?? 25,
-          airTipPour: t.airTipPour ?? 25,
+          airWetness: t.airWetness ?? 100,
+          airStreamFlow: t.airStreamFlow ?? 100,
+          airBloom: t.airBloom ?? 50,
+          airEdge: t.airEdge ?? 30,
+          airGranulation: t.airGranulation ?? 30,
+          airTipPour: t.airTipPour ?? 100,
           airFollowStroke: t.airFollowStroke ?? false,
           airTipAngle: t.airTipAngle ?? 0,
           airTipHardness: t.airTipHardness ?? 55,
@@ -609,12 +640,12 @@ export class TipManager {
           wireDensity: t.wireDensity ?? 30,
           wireRange: t.wireRange ?? 4.0,
           wireMinDist: t.wireMinDist ?? 0.5,
-          airWetness: t.airWetness ?? 80,
-          airStreamFlow: t.airStreamFlow ?? 65,
-          airBloom: t.airBloom ?? 60,
-          airEdge: t.airEdge ?? 50,
-          airGranulation: t.airGranulation ?? 25,
-          airTipPour: t.airTipPour ?? 25,
+          airWetness: t.airWetness ?? 100,
+          airStreamFlow: t.airStreamFlow ?? 100,
+          airBloom: t.airBloom ?? 50,
+          airEdge: t.airEdge ?? 30,
+          airGranulation: t.airGranulation ?? 30,
+          airTipPour: t.airTipPour ?? 100,
           airFollowStroke: t.airFollowStroke ?? false,
           airTipAngle: t.airTipAngle ?? 0,
           airTipHardness: t.airTipHardness ?? 55,

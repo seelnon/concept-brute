@@ -1,6 +1,6 @@
 import { TOOLS } from '../constants.js';
-import { paintWireframeIncrementally, startWireframeStroke, paintWireframeMove, endWireframeStroke } from '../tools/wireframe.js';
-import { paintSmudgeOnChunks, startSmudgeStroke, endSmudgeStroke } from '../tools/smudge.js';
+import { paintWireframeIncrementally, startWireframeStroke, paintWireframeMove, endWireframeStroke, cancelWireframeStroke } from '../tools/wireframe.js';
+import { paintSmudgeOnChunks, startSmudgeStroke, endSmudgeStroke, cancelSmudgeStroke } from '../tools/smudge.js';
 import { paintFluidOnChunks, startFluidPaintStroke, endFluidPaintStroke, cancelFluidAfterEffect } from '../tools/fluidPaint.js';
 import { startLiquifyStroke, paintLiquifyStroke, endLiquifyStroke } from '../tools/liquify.js';
 import { paintAirIncrementally, clearAirParticles, startAirPaintStroke, endAirPaintStroke } from '../tools/airPaint.js';
@@ -169,6 +169,7 @@ export function _startStroke(e) {
   if (this.onDrawStart) this.onDrawStart();
   if (this.perfMonitor) this.perfMonitor.markStrokeStart(this.brush.type);
   this.isDrawing = true;
+  this._strokeStartTime = performance.now();
   this._fluidBristles = null;
   this.activeFluidBrush = null;
   cancelFluidAfterEffect(this);
@@ -178,28 +179,34 @@ export function _startStroke(e) {
   this.lastTime = e.timeStamp || performance.now();
   this.smoothedVelocity = 0;
   
-  // Improved pressure detection (default to 1.0 for mouse, use raw for pen)
+  // Improved pressure detection: only actual stylus ('pen') drives pressure sensitivity; touch & mouse remain at neutral 1.0
+  const usePenPressure = (e.pointerType === 'pen' && this.brush.pressureEnabled !== false);
   let pressure = 1.0;
-  if (e.pointerType === 'pen' || e.pointerType === 'touch') {
-      // If pressure is 0 or 0.5 (neutral/unsupported), we use a sensible starting floor (0.15)
+  if (usePenPressure) {
+      // If pressure is 0 or 0.5 (neutral/unsupported), use a sensible starting floor (0.15)
       // to avoid tiny first-stamp artifacts while still feeling responsive.
       pressure = (e.pressure !== undefined && e.pressure !== 0 && e.pressure !== 0.5) ? e.pressure : 0.15;
+      if (!Number.isFinite(pressure) || pressure <= 0) pressure = 0.5;
+      pressure = Math.max(0.01, Math.min(1.0, pressure));
   }
-  if (!Number.isFinite(pressure) || pressure <= 0) pressure = 0.5;
-  pressure = Math.max(0.01, Math.min(1.0, pressure));
   
-  // Size modulated by initial pressure
+  // Size & opacity modulated strictly by pen pressure when enabled
   let initSize = this.brush.size;
-  if (e.pointerType === 'pen' || e.pointerType === 'touch') {
-      initSize *= (0.2 + pressure * 0.8);
+  let initOpacity = 1.0;
+  if (usePenPressure) {
+      const sizeInf = this.brush.pressureSizeInfluence !== undefined ? this.brush.pressureSizeInfluence : (this.brush.pressureInfluence ?? 1.0);
+      const opacInf = this.brush.pressureOpacityInfluence !== undefined ? this.brush.pressureOpacityInfluence : (this.brush.pressureInfluence ?? 1.0);
+      initSize *= ((1 - sizeInf) + pressure * sizeInf);
+      initOpacity *= ((1 - opacInf) + pressure * opacInf);
   }
   if (!Number.isFinite(initSize) || initSize < 0.1) initSize = Math.max(0.1, this.brush.size);
+  initOpacity = Math.max(0.005, Math.min(1.0, initOpacity));
 
   const worldPos = {
       x: m.wx,
       y: m.wy,
       size: initSize,
-      opacity: (0.3 + pressure * 0.7),
+      opacity: initOpacity,
       pressure: pressure,
       color: this.brush.color
   };
@@ -277,6 +284,9 @@ export function _startStroke(e) {
 }
 
 export function _moveStroke(e) {
+  if ((this.isDrawing || this.isPanning || this.isZooming) && this._activeStrokePointerId != null && e && e.pointerId !== undefined && e.pointerId !== this._activeStrokePointerId) {
+      return;
+  }
   if (this.isDrawing && this.onDrawMove) this.onDrawMove();
 
   if (this.isPanning || (this.keys['r'] && this.isMouseDown)) {
@@ -534,13 +544,13 @@ export function _moveStroke(e) {
   }
 
   const currentTime = e.timeStamp || performance.now();
+  const usePenPressure = (e.pointerType === 'pen' && this.brush.pressureEnabled !== false);
   let pressure = 1.0;
-  if (e.pointerType === 'pen' || e.pointerType === 'touch') {
-      // More robust pressure fallback
+  if (usePenPressure) {
       pressure = (e.pressure !== undefined && e.pressure !== 0 && e.pressure !== 0.5) ? e.pressure : (this.lastPressure || 0.2);
+      if (!Number.isFinite(pressure) || pressure <= 0) pressure = this.lastPressure || 0.5;
+      pressure = Math.max(0.01, Math.min(1.0, pressure));
   }
-  if (!Number.isFinite(pressure) || pressure <= 0) pressure = this.lastPressure || 0.5;
-  pressure = Math.max(0.01, Math.min(1.0, pressure));
 
   // Smoother pressure
   this.lastPressure = (this.lastPressure || pressure) * 0.6 + pressure * 0.4;
@@ -587,7 +597,7 @@ export function _moveStroke(e) {
   }
   let dynamicSize = this.brush.size * sizeMod;
   
-  if (this.brush.pressureEnabled && (e.pointerType === 'pen' || e.pointerType === 'touch')) {
+  if (this.brush.pressureEnabled && e.pointerType === 'pen') {
       const inf = this.brush.pressureSizeInfluence !== undefined ? this.brush.pressureSizeInfluence : (this.brush.pressureInfluence ?? 1.0);
       dynamicSize *= ((1 - inf) + this.lastPressure * inf);
   }
@@ -604,7 +614,7 @@ export function _moveStroke(e) {
       opacMod = Math.max(0.05, 1.0 + vFactor * (speedOpacityFactor / 100) * 0.9);
   }
   
-  if (this.brush.pressureEnabled && (e.pointerType === 'pen' || e.pointerType === 'touch')) {
+  if (this.brush.pressureEnabled && e.pointerType === 'pen') {
       const inf = this.brush.pressureOpacityInfluence !== undefined ? this.brush.pressureOpacityInfluence : (this.brush.pressureInfluence ?? 1.0);
       opacMod *= ((1 - inf) + this.lastPressure * inf);
   }
@@ -1091,6 +1101,101 @@ export function _endStroke(e = null) {
   } else {
       this._updateBrushCursor();
   }
+}
+
+export function _cancelStroke() {
+  cancelWireframeStroke(this);
+  cancelSmudgeStroke(this);
+  cancelFluidAfterEffect(this);
+  clearAirParticles(this);
+
+  if (this.liquifyStroke) {
+      if (this.liquifyStroke.lazyRafId) {
+          cancelAnimationFrame(this.liquifyStroke.lazyRafId);
+          this.liquifyStroke.lazyRafId = null;
+      }
+      this.liquifyStroke.active = false;
+      this.liquifyStroke = null;
+  }
+  wasmCore.liquifySessionEnd();
+  wasmCore.liquifyEndAllSessions();
+  this.liquifyChunkData = null;
+
+  if (this.brush.type === TOOLS.LASSO) {
+      if (this._selectionBeforeStroke) {
+          this.activeSelectionPath = this._selectionBeforeStroke;
+      } else {
+          this.activeSelectionPath = null;
+      }
+      this._selectionBeforeStroke = null;
+      this.lassoPath = null;
+      this.lassoStrokeMode = null;
+  }
+
+  if (this._transformStateBeforeDrag && this.floatingSelection && this.restoreFloatingSelectionState) {
+      this.restoreFloatingSelectionState(this._transformStateBeforeDrag);
+  }
+  this._transformStateBeforeDrag = null;
+  this._gizmoDrag = null;
+
+  if (this.currentStrokeDirtyChunks && this.currentStrokeDirtyChunks.size > 0) {
+      this.currentStrokeDirtyChunks.forEach((data, id) => {
+          const chunk = this.chunks.get(id);
+          if (!chunk) return;
+          if (data.canvas && chunk.ctxs && chunk.ctxs[data.layer]) {
+              const ctx = chunk.ctxs[data.layer];
+              ctx.save();
+              ctx.globalCompositeOperation = 'source-over';
+              ctx.globalAlpha = 1.0;
+              ctx.clearRect(0, 0, chunk.width, chunk.height);
+              ctx.drawImage(data.canvas, 0, 0, chunk.width, chunk.height);
+              ctx.restore();
+              this._markDirty(id, data.layer, false);
+              if (this.gpuRenderer) {
+                  this.gpuRenderer.markChunkLayerDirty(chunk, data.layer);
+              }
+          }
+          if (chunk.strokeCtx) {
+              chunk.strokeCtx.clearRect(0, 0, chunk.width, chunk.height);
+          }
+          if (chunk.strokeCanvas) {
+              chunk.strokeCanvas.style.opacity = '0';
+          }
+          if (this.gpuRenderer) {
+              this.gpuRenderer.markChunkStrokeDirty(chunk, false);
+          }
+      });
+      this.currentStrokeDirtyChunks = new Map();
+  }
+
+  if (this.clearAllOffscreenCanvases) {
+      this.clearAllOffscreenCanvases();
+  }
+
+  const wasDrawing = this.isDrawing;
+  this.isDrawing = false;
+  this._activeStrokePointerId = null;
+  this._activeStrokePointerType = null;
+  this.isMouseDown = false;
+  this.isPanning = false;
+  this.isZooming = false;
+  this._fluidBristles = null;
+  this.activeFluidBrush = null;
+  this.lastPos = null;
+  this.strokePoints = [];
+  this.shiftOrigin = null;
+  this.shiftLockAxis = null;
+
+  if (wasDrawing && this.onDrawEnd) {
+      this.onDrawEnd();
+  }
+
+  if (this.brushCursor) this.brushCursor.style.display = 'none';
+  if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
+  this._status('READY');
+  this._updateCursor();
+  this.refresh();
+  if (this.perfMonitor) this.perfMonitor.markPhase('idle');
 }
 
 export function _paintCurveOnChunks(p0, p1, p2, size1, size2, opac1, opac2, color) {

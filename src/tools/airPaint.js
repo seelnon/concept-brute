@@ -18,12 +18,12 @@ const MAX_WET_CACHE_TILES = 96;
 
 // Cached Air/Watercolor settings (0 DOM reads inside draw loop)
 export const airSettings = {
-  wetness: 80,      // 0..100
-  streamFlow: 65,   // 0..100
-  bloom: 60,        // 0..100
-  edge: 50,         // 0..100
-  granulation: 25,  // 0..100
-  tipPour: 25,      // 0..100 (0 = crisp Draw silhouette, 100 = wet Pour puddle)
+  wetness: 100,     // 0..100
+  streamFlow: 100,  // 0..100
+  bloom: 50,        // 0..100
+  edge: 30,         // 0..100
+  granulation: 30,  // 0..100
+  tipPour: 100,     // 0..100 (0 = crisp Draw silhouette, 100 = wet Pour puddle)
   followStroke: false,
   tipAngle: 0,      // -180..180 deg
   tipHardness: 55,  // 0..100
@@ -32,12 +32,12 @@ export const airSettings = {
 
 export function syncAirSettingsFromTip(tipSettings) {
   if (!tipSettings) return;
-  airSettings.wetness = tipSettings.airWetness ?? 80;
-  airSettings.streamFlow = tipSettings.airStreamFlow ?? 65;
-  airSettings.bloom = tipSettings.airBloom ?? 60;
-  airSettings.edge = tipSettings.airEdge ?? 50;
-  airSettings.granulation = tipSettings.airGranulation ?? 25;
-  airSettings.tipPour = tipSettings.airTipPour ?? 25;
+  airSettings.wetness = tipSettings.airWetness ?? 100;
+  airSettings.streamFlow = tipSettings.airStreamFlow ?? 100;
+  airSettings.bloom = tipSettings.airBloom ?? 50;
+  airSettings.edge = tipSettings.airEdge ?? 30;
+  airSettings.granulation = tipSettings.airGranulation ?? 30;
+  airSettings.tipPour = tipSettings.airTipPour ?? 100;
   airSettings.followStroke = !!tipSettings.airFollowStroke;
   airSettings.tipAngle = tipSettings.airTipAngle ?? 0;
   airSettings.tipHardness = tipSettings.airTipHardness ?? 55;
@@ -244,16 +244,23 @@ function parseColor(c) {
  * Analytic divergence-free curl perturbation for fluid eddies.
  */
 function sampleCurl(x, y, time, freq) {
-  const fx = x * freq;
-  const fy = y * freq;
-  const p1 = fx + time * 0.85;
-  const q1 = fy - time * 0.62;
-  const p2 = 2.07 * fx - time * 1.1;
-  const q2 = 1.93 * fy + time * 0.77;
+  const px = x * freq;
+  const py = y * freq;
+  const a = (px * 0.927 + py * 0.375) + time * 0.68;
+  const b = (-px * 0.545 + py * 0.838) * 1.37 - time * 0.53;
+  const c = (-px * 0.312 - py * 0.950) * 2.13 + time * 0.81;
+
+  const sa = Math.sin(a);
+  const sb = Math.sin(b + 0.62 * sa);
+  const sc = Math.sin(c + 0.58 * sb);
+
+  const w1 = Math.cos(a + 0.55 * sc);
+  const w2 = Math.cos(b + 0.62 * sa);
+  const w3 = Math.cos(c + 0.58 * sb);
 
   return {
-    vx: -Math.sin(p1) * Math.sin(q1) + 0.85 * Math.sin(p2) * Math.cos(q2),
-    vy: -(Math.cos(p1) * Math.cos(q1) + 0.92 * Math.cos(p2) * Math.sin(q2))
+    vx: 0.72 * w1 - 0.64 * w2 + 0.48 * w3,
+    vy: -0.58 * w1 - 0.71 * w2 - 0.52 * w3
   };
 }
 
@@ -262,9 +269,12 @@ function sampleCurl(x, y, time, freq) {
  * Never shimmers or swims between frames because it depends purely on world coordinates.
  */
 function samplePaperTooth(wx, wy) {
-  const fine = Math.sin(wx * 0.34 + Math.cos(wy * 0.29) * 1.3) * Math.cos(wy * 0.37 - Math.sin(wx * 0.31) * 1.2);
-  const med = Math.sin(wx * 0.11 + wy * 0.09) * Math.cos(wy * 0.12 - wx * 0.08);
-  const v = 0.52 + 0.28 * fine + 0.20 * med;
+  const rx = wx * 0.80 - wy * 0.60;
+  const ry = wx * 0.60 + wy * 0.80;
+  const w1 = Math.sin(rx * 0.14 + Math.cos(ry * 0.19) * 1.35);
+  const w2 = Math.sin((-wx * 0.545 + wy * 0.838) * 0.29 + 0.8 * w1);
+  const w3 = Math.sin((-wx * 0.312 - wy * 0.950) * 0.53 + 0.65 * w2);
+  const v = 0.50 + 0.22 * w1 + 0.16 * w2 + 0.12 * w3;
   return v < 0 ? 0 : (v > 1 ? 1 : v);
 }
 
@@ -816,7 +826,7 @@ function runAirStep(engine, ab, from, to, radius, opacity, baseColor, pressure, 
   const pressFlowScale = 1.0 - pFlowInf + pFlowInf * effPressure;
   const brushFlow = engine?.brush?.flow !== undefined ? engine.brush.flow : 0.70;
   const flowFactor = Math.max(0.03, Math.min(1.0, brushFlow * pressFlowScale));
-  const tipPourRatio = Math.max(0.0, Math.min(1.0, (airSettings.tipPour ?? 25) / 100.0));
+  const tipPourRatio = Math.max(0.0, Math.min(1.0, (airSettings.tipPour ?? 100) / 100.0));
   const strokeOpacity = Math.max(0.02, Math.min(1.0, (opacity || 0.55) * effPressure));
 
   const rawDx = to.x - from.x;
@@ -967,7 +977,7 @@ function runAirStep(engine, ab, from, to, radius, opacity, baseColor, pressure, 
               u += (dirX * pushSpeed * prox * tipMask + curl.vx * curlSwirl * lobe * 0.45 * tipMask + pourOutX);
               v += (dirY * pushSpeed * prox * tipMask + curl.vy * curlSwirl * lobe * 0.45 * tipMask + pourOutY);
               const waterScale = 0.24 + 0.76 * tipPourRatio;
-              const injW = Math.max(tipSample.a, tipSample.bump * tipPourRatio) * inputWaterLevel * (0.45 + 0.55 * flowFactor) * waterScale;
+              const injW = Math.min(1.0, Math.max(tipSample.a, tipSample.bump * tipPourRatio) * inputWaterLevel * (0.45 + 0.55 * flowFactor) * waterScale);
               if (injW > w) w = injW;
             }
           } else {
@@ -976,7 +986,7 @@ function runAirStep(engine, ab, from, to, radius, opacity, baseColor, pressure, 
               v += (dirY * pushSpeed * prox + curl.vy * curlSwirl * lobe * 0.45);
             }
             const puddleProfile = dNorm < 1.05 ? Math.max(0.0, 1.0 - (dNorm / 1.05) * (dNorm / 1.05)) : 0.0;
-            const injW = Math.sqrt(puddleProfile) * inputWaterLevel * (0.45 + 0.55 * flowFactor);
+            const injW = Math.min(1.0, Math.sqrt(puddleProfile) * inputWaterLevel * (0.45 + 0.55 * flowFactor));
             if (injW > w) w = injW;
           }
         }
@@ -1160,7 +1170,7 @@ function runAirStep(engine, ab, from, to, radius, opacity, baseColor, pressure, 
   _nsPB0.set(_nsPB.subarray(0, numCells));
   _nsA0.set(_nsA.subarray(0, numCells));
 
-  const velDamp = 0.72 + 0.22 * wetnessRatio;
+  const velDamp = Math.min(0.97, 0.72 + 0.22 * wetnessRatio);
   const advStep = (0.30 + 0.75 * streamRatio) * (0.25 + 0.75 * wetnessRatio);
   const diffBase = (0.04 + 0.28 * bloomRatio) * (0.25 + 0.75 * wetnessRatio);
 
@@ -1262,7 +1272,7 @@ function runAirStep(engine, ab, from, to, radius, opacity, baseColor, pressure, 
   // -----------------------------------------------------------------
   if (!isSettleStep) {
     const coverWindow = Math.max(20.0, radius * 2.2);
-    const opticalMultWeight = 0.24 + 0.42 * wetnessRatio;
+    const opticalMultWeight = Math.min(1.0, 0.24 + 0.42 * wetnessRatio);
     const edgeStrength = edgeRatio * (0.25 + 0.75 * wetnessRatio);
     const localDist = prevDistTotal + safeDist;
 
@@ -1328,7 +1338,7 @@ function runAirStep(engine, ab, from, to, radius, opacity, baseColor, pressure, 
           const granMod = 1.0 - granRatio * 0.26 * tooth;
 
           // Classic subtle watery rim lightening inside puddle center when Pigment Edge is up
-          const centerLighten = 1.0 - edgeRatio * 0.15 * (1.0 - dNorm) * wetnessRatio;
+          const centerLighten = Math.max(0.25, 1.0 - edgeRatio * 0.15 * (1.0 - dNorm) * wetnessRatio);
 
           const targetA = Math.min(1.0, washDome * strokeOpacity * flowFactor * caustics * granMod * centerLighten);
 
@@ -1514,7 +1524,7 @@ function getNormalizedAirParams() {
     bloom: Math.max(0.0, Math.min(1.0, airSettings.bloom / 100.0)),
     edge: Math.max(0.0, Math.min(1.0, airSettings.edge / 100.0)),
     granulation: Math.max(0.0, Math.min(1.0, airSettings.granulation / 100.0)),
-    tipPour: Math.max(0.0, Math.min(1.0, (airSettings.tipPour ?? 25) / 100.0))
+    tipPour: Math.max(0.0, Math.min(1.0, (airSettings.tipPour ?? 100) / 100.0))
   };
 }
 

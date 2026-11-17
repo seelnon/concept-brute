@@ -592,8 +592,16 @@ export function endWireframeStroke(engine) {
     engine._wireframeState = null;
 }
 
+export function cancelWireframeStroke(engine) {
+    const state = engine && engine._wireframeState;
+    if (!state) return;
+    _releaseStateTiles(state);
+    engine._wireframeState = null;
+}
+
 export function paintWireframeIncrementally(engine, j) {
     const points = engine.strokePoints;
     if (j < 1 || j >= points.length) return;
     paintWireframeMove(engine, points[j]);
 }
+
