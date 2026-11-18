@@ -1,11 +1,17 @@
+import {
+  captureLayerSnapshot,
+  restoreBackupToLayer,
+  releaseBackupCanvas
+} from './backupPool.js';
+
 export function _disposeAction(action) {
   if (!action) return;
   if (action.chunks) {
       action.chunks.forEach(data => {
-          if (data.canvas) {
-              data.canvas.width = 1;
-              data.canvas.height = 1;
+          if (data && data.canvas) {
+              releaseBackupCanvas(this, data);
               data.canvas = null;
+              data.ctx = null;
           }
       });
       action.chunks.clear();
@@ -86,20 +92,9 @@ export function undo() {
           action.chunks.forEach((data, id) => {
               const chunk = this.chunks.get(id);
               if (chunk) {
-                  const srcCanvas = chunk.canvases[data.layer];
-                  const redoBackup = document.createElement('canvas');
-                  redoBackup.width = srcCanvas.width;
-                  redoBackup.height = srcCanvas.height;
-                  redoBackup.getContext('2d').drawImage(srcCanvas, 0, 0);
-                  redoAction.chunks.set(id, { layer: data.layer, canvas: redoBackup });
-
-                  const ctx = chunk.ctxs[data.layer];
-                  ctx.save();
-                  ctx.setTransform(1, 0, 0, 1, 0, 0);
-                  ctx.clearRect(0, 0, srcCanvas.width, srcCanvas.height);
-                  ctx.drawImage(data.canvas, 0, 0);
-                  ctx.restore();
-                  this._markDirty(id, data.layer);
+                  const redoBackup = captureLayerSnapshot(this, chunk, data.layer);
+                  redoAction.chunks.set(id, redoBackup);
+                  restoreBackupToLayer(this, chunk, id, data);
               }
           });
       }
@@ -167,20 +162,9 @@ export function redo() {
           action.chunks.forEach((data, id) => {
               const chunk = this.chunks.get(id);
               if (chunk) {
-                  const srcCanvas = chunk.canvases[data.layer];
-                  const undoBackup = document.createElement('canvas');
-                  undoBackup.width = srcCanvas.width;
-                  undoBackup.height = srcCanvas.height;
-                  undoBackup.getContext('2d').drawImage(srcCanvas, 0, 0);
-                  undoAction.chunks.set(id, { layer: data.layer, canvas: undoBackup });
-
-                  const ctx = chunk.ctxs[data.layer];
-                  ctx.save();
-                  ctx.setTransform(1, 0, 0, 1, 0, 0);
-                  ctx.clearRect(0, 0, srcCanvas.width, srcCanvas.height);
-                  ctx.drawImage(data.canvas, 0, 0);
-                  ctx.restore();
-                  this._markDirty(id, data.layer);
+                  const undoBackup = captureLayerSnapshot(this, chunk, data.layer);
+                  undoAction.chunks.set(id, undoBackup);
+                  restoreBackupToLayer(this, chunk, id, data);
               }
           });
       }
@@ -334,13 +318,15 @@ async function serializeHistoryState(historyArray) {
     if (action.chunks) {
       const chunkEntries = Array.from(action.chunks.entries());
       const chunksArr = await Promise.all(chunkEntries.map(async ([chunkId, data]) => {
-        const dataUrl = data.canvas ? await canvasToDataURLAsync(data.canvas, 'image/png') : null;
+        const isWasEmpty = !!(data.wasEmpty || !data.canvas);
+        const dataUrl = (!isWasEmpty && data.canvas) ? await canvasToDataURLAsync(data.canvas, 'image/png') : null;
         return {
           chunkId,
           layer: data.layer,
+          wasEmpty: isWasEmpty,
           dataUrl,
-          width: data.canvas ? data.canvas.width : 1024,
-          height: data.canvas ? data.canvas.height : 1024
+          width: data.canvas ? data.canvas.width : (data.width || 1024),
+          height: data.canvas ? data.canvas.height : (data.height || 1024)
         };
       }));
       act.chunks = chunksArr;
@@ -404,23 +390,34 @@ async function deserializeHistoryState(serializedArray) {
     if (act.chunks) {
       const chunksMap = new Map();
       await Promise.all(act.chunks.map(async (chunkItem) => {
+        if (chunkItem.wasEmpty || !chunkItem.dataUrl) {
+          chunksMap.set(chunkItem.chunkId, {
+            layer: chunkItem.layer,
+            canvas: null,
+            wasEmpty: true,
+            width: chunkItem.width || 1024,
+            height: chunkItem.height || 1024
+          });
+          return;
+        }
         const cv = document.createElement('canvas');
         cv.width = chunkItem.width;
         cv.height = chunkItem.height;
         const ctx = cv.getContext('2d');
-        if (chunkItem.dataUrl) {
-          const img = new Image();
-          await new Promise(resolve => {
-            img.onload = img.onerror = resolve;
-            img.src = chunkItem.dataUrl;
-          });
-          if (img.width > 0) {
-            ctx.drawImage(img, 0, 0);
-          }
+        const img = new Image();
+        await new Promise(resolve => {
+          img.onload = img.onerror = resolve;
+          img.src = chunkItem.dataUrl;
+        });
+        if (img.width > 0) {
+          ctx.drawImage(img, 0, 0);
         }
         chunksMap.set(chunkItem.chunkId, {
           layer: chunkItem.layer,
-          canvas: cv
+          canvas: cv,
+          wasEmpty: false,
+          width: cv.width,
+          height: cv.height
         });
       }));
       action.chunks = chunksMap;
@@ -456,18 +453,38 @@ export async function saveHistoryStackToStorage(explicitProjectId = null) {
   if (!this.storage) return;
 
   try {
+    const projKey = explicitProjectId || this.currentProjectId || '_default';
     if (!this.history || this.history.length === 0) {
+      if (this._lastSavedHistoryAction === null && this._lastSavedHistoryProjId === projKey && this._lastSavedHistoryLen === 0) {
+        return;
+      }
       await this.storage.saveSetting('historyStack', [], explicitProjectId);
       await this.storage.saveSetting('redoStack', [], explicitProjectId);
+      this._lastSavedHistoryAction = null;
+      this._lastSavedHistoryProjId = projKey;
+      this._lastSavedHistoryLen = 0;
       return;
     }
+
+    const lastAction = this.history[this.history.length - 1];
+    if (
+      this._lastSavedHistoryAction === lastAction &&
+      this._lastSavedHistoryProjId === projKey &&
+      this._lastSavedHistoryLen === this.history.length
+    ) {
+      return;
+    }
+
     // Only serialize the last 1 action for storage persistence to prevent massive project-switching lags!
-    const historyToSave = this.history.slice(-1);
+    const historyToSave = [lastAction];
     const serializedHistory = await serializeHistoryState(historyToSave);
     const serializedRedo = [];
 
     await this.storage.saveSetting('historyStack', serializedHistory, explicitProjectId);
     await this.storage.saveSetting('redoStack', serializedRedo, explicitProjectId);
+    this._lastSavedHistoryAction = lastAction;
+    this._lastSavedHistoryProjId = projKey;
+    this._lastSavedHistoryLen = this.history.length;
   } catch (err) {
     console.warn('Failed to save history stacks to storage:', err);
   }

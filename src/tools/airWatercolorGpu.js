@@ -11,6 +11,8 @@
  * - End-of-stroke DRY_SHARPEN_FS and Canvas2D synchronization run once on endStroke() with Undo & Selection fidelity.
  */
 
+import { backupChunkLayer } from '../engine/backupPool.js';
+
 const TILE_SIZE = 256;
 const WORK_SIZE = 1024;
 const MAX_POOL_TILES = 48;
@@ -977,12 +979,17 @@ export class GpuWatercolorSolver {
   _dstMrt() { return this.curWorkIdx === 0 ? this.mrtWorkB : this.mrtWorkA; }
   _swapWork() { this.curWorkIdx = 1 - this.curWorkIdx; }
 
-  uploadTipMaps(tipRgbaBytes, res = 64) {
+  uploadTipMaps(tipRgbaBytes, res = 64, tipVersion = null) {
     if (!this.ready || !this.tipTex) return;
     if (!tipRgbaBytes || res <= 0) {
       this.hasTip = false;
+      this._uploadedTipVersion = tipVersion;
       return;
     }
+    if (tipVersion !== null && this._uploadedTipVersion === tipVersion && this.hasTip) {
+      return;
+    }
+    this._uploadedTipVersion = tipVersion;
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, this.tipTex);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
@@ -997,17 +1004,17 @@ export class GpuWatercolorSolver {
     this.hasTip = true;
   }
 
-  _ensureBackedUp(engine, chunk, cx, cy) {
+  _ensureBackedUp(engine, chunk, cx, cy, wasEmptyOverride = undefined) {
     const id = `${cx},${cy}`;
-    if (!engine.currentStrokeDirtyChunks.has(id)) {
-      const srcCanvas = chunk.canvases[engine.activeLayer];
-      const backup = document.createElement('canvas');
-      backup.width = srcCanvas.width;
-      backup.height = srcCanvas.height;
-      backup.getContext('2d').drawImage(srcCanvas, 0, 0);
-      engine.currentStrokeDirtyChunks.set(id, { layer: engine.activeLayer, canvas: backup });
-      engine._markDirty(id, engine.activeLayer, false);
-    }
+    const touched = this.touchedChunks.get(id);
+    const wasEmpty = wasEmptyOverride !== undefined
+      ? wasEmptyOverride
+      : (touched ? touched.wasEmpty : undefined);
+    backupChunkLayer(engine, chunk, id, {
+      layer: engine.activeLayer,
+      dirtyIsEmpty: false,
+      wasEmpty
+    });
   }
 
   _ensureTile(engine, tx, ty) {
@@ -1273,9 +1280,11 @@ export class GpuWatercolorSolver {
         const sh = ey - sy;
         if (sw <= 0 || sh <= 0) continue;
 
-        if (chunk.isEmpty) chunk.isEmpty[layer] = false;
         const id = `${cx},${cy}`;
-        this.touchedChunks.set(id, { cx, cy, chunk });
+        if (!this.touchedChunks.has(id)) {
+          this.touchedChunks.set(id, { cx, cy, chunk, wasEmpty: !!(chunk.isEmpty && chunk.isEmpty[layer]) });
+        }
+        if (chunk.isEmpty) chunk.isEmpty[layer] = false;
 
         // Re-bind pigTex on TEXTURE0 because _createOrUpdateTexture binds chunk.gpuTextures[layer]
         gl.activeTexture(gl.TEXTURE0);

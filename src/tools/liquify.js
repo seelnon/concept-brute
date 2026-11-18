@@ -1,4 +1,5 @@
 import { wasmCore } from '../wasm/wasmBridge.js';
+import { backupChunkLayer } from '../engine/backupPool.js';
 
 /**
  * Ensures pristine chunk backup exists in CPU memory for undo/redo and zero-stall reads.
@@ -9,22 +10,12 @@ function _ensureChunkBackup(engine, cx, cy) {
     const chunk = engine._getChunk(cx, cy);
     if (!chunk) return null;
     const id = `${cx},${cy}`;
-
-    if (!engine.currentStrokeDirtyChunks.has(id)) {
-        const srcCanvas = chunk.canvases[engine.activeLayer];
-        const backup = document.createElement('canvas');
-        backup.width = srcCanvas.width;
-        backup.height = srcCanvas.height;
-        const backupCtx = backup.getContext('2d', { willReadFrequently: true });
-        backupCtx.drawImage(srcCanvas, 0, 0);
-        engine.currentStrokeDirtyChunks.set(id, {
-            layer: engine.activeLayer,
-            canvas: backup,
-            ctx: backupCtx
-        });
-        engine._markDirty(id, engine.activeLayer);
-    }
-    return { id, chunk, backupData: engine.currentStrokeDirtyChunks.get(id) };
+    const backupData = backupChunkLayer(engine, chunk, id, {
+        layer: engine.activeLayer,
+        willReadFrequently: true,
+        needCanvas: true
+    });
+    return { id, chunk, backupData };
 }
 
 /**
@@ -186,13 +177,21 @@ export function startLiquifyStroke(engine, worldPos) {
             const t0 = performance.now();
             while (stroke.lazyQueue.length > 0 && (performance.now() - t0) < 1.5) {
                 const item = stroke.lazyQueue.shift();
+                const rMinX = worldPos.x - item.r;
+                const rMaxX = worldPos.x + item.r;
+                const rMinY = worldPos.y - item.r;
+                const rMaxY = worldPos.y + item.r;
+                if (rMinX >= stroke.stampedMinX && rMaxX <= stroke.stampedMaxX &&
+                    rMinY >= stroke.stampedMinY && rMaxY <= stroke.stampedMaxY) {
+                    continue;
+                }
                 _stampWorldRegion(
                     engine,
                     stroke,
-                    worldPos.x - item.r,
-                    worldPos.x + item.r,
-                    worldPos.y - item.r,
-                    worldPos.y + item.r
+                    rMinX,
+                    rMaxX,
+                    rMinY,
+                    rMaxY
                 );
             }
             if (stroke.lazyQueue.length > 0) {
@@ -371,10 +370,10 @@ export function paintLiquifyStroke(engine, from, to, dynamicSize, pressure) {
             const chunkW = engine.isStatic ? engine.staticWidth : (chunk.width || engine.chunkSize);
             const chunkH = engine.isStatic ? engine.staticHeight : (chunk.height || engine.chunkSize);
 
-            const iMinWorldX = Math.max(clx, minWorldX);
-            const iMaxWorldX = Math.min(clx + chunkW - 1, maxWorldX);
-            const iMinWorldY = Math.max(cly, minWorldY);
-            const iMaxWorldY = Math.min(cly + chunkH - 1, maxWorldY);
+            const iMinWorldX = Math.max(clx, stroke.originX, minWorldX);
+            const iMaxWorldX = Math.min(clx + chunkW - 1, stroke.originX + stroke.width - 1, maxWorldX);
+            const iMinWorldY = Math.max(cly, stroke.originY, minWorldY);
+            const iMaxWorldY = Math.min(cly + chunkH - 1, stroke.originY + stroke.height - 1, maxWorldY);
 
             if (iMaxWorldX < iMinWorldX || iMaxWorldY < iMinWorldY) continue;
 

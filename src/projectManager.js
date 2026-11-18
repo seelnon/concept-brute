@@ -1206,6 +1206,11 @@ export async function saveProject(app, force = false, targetProjectId = null) {
             await app.engine.saveHistoryStackToStorage(projId);
         }
 
+        if (app.engine.isDrawing && !force) {
+            app._triggerAutoSave();
+            return;
+        }
+
         if (app.engine.refsDirty) {
             const refData = app.engine.referenceImages.map(r => ({
                 id: r.id,
@@ -1246,78 +1251,105 @@ export async function saveProject(app, force = false, targetProjectId = null) {
         }
 
         const dirty = Array.from(app.engine.dirtyChunks);
-        app.engine.dirtyChunks.clear(); 
+        app.engine.dirtyChunks.clear();
 
         const sectorGroups = new Map();
-        
+
         for (const item of dirty) {
-            const [chunkId, layerStr] = item.split('|');
+            const [chunkId] = item.split('|');
             const [cx, cy] = chunkId.split(',').map(Number);
             const sx = Math.floor(cx / SECTOR_SIZE);
             const sy = Math.floor(cy / SECTOR_SIZE);
             const sKey = `${sx},${sy}`;
-            
+
             if (!sectorGroups.has(sKey)) sectorGroups.set(sKey, new Set());
             sectorGroups.get(sKey).add(item);
         }
 
-        const promises = [];
-        
+        const pendingItems = new Set(dirty);
+        let interruptedByStroke = false;
+        let groupIndex = 0;
+
         for (const [sKey, affectedItems] of sectorGroups) {
-            const [sx, sy] = sKey.split(',').map(Number);
-            
-            promises.push((async () => {
-                let sector = await app.storage.loadSector(sx, sy, projId);
-                if (!sector || !sector.chunks) {
-                    sector = { chunks: {} };
+            if (!force && app.engine.isDrawing) {
+                interruptedByStroke = true;
+                break;
+            }
+            if (!force && groupIndex > 0) {
+                await new Promise(r => setTimeout(r, 0));
+                if (app.engine.isDrawing) {
+                    interruptedByStroke = true;
+                    break;
                 }
+            }
+            groupIndex++;
 
-                for (const item of affectedItems) {
-                    const [chunkId, layerStr] = item.split('|');
-                    const l = parseInt(layerStr, 10);
-                    const [cx, cy] = chunkId.split(',').map(Number);
-                    const chunkKey = `${l}_${cx}_${cy}`;
+            const [sx, sy] = sKey.split(',').map(Number);
+            let sector = await app.storage.loadSector(sx, sy, projId);
+            if (!sector || !sector.chunks) {
+                sector = { chunks: {} };
+            }
 
-                    // Also remove any stale alternate representations of this chunk/layer
-                    delete sector.chunks[`${cx},${cy}|${l}`];
-                    delete sector.chunks[`${l},${cx},${cy}`];
-                    delete sector.chunks[`${cx}_${cy}_${l}`];
+            for (const item of affectedItems) {
+                if (!force && app.engine.isDrawing) {
+                    interruptedByStroke = true;
+                    break;
+                }
+                const [chunkId, layerStr] = item.split('|');
+                const l = parseInt(layerStr, 10);
+                const [cx, cy] = chunkId.split(',').map(Number);
+                const chunkKey = `${l}_${cx}_${cy}`;
 
-                    const chunk = app.engine.chunks.get(chunkId);
-                    if (chunk && chunk.canvases && chunk.canvases[l]) {
-                        const sourceCanvas = chunk.canvases[l];
-                        if (sourceCanvas.width === 0 || sourceCanvas.height === 0) {
-                            delete sector.chunks[chunkKey];
-                            chunk.isEmpty[l] = true;
-                            continue;
-                        }
+                // Also remove any stale alternate representations of this chunk/layer
+                delete sector.chunks[`${cx},${cy}|${l}`];
+                delete sector.chunks[`${l},${cx},${cy}`];
+                delete sector.chunks[`${cx}_${cy}_${l}`];
 
-                        const empty = isCanvasEmpty(sourceCanvas);
-                        chunk.isEmpty[l] = empty;
-                        
-                        if (empty) {
-                            delete sector.chunks[chunkKey];
-                        } else {
-                            // High-speed binary Blob storage in IndexedDB (zero base64 conversion overhead!)
-                            const blob = await canvasToBlobAsync(sourceCanvas, 'image/webp', 0.95);
-                            sector.chunks[chunkKey] = blob || (await canvasToDataURLAsync(sourceCanvas, 'image/png'));
-                        }
+                const chunk = app.engine.chunks.get(chunkId);
+                if (chunk && chunk.canvases && chunk.canvases[l]) {
+                    const sourceCanvas = chunk.canvases[l];
+                    if (sourceCanvas.width === 0 || sourceCanvas.height === 0) {
+                        delete sector.chunks[chunkKey];
+                        chunk.isEmpty[l] = true;
+                        pendingItems.delete(item);
+                        continue;
+                    }
+
+                    const empty = (!force && chunk.isEmpty && chunk.isEmpty[l] === true)
+                        ? true
+                        : isCanvasEmpty(sourceCanvas);
+                    chunk.isEmpty[l] = empty;
+
+                    if (empty) {
+                        delete sector.chunks[chunkKey];
+                    } else {
+                        // High-speed binary Blob storage in IndexedDB (zero base64 conversion overhead!)
+                        const blob = await canvasToBlobAsync(sourceCanvas, 'image/webp', 0.95);
+                        sector.chunks[chunkKey] = blob || (await canvasToDataURLAsync(sourceCanvas, 'image/png'));
                     }
                 }
+                pendingItems.delete(item);
+            }
 
-                await app.storage.saveSector(sx, sy, sector, projId);
-            })());
+            await app.storage.saveSector(sx, sy, sector, projId);
+            if (interruptedByStroke) break;
         }
-        
-        await Promise.all(promises);
-        
-        if (app.engine && app.engine.clearAllOffscreenCanvases) {
+
+        if (interruptedByStroke) {
+            pendingItems.forEach(item => app.engine.dirtyChunks.add(item));
+            app._triggerAutoSave();
+            return;
+        }
+
+        if (app.engine && app.engine.clearAllOffscreenCanvases && !app.engine.isDrawing) {
             app.engine.clearAllOffscreenCanvases();
         }
-        
+
         app._status('SAVED');
         app._showSaved();
-        await updateStorageStat(app);
+        if (!app.engine.isDrawing) {
+            await updateStorageStat(app);
+        }
     } catch (e) {
         console.error("Save failed", e);
         if (dirty && dirty.length > 0) {

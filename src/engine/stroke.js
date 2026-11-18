@@ -7,6 +7,12 @@ import { paintAirIncrementally, clearAirParticles, startAirPaintStroke, endAirPa
 import { isMobileDevice } from '../colorUtils.js';
 import { wasmCore } from '../wasm/wasmBridge.js';
 import { hitTestTransformGizmo, updateGizmoHoverUI } from '../tools/selection.js';
+import {
+  backupChunkLayer,
+  restoreBackupToLayer,
+  acquireBackupCanvas,
+  releaseBackupCanvas
+} from './backupPool.js';
 
 export function _startStroke(e) {
   this.lastMousePos = { x: e.clientX, y: e.clientY };
@@ -190,11 +196,13 @@ export function _startStroke(e) {
       pressure = Math.max(0.01, Math.min(1.0, pressure));
   }
   
-  // Size & opacity modulated strictly by pen pressure when enabled
+  // Size & opacity modulated strictly by pen pressure when enabled (Liquify keeps exact cursor size)
   let initSize = this.brush.size;
   let initOpacity = 1.0;
   if (usePenPressure) {
-      const sizeInf = this.brush.pressureSizeInfluence !== undefined ? this.brush.pressureSizeInfluence : (this.brush.pressureInfluence ?? 1.0);
+      const sizeInf = (this.brush.type === TOOLS.LIQUIFY)
+          ? 0.0
+          : (this.brush.pressureSizeInfluence !== undefined ? this.brush.pressureSizeInfluence : (this.brush.pressureInfluence ?? 1.0));
       const opacInf = this.brush.pressureOpacityInfluence !== undefined ? this.brush.pressureOpacityInfluence : (this.brush.pressureInfluence ?? 1.0);
       initSize *= ((1 - sizeInf) + pressure * sizeInf);
       initOpacity *= ((1 - opacInf) + pressure * opacInf);
@@ -249,7 +257,8 @@ export function _startStroke(e) {
           const cacheSize = this._getCacheSize(bSize);
           const airbrush = this.brush.airbrush || 0;
           const sharpen = this.brush.brushSharpen || 0;
-          const cacheKey = `${airbrush}_${cacheSize}_${sharpen}`;
+          const tipVer = this.brush.tip._tipVersion || 0;
+          const cacheKey = `${airbrush}_${cacheSize}_${sharpen}_${tipVer}`;
           if (!this._tipColorCache || this._tipColorCache.key !== cacheKey || this._tipColorCache.color !== this.brush.color || this._tipColorCache.srcTip !== this.brush.tip) {
               this._updateTipCache(cacheSize, airbrush, this.brush.color);
           }
@@ -268,15 +277,7 @@ export function _startStroke(e) {
           const startChunk = this._getChunk(sCX, sCY);
           if (startChunk) {
               const id = `${sCX},${sCY}`;
-              if (!this.currentStrokeDirtyChunks.has(id)) {
-                  const srcCanvas = startChunk.canvases[this.activeLayer];
-                  const backup = document.createElement('canvas');
-                  backup.width = srcCanvas.width;
-                  backup.height = srcCanvas.height;
-                  backup.getContext('2d').drawImage(srcCanvas, 0, 0);
-                  this.currentStrokeDirtyChunks.set(id, { layer: this.activeLayer, canvas: backup });
-                  this._markDirty(id, this.activeLayer);
-              }
+              backupChunkLayer(this, startChunk, id, { layer: this.activeLayer });
           }
       }
   }
@@ -586,8 +587,9 @@ export function _moveStroke(e) {
   // Smooth progressive ease-in curve: progressive ramp without sudden 0-to-100 jump
   const vFactor = Math.pow(normSpeed, 1.5);
   
-  // Size Modifier: -100% to +100%
-  const speedSizeFactor = this.brush.speedSize || 0;
+  // Size Modifier: -100% to +100% (Liquify radius always matches its visible circular cursor)
+  const isLiquify = this.brush.type === TOOLS.LIQUIFY;
+  const speedSizeFactor = isLiquify ? 0 : (this.brush.speedSize || 0);
   let sizeMod = 1.0;
   if (speedSizeFactor > 0) {
       sizeMod = 1.0 + vFactor * (speedSizeFactor / 100) * 1.5;
@@ -597,7 +599,7 @@ export function _moveStroke(e) {
   }
   let dynamicSize = this.brush.size * sizeMod;
   
-  if (this.brush.pressureEnabled && e.pointerType === 'pen') {
+  if (!isLiquify && this.brush.pressureEnabled && e.pointerType === 'pen') {
       const inf = this.brush.pressureSizeInfluence !== undefined ? this.brush.pressureSizeInfluence : (this.brush.pressureInfluence ?? 1.0);
       dynamicSize *= ((1 - inf) + this.lastPressure * inf);
   }
@@ -807,17 +809,20 @@ export function _endStroke(e = null) {
               
               // Mask strokeCanvas to compound selection before drawing it on the layer
               if (this.activeSelectionPath && chunk.strokeCanvas) {
-                  const maskCanvas = document.createElement('canvas');
-                  maskCanvas.width = chunk.width;
-                  maskCanvas.height = chunk.height;
-                  const maskCtx = maskCanvas.getContext('2d');
+                  const maskCanvas = acquireBackupCanvas(this, chunk.width, chunk.height, false);
+                  const maskCtx = maskCanvas._cached2dCtx || maskCanvas.getContext('2d');
+                  maskCtx.save();
+                  maskCtx.setTransform(1, 0, 0, 1, 0, 0);
+                  maskCtx.clearRect(0, 0, chunk.width, chunk.height);
                   this.drawSelectionMask(maskCtx, this.activeSelectionPath, lx, ly);
+                  maskCtx.restore();
 
                   const sCtx = chunk.strokeCanvas.getContext('2d');
                   sCtx.save();
                   sCtx.globalCompositeOperation = 'destination-in';
                   sCtx.drawImage(maskCanvas, 0, 0);
                   sCtx.restore();
+                  releaseBackupCanvas(this, maskCanvas);
               }
 
               ctx.globalAlpha = (this.brush.type === TOOLS.AIR) ? 1.0 : this.brush.opacity; // Per-stroke opacity from UI
@@ -887,51 +892,60 @@ export function _endStroke(e = null) {
       if ((this.brush.type === TOOLS.SMUDGE || this.brush.type === TOOLS.LIQUIFY || this.brush.type === TOOLS.FLUID || this.brush.type === TOOLS.AIR) && this.activeSelectionPath) {
           this.currentStrokeDirtyChunks.forEach((data, id) => {
               const chunk = this.chunks.get(id);
-              if (chunk && data.canvas) {
+              if (chunk && (data.canvas || data.wasEmpty)) {
                   const lx = this.isStatic ? -this.staticWidth / 2 : chunk.cx * this.chunkSize;
                   const ly = this.isStatic ? -this.staticHeight / 2 : chunk.cy * this.chunkSize;
-                  
-                  // Create selection mask
-                  const maskCanvas = document.createElement('canvas');
-                  maskCanvas.width = chunk.width;
-                  maskCanvas.height = chunk.height;
-                  const maskCtx = maskCanvas.getContext('2d');
+
+                  const maskCanvas = acquireBackupCanvas(this, chunk.width, chunk.height, false);
+                  const maskCtx = maskCanvas._cached2dCtx || maskCanvas.getContext('2d');
+                  maskCtx.save();
+                  maskCtx.setTransform(1, 0, 0, 1, 0, 0);
+                  maskCtx.clearRect(0, 0, chunk.width, chunk.height);
                   this.drawSelectionMask(maskCtx, this.activeSelectionPath, lx, ly);
+                  maskCtx.restore();
 
-                  // 1. Create standard temp canvas containing the CURRENT canvas (drawn/smudged/liquified state)
-                  const tempCurrent = document.createElement('canvas');
-                  tempCurrent.width = chunk.width;
-                  tempCurrent.height = chunk.height;
-                  const tempCurrentCtx = tempCurrent.getContext('2d');
-                  tempCurrentCtx.drawImage(chunk.canvases[this.activeLayer], 0, 0);
-
-                  // Retain only CURRENT pixels inside mask
-                  tempCurrentCtx.save();
-                  tempCurrentCtx.globalCompositeOperation = 'destination-in';
-                  tempCurrentCtx.drawImage(maskCanvas, 0, 0);
-                  tempCurrentCtx.restore();
-
-                  // 2. Create a temp canvas containing original BACKUP pixels
-                  const tempBackup = document.createElement('canvas');
-                  tempBackup.width = chunk.width;
-                  tempBackup.height = chunk.height;
-                  const tempBackupCtx = tempBackup.getContext('2d');
-                  tempBackupCtx.drawImage(data.canvas, 0, 0);
-
-                  // Retain only BACKUP pixels outside mask
-                  tempBackupCtx.save();
-                  tempBackupCtx.globalCompositeOperation = 'destination-out';
-                  tempBackupCtx.drawImage(maskCanvas, 0, 0);
-                  tempBackupCtx.restore();
-
-                  // 3. Combine them back using perfect additive blend to avoid edge antialiasing fringing
                   const layerCtx = chunk.ctxs[this.activeLayer];
-                  layerCtx.clearRect(0, 0, chunk.width, chunk.height);
-                  layerCtx.drawImage(tempBackup, 0, 0);
-                  layerCtx.save();
-                  layerCtx.globalCompositeOperation = 'lighter';
-                  layerCtx.drawImage(tempCurrent, 0, 0);
-                  layerCtx.restore();
+
+                  if (data.wasEmpty || !data.canvas) {
+                      layerCtx.save();
+                      layerCtx.setTransform(1, 0, 0, 1, 0, 0);
+                      layerCtx.globalCompositeOperation = 'destination-in';
+                      layerCtx.drawImage(maskCanvas, 0, 0);
+                      layerCtx.restore();
+                  } else {
+                      const tempCurrent = acquireBackupCanvas(this, chunk.width, chunk.height, false);
+                      const tempCurrentCtx = tempCurrent._cached2dCtx || tempCurrent.getContext('2d');
+                      tempCurrentCtx.save();
+                      tempCurrentCtx.setTransform(1, 0, 0, 1, 0, 0);
+                      tempCurrentCtx.globalCompositeOperation = 'copy';
+                      tempCurrentCtx.drawImage(chunk.canvases[this.activeLayer], 0, 0);
+                      tempCurrentCtx.globalCompositeOperation = 'destination-in';
+                      tempCurrentCtx.drawImage(maskCanvas, 0, 0);
+                      tempCurrentCtx.restore();
+
+                      const tempBackup = acquireBackupCanvas(this, chunk.width, chunk.height, false);
+                      const tempBackupCtx = tempBackup._cached2dCtx || tempBackup.getContext('2d');
+                      tempBackupCtx.save();
+                      tempBackupCtx.setTransform(1, 0, 0, 1, 0, 0);
+                      tempBackupCtx.globalCompositeOperation = 'copy';
+                      tempBackupCtx.drawImage(data.canvas, 0, 0);
+                      tempBackupCtx.globalCompositeOperation = 'destination-out';
+                      tempBackupCtx.drawImage(maskCanvas, 0, 0);
+                      tempBackupCtx.restore();
+
+                      layerCtx.save();
+                      layerCtx.setTransform(1, 0, 0, 1, 0, 0);
+                      layerCtx.globalCompositeOperation = 'copy';
+                      layerCtx.drawImage(tempBackup, 0, 0);
+                      layerCtx.globalCompositeOperation = 'lighter';
+                      layerCtx.drawImage(tempCurrent, 0, 0);
+                      layerCtx.restore();
+
+                      releaseBackupCanvas(this, tempCurrent);
+                      releaseBackupCanvas(this, tempBackup);
+                  }
+
+                  releaseBackupCanvas(this, maskCanvas);
                   if (this.gpuRenderer) {
                       this.gpuRenderer.markChunkLayerDirty(chunk, this.activeLayer);
                   }
@@ -943,57 +957,53 @@ export function _endStroke(e = null) {
       if (this.brush.type === TOOLS.ERASER && this.activeSelectionPath) {
           this.currentStrokeDirtyChunks.forEach((data, id) => {
               const chunk = this.chunks.get(id);
-              if (chunk) {
+              if (chunk && data.canvas && !data.wasEmpty) {
                   const lx = this.isStatic ? -this.staticWidth / 2 : chunk.cx * this.chunkSize;
                   const ly = this.isStatic ? -this.staticHeight / 2 : chunk.cy * this.chunkSize;
-                  
-                  const backupCanvas = data.canvas;
-                  if (backupCanvas) {
-                      const layerCtx = chunk.ctxs[this.activeLayer];
+                  const layerCtx = chunk.ctxs[this.activeLayer];
 
-                      // 1. Create selection mask
-                      const maskCanvas = document.createElement('canvas');
-                      maskCanvas.width = chunk.width;
-                      maskCanvas.height = chunk.height;
-                      const maskCtx = maskCanvas.getContext('2d');
-                      this.drawSelectionMask(maskCtx, this.activeSelectionPath, lx, ly);
+                  const maskCanvas = acquireBackupCanvas(this, chunk.width, chunk.height, false);
+                  const maskCtx = maskCanvas._cached2dCtx || maskCanvas.getContext('2d');
+                  maskCtx.save();
+                  maskCtx.setTransform(1, 0, 0, 1, 0, 0);
+                  maskCtx.clearRect(0, 0, chunk.width, chunk.height);
+                  this.drawSelectionMask(maskCtx, this.activeSelectionPath, lx, ly);
+                  maskCtx.restore();
 
-                      // 2. Create standard temp canvas containing the CURRENT canvas (erased state)
-                      const tempCurrent = document.createElement('canvas');
-                      tempCurrent.width = chunk.width;
-                      tempCurrent.height = chunk.height;
-                      const tempCurrentCtx = tempCurrent.getContext('2d');
-                      tempCurrentCtx.drawImage(chunk.canvases[this.activeLayer], 0, 0);
+                  const tempCurrent = acquireBackupCanvas(this, chunk.width, chunk.height, false);
+                  const tempCurrentCtx = tempCurrent._cached2dCtx || tempCurrent.getContext('2d');
+                  tempCurrentCtx.save();
+                  tempCurrentCtx.setTransform(1, 0, 0, 1, 0, 0);
+                  tempCurrentCtx.globalCompositeOperation = 'copy';
+                  tempCurrentCtx.drawImage(chunk.canvases[this.activeLayer], 0, 0);
+                  tempCurrentCtx.globalCompositeOperation = 'destination-in';
+                  tempCurrentCtx.drawImage(maskCanvas, 0, 0);
+                  tempCurrentCtx.restore();
 
-                      // Retain only CURRENT pixels inside mask
-                      tempCurrentCtx.save();
-                      tempCurrentCtx.globalCompositeOperation = 'destination-in';
-                      tempCurrentCtx.drawImage(maskCanvas, 0, 0);
-                      tempCurrentCtx.restore();
+                  const tempBackup = acquireBackupCanvas(this, chunk.width, chunk.height, false);
+                  const tempBackupCtx = tempBackup._cached2dCtx || tempBackup.getContext('2d');
+                  tempBackupCtx.save();
+                  tempBackupCtx.setTransform(1, 0, 0, 1, 0, 0);
+                  tempBackupCtx.globalCompositeOperation = 'copy';
+                  tempBackupCtx.drawImage(data.canvas, 0, 0);
+                  tempBackupCtx.globalCompositeOperation = 'destination-out';
+                  tempBackupCtx.drawImage(maskCanvas, 0, 0);
+                  tempBackupCtx.restore();
 
-                      // 3. Create a temp canvas containing original BACKUP pixels
-                      const tempBackup = document.createElement('canvas');
-                      tempBackup.width = chunk.width;
-                      tempBackup.height = chunk.height;
-                      const tempBackupCtx = tempBackup.getContext('2d');
-                      tempBackupCtx.drawImage(backupCanvas, 0, 0);
+                  layerCtx.save();
+                  layerCtx.setTransform(1, 0, 0, 1, 0, 0);
+                  layerCtx.globalCompositeOperation = 'copy';
+                  layerCtx.drawImage(tempBackup, 0, 0);
+                  layerCtx.globalCompositeOperation = 'lighter';
+                  layerCtx.drawImage(tempCurrent, 0, 0);
+                  layerCtx.restore();
 
-                      // Retain only BACKUP pixels outside mask
-                      tempBackupCtx.save();
-                      tempBackupCtx.globalCompositeOperation = 'destination-out';
-                      tempBackupCtx.drawImage(maskCanvas, 0, 0);
-                      tempBackupCtx.restore();
+                  releaseBackupCanvas(this, maskCanvas);
+                  releaseBackupCanvas(this, tempCurrent);
+                  releaseBackupCanvas(this, tempBackup);
 
-                      // 4. Combine them back onto chunk's canvas with perfect additive blend to avoid edge antialiasing fringing
-                      layerCtx.clearRect(0, 0, chunk.width, chunk.height);
-                      layerCtx.drawImage(tempBackup, 0, 0);
-                      layerCtx.save();
-                      layerCtx.globalCompositeOperation = 'lighter';
-                      layerCtx.drawImage(tempCurrent, 0, 0);
-                      layerCtx.restore();
-                      if (this.gpuRenderer) {
-                          this.gpuRenderer.markChunkLayerDirty(chunk, this.activeLayer);
-                      }
+                  if (this.gpuRenderer) {
+                      this.gpuRenderer.markChunkLayerDirty(chunk, this.activeLayer);
                   }
               }
           });
@@ -1056,7 +1066,6 @@ export function _endStroke(e = null) {
   }
   
   if (this.brush.type === TOOLS.LIQUIFY) {
-      endLiquifyStroke(this);
       this.clearAllOffscreenCanvases();
   }
   
@@ -1141,28 +1150,27 @@ export function _cancelStroke() {
   if (this.currentStrokeDirtyChunks && this.currentStrokeDirtyChunks.size > 0) {
       this.currentStrokeDirtyChunks.forEach((data, id) => {
           const chunk = this.chunks.get(id);
-          if (!chunk) return;
-          if (data.canvas && chunk.ctxs && chunk.ctxs[data.layer]) {
-              const ctx = chunk.ctxs[data.layer];
-              ctx.save();
-              ctx.globalCompositeOperation = 'source-over';
-              ctx.globalAlpha = 1.0;
-              ctx.clearRect(0, 0, chunk.width, chunk.height);
-              ctx.drawImage(data.canvas, 0, 0, chunk.width, chunk.height);
-              ctx.restore();
-              this._markDirty(id, data.layer, false);
+          if (chunk) {
+              if ((data.canvas || data.wasEmpty) && chunk.ctxs && chunk.ctxs[data.layer]) {
+                  restoreBackupToLayer(this, chunk, id, data);
+                  if (this.gpuRenderer) {
+                      this.gpuRenderer.markChunkLayerDirty(chunk, data.layer);
+                  }
+              }
+              if (chunk.strokeCtx) {
+                  chunk.strokeCtx.clearRect(0, 0, chunk.width, chunk.height);
+              }
+              if (chunk.strokeCanvas) {
+                  chunk.strokeCanvas.style.opacity = '0';
+              }
               if (this.gpuRenderer) {
-                  this.gpuRenderer.markChunkLayerDirty(chunk, data.layer);
+                  this.gpuRenderer.markChunkStrokeDirty(chunk, false);
               }
           }
-          if (chunk.strokeCtx) {
-              chunk.strokeCtx.clearRect(0, 0, chunk.width, chunk.height);
-          }
-          if (chunk.strokeCanvas) {
-              chunk.strokeCanvas.style.opacity = '0';
-          }
-          if (this.gpuRenderer) {
-              this.gpuRenderer.markChunkStrokeDirty(chunk, false);
+          if (data.canvas) {
+              releaseBackupCanvas(this, data);
+              data.canvas = null;
+              data.ctx = null;
           }
       });
       this.currentStrokeDirtyChunks = new Map();
@@ -1408,13 +1416,10 @@ export function _paintOnChunks(from, to, size, opacity, color) {
       if (!chunk) return;
 
       if (this.isDrawing && !this.currentStrokeDirtyChunks.has(id)) {
-          const srcCanvas = chunk.canvases[this.activeLayer];
-          const backup = document.createElement('canvas');
-          backup.width = srcCanvas.width; backup.height = srcCanvas.height;
-          const useReadBack = (this.brush.type === TOOLS.LIQUIFY);
-          backup.getContext('2d', useReadBack ? { willReadFrequently: true } : undefined).drawImage(srcCanvas, 0, 0);
-          this.currentStrokeDirtyChunks.set(id, { layer: this.activeLayer, canvas: backup });
-          this._markDirty(id, this.activeLayer);
+          backupChunkLayer(this, chunk, id, {
+              layer: this.activeLayer,
+              willReadFrequently: (this.brush.type === TOOLS.LIQUIFY)
+          });
       }
 
       if (!isEraser) {

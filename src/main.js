@@ -19,9 +19,10 @@ import {
 } from './projectManager.js';
 import { setupIgnoreSystem } from './ignore.js';
 import { TimelapseRecorder } from './recording.js';
-import { initFluidPaint, activateFluidPaint, deactivateFluidPaint, syncFluidSettingsFromTip } from './tools/fluidPaint.js';
-import { initAirPaint, activateAirPaint, deactivateAirPaint, syncAirSettingsFromTip } from './tools/airPaint.js';
-import { ensureSmudgeBuffers } from './tools/smudge.js';
+import { initFluidPaint, activateFluidPaint, deactivateFluidPaint, syncFluidSettingsFromTip, warmFluidSolver } from './tools/fluidPaint.js';
+import { initAirPaint, activateAirPaint, deactivateAirPaint, syncAirSettingsFromTip, warmAirSolver } from './tools/airPaint.js';
+import { ensureSmudgeBuffers, warmSmudgeSolver } from './tools/smudge.js';
+import { acquireBackupCanvas, releaseBackupCanvas } from './engine/backupPool.js';
 import { wasmCore } from './wasm/wasmBridge.js';
 import { PerfMonitor } from './perfMonitor.js';
 
@@ -134,6 +135,8 @@ class App {
     this.brushSettings[TOOLS.LIQUIFY].flow = 0.40; // 40% strength is a great sweet spot!
     this.brushSettings[TOOLS.LIQUIFY].falloff = 0.50; // default 50% falloff
     this.brushSettings[TOOLS.LIQUIFY].liquifyQuality = 2; // default 2 (RESOLVE)
+    this.brushSettings[TOOLS.LIQUIFY].speedSize = 0;
+    this.brushSettings[TOOLS.LIQUIFY].pressureSizeInfluence = 0.0;
     
     // Fluid default settings
     this.brushSettings[TOOLS.FLUID].size = 50;
@@ -186,6 +189,7 @@ class App {
             currentSettings.activeGeneratedIndex = genIdx;
             
             if (tool === TOOLS.BRUSH || tool === TOOLS.ERASER || tool === TOOLS.SMUDGE || tool === TOOLS.WIREFRAME || tool === TOOLS.FLUID || tool === TOOLS.AIR) {
+                if (tip && !tip._tipVersion) tip._tipVersion = 1;
                 this.engine.brush.tip = tip;
             }
             
@@ -451,6 +455,74 @@ class App {
             this._status('CAPTURE CANCELLED');
         }
     };
+
+    this._scheduleToolWarmup();
+  }
+
+  _scheduleToolWarmup() {
+    if (this._warmupScheduled) return;
+    this._warmupScheduled = true;
+
+    const tasks = [
+      () => {
+        if (this.engine && this.engine.brush && this.engine.brush.tip) {
+          const bSize = Math.round(this.engine.brush.size || 20);
+          const cacheSize = this.engine._getCacheSize(bSize);
+          const airbrush = this.engine.brush.airbrush || 0;
+          const color = this.engine.brush.color || '#000000';
+          this.engine._updateTipCache(cacheSize, airbrush, color);
+        }
+        if (this.engine) {
+          const bw = this.engine.isStatic ? Math.min(2560, this.engine.staticWidth || 1024) : (this.engine.chunkSize || 1024);
+          const bh = this.engine.isStatic ? Math.min(2560, this.engine.staticHeight || 1024) : (this.engine.chunkSize || 1024);
+          const c = acquireBackupCanvas(this.engine, bw, bh, false);
+          releaseBackupCanvas(this.engine, c);
+        }
+      },
+      () => {
+        if (this.engine) warmSmudgeSolver(this.engine);
+      },
+      () => {
+        if (this.engine) warmFluidSolver(this.engine);
+      },
+      () => {
+        if (this.engine) warmAirSolver(this.engine);
+      },
+      () => {
+        if (wasmCore && wasmCore.ready) {
+          wasmCore.liquifyPrewarm();
+        }
+      }
+    ];
+
+    let idx = 0;
+    const scheduleNext = (delayMs) => {
+      if (idx >= tasks.length) return;
+      setTimeout(() => {
+        const runStep = () => {
+          if (!this.engine || this.engine.isDrawing || this._isSwitchingProject) {
+            scheduleNext(450);
+            return;
+          }
+          const fn = tasks[idx++];
+          try {
+            fn();
+          } catch (e) {
+            console.warn('Warmup step skipped:', e);
+          }
+          if (idx < tasks.length) {
+            scheduleNext(220);
+          }
+        };
+        if (typeof window.requestIdleCallback === 'function') {
+          window.requestIdleCallback(runStep, { timeout: 1000 });
+        } else {
+          runStep();
+        }
+      }, delayMs);
+    };
+
+    scheduleNext(350);
   }
 
   _clearSaveTimer() {
@@ -811,6 +883,19 @@ class App {
                             }
                         }
                         migrated._defaultsCalibratedV4 = true;
+                    }
+                    if (tool === TOOLS.LIQUIFY && !migrated._liquifySizeLockV1) {
+                        migrated.speedSize = 0;
+                        migrated.pressureSizeInfluence = 0.0;
+                        if (migrated.tips) {
+                            Object.keys(migrated.tips).forEach(tid => {
+                                if (migrated.tips[tid]) {
+                                    migrated.tips[tid].speedSize = 0;
+                                    migrated.tips[tid].pressureSizeInfluence = 0.0;
+                                }
+                            });
+                        }
+                        migrated._liquifySizeLockV1 = true;
                     }
                     this.brushSettings[tool] = { ...this.brushSettings[tool], ...migrated };
                 }
@@ -1987,6 +2072,14 @@ class App {
         this.engine.brush.flow = settings.flow;
         this.engine.brush.falloff = settings.falloff ?? 0.50;
         this.engine.brush.liquifyQuality = settings.liquifyQuality ?? 2;
+        this.engine.brush.speedSize = (tool === TOOLS.LIQUIFY) ? 0 : (settings.speedSize ?? 0);
+        this.engine.brush.speedOpacity = (tool === TOOLS.LIQUIFY) ? 0 : (settings.speedOpacity ?? 0);
+        this.engine.brush.speedValue = (tool === TOOLS.LIQUIFY) ? 0 : (settings.speedValue ?? 0);
+        this.engine.brush.speedHue = (tool === TOOLS.LIQUIFY) ? 0 : (settings.speedHue ?? 0);
+        this.engine.brush.speedMax = settings.speedMax ?? 5.0;
+        this.engine.brush.pressureEnabled = settings.pressureEnabled ?? true;
+        this.engine.brush.pressureSizeInfluence = (tool === TOOLS.LIQUIFY) ? 0.0 : (settings.pressureSizeInfluence ?? 1.0);
+        this.engine.brush.pressureOpacityInfluence = (tool === TOOLS.LIQUIFY) ? 0.0 : (settings.pressureOpacityInfluence ?? 1.0);
         this._updateBrushSettingsUI(tool);
     }
     

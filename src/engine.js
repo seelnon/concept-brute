@@ -15,6 +15,13 @@ import {
 } from './tools/selection.js';
 import { paintSmudgeOnChunks } from './tools/smudge.js';
 import { isMobileDevice } from './colorUtils.js';
+import {
+  backupChunkLayer,
+  captureLayerSnapshot,
+  restoreBackupToLayer,
+  releaseBackupCanvas,
+  clearBackupPool
+} from './engine/backupPool.js';
 
 import {
   getContainerRect,
@@ -240,6 +247,18 @@ export class Engine {
         this._containerRect = null;
         this.refresh();
     });
+    window.addEventListener('scroll', () => {
+        this._containerRect = null;
+    }, { passive: true });
+    document.addEventListener('fullscreenchange', () => {
+        this._containerRect = null;
+    });
+    if (typeof ResizeObserver !== 'undefined' && this.container) {
+        this._resizeObserver = new ResizeObserver(() => {
+            this._containerRect = null;
+        });
+        this._resizeObserver.observe(this.container);
+    }
     this.offscreenDirty = new Set();
     this._startAnimationLoop();
   }
@@ -293,7 +312,11 @@ export class Engine {
       this._clearStack(this.redoStack);
       this._clearStack(this.transformHistory);
       this._clearStack(this.transformRedoHistory);
-      
+      clearBackupPool(this);
+      this._lastSavedHistoryAction = undefined;
+      this._lastSavedHistoryProjId = null;
+      this._lastSavedHistoryLen = -1;
+
       this.history = [];
       this.redoStack = [];
       this.transformHistory = [];
@@ -391,6 +414,44 @@ export class Engine {
         return count;
     };
 
+    const hasPointerOfType = (pointerType) => {
+        if (!pointerType) return false;
+        for (const p of this.activePointers.values()) {
+            if (p.pointerType === pointerType) return true;
+        }
+        return false;
+    };
+
+    const areAllActiveTouch = () => {
+        if (this.activePointers.size === 0) return false;
+        for (const p of this.activePointers.values()) {
+            if (p.pointerType !== 'touch') return false;
+        }
+        return true;
+    };
+
+    const hasFreshNonMouse = (now, allowPenPrune = false) => {
+        let found = false;
+        for (const [id, p] of this.activePointers) {
+            if (p.pointerType === 'mouse') continue;
+            const ts = this._pointerTimes.get(id) || 0;
+            if (p.pointerType === 'pen') {
+                const staleMs = allowPenPrune ? (this.isDrawing ? 900 : 180) : (this.isDrawing ? 1500 : 350);
+                if (now - ts > staleMs) {
+                    this.activePointers.delete(id);
+                    this._pointerTimes.delete(id);
+                    continue;
+                }
+            } else if (p.pointerType === 'touch' && !this.isGesture && (now - ts > 1200)) {
+                this.activePointers.delete(id);
+                this._pointerTimes.delete(id);
+                continue;
+            }
+            found = true;
+        }
+        return found;
+    };
+
     const clearTouchPointers = () => {
         for (const [id, p] of this.activePointers) {
             if (p.pointerType === 'touch') {
@@ -413,7 +474,7 @@ export class Engine {
                 this.activePointers.delete(id);
                 this._pointerTimes.delete(id);
             } else if (eventPointerType === 'mouse' && p.pointerType === 'pen') {
-                if (now - ts > 180) {
+                if (now - ts > 150) {
                     this.activePointers.delete(id);
                     this._pointerTimes.delete(id);
                 }
@@ -433,10 +494,10 @@ export class Engine {
     const recoverOrphanedActiveState = (e) => {
         if (!e || e.buttons !== 0 || e.pointerType === 'touch') return false;
         const now = performance.now();
-        const isSimulatedMouse = e.pointerType === 'mouse' && this.lastPenTouchTime && (now - this.lastPenTouchTime < 150);
+        const isSimulatedMouse = e.pointerType === 'mouse' && this.lastPenTouchTime && (now - this.lastPenTouchTime < 100);
         if (isSimulatedMouse) return false;
 
-        pruneStalePointers(e.pointerType, e.pointerType === 'mouse' ? 1200 : 1200);
+        pruneStalePointers(e.pointerType, 1200);
 
         let recovered = false;
         if ((this.isPanning || this.isZooming) && this._activeStrokePointerType !== 'touch') {
@@ -462,8 +523,6 @@ export class Engine {
     };
 
     const handleContainerEnter = (e) => {
-        // Do not force focus or window jump on hover enter, just refresh rect & unstuck cursor/pointer state
-        this._containerRect = null;
         if (e.buttons === 0 && e.pointerType !== 'touch') {
             recoverOrphanedActiveState(e);
         }
@@ -474,7 +533,6 @@ export class Engine {
     this.container.addEventListener('pointerenter', handleContainerEnter);
     this.container.addEventListener('pointerover', (e) => {
         if (!isUiElement(e.target) && e.buttons === 0 && e.pointerType !== 'touch') {
-            this._containerRect = null;
             recoverOrphanedActiveState(e);
             this._updateBrushCursor(e);
         }
@@ -488,7 +546,6 @@ export class Engine {
     });
 
     this.container.addEventListener('pointerdown', (e) => {
-        this._containerRect = null;
         if (this.perfMonitor) this.perfMonitor.markInteraction();
         if (e.pointerType === 'pen' || e.pointerType === 'touch') {
             this.lastPenTouchTime = performance.now();
@@ -496,19 +553,23 @@ export class Engine {
 
         const targetEl = e.target instanceof Element ? e.target : null;
 
-        // Activate container focus for hotkeys without redundant focus churn on every tap
-        if (!targetEl || !targetEl.closest('input, textarea, select')) {
-            if (document.activeElement && document.activeElement !== document.body && document.activeElement !== this.container) {
-                document.activeElement.blur();
-            }
-            if (document.activeElement !== this.container && typeof this.container.focus === 'function') {
-                this.container.focus({ preventScroll: true });
-            }
-        }
-
-        // UI SHIELD: Ignore if hitting any UI element
+        // UI SHIELD: Ignore if hitting any UI element (must run BEFORE modifying focus!)
         if (targetEl && e.target !== this.container && isUiElement(targetEl)) {
             return;
+        }
+
+        // Activate container focus only if an input/textarea/select currently holds focus
+        if (document.activeElement && document.activeElement !== document.body && document.activeElement !== this.container) {
+            if (document.activeElement.matches('input, textarea, select, button')) {
+                document.activeElement.blur();
+            }
+            if (typeof this.container.focus === 'function') {
+                this.container.focus({ preventScroll: true });
+            }
+        } else if (!document.activeElement || document.activeElement === document.body) {
+            if (typeof this.container.focus === 'function') {
+                this.container.focus({ preventScroll: true });
+            }
         }
 
         // Right click cancels active lasso selection
@@ -553,19 +614,34 @@ export class Engine {
             if (countTouchPointers() === 0) {
                 this._gestureLockedUntilRelease = false;
             }
+        } else if (e.pointerType === 'pen') {
+            // Fresh stylus press replaces any leftover orphaned pen/mouse entries if not actively pinching
+            for (const [id, p] of this.activePointers) {
+                if (id !== e.pointerId && p.pointerType !== 'touch') {
+                    this.activePointers.delete(id);
+                    this._pointerTimes.delete(id);
+                }
+            }
         }
         
         // Prioritize non-mouse pointers (Pen/Touch)
-        const pointers = Array.from(this.activePointers.values());
-        const hasNonMouse = pointers.some(p => p.pointerType !== 'mouse');
+        const hasNonMouse = hasFreshNonMouse(now, true);
         
-        // If we have an active pen/touch, ignore simulated mouse downs
+        // If we have an active pen/touch right now, ignore simulated mouse downs
         if (hasNonMouse && e.pointerType === 'mouse') return;
 
-        // Clear any leftover non-touch active stroke if this is a fresh mouse/pen click
-        if (e.pointerType !== 'touch' && this.isDrawing && this._activeStrokePointerType !== 'touch' && this._activeStrokePointerId !== e.pointerId) {
+        // Clear ANY leftover non-touch active stroke/pan/zoom (even with matching pointerId if Windows Ink dropped pointerup!)
+        if (e.pointerType !== 'touch' && (this.isDrawing || this.isPanning || this.isZooming) && this._activeStrokePointerType !== 'touch') {
             this.isMouseDown = false;
-            this._endStroke(e);
+            if (this.isDrawing) {
+                this._endStroke(e);
+            } else {
+                this.isPanning = false;
+                this.isZooming = false;
+                this._activeStrokePointerId = null;
+                this._activeStrokePointerType = null;
+                this._updateCursor();
+            }
         }
         
         // If this is a pen/touch down, clear any ghost mouse pointers
@@ -587,8 +663,7 @@ export class Engine {
         this.activePointers.set(e.pointerId, e);
         this._pointerTimes.set(e.pointerId, now);
 
-        const currentPointers = Array.from(this.activePointers.values());
-        const hasPen = currentPointers.some(p => p.pointerType === 'pen');
+        const hasPen = hasPointerOfType('pen');
         const touchCount = countTouchPointers();
 
         // IF we have a pen, IGNORE ALL touch pointers in the map (and from event)
@@ -609,7 +684,7 @@ export class Engine {
                 }
             }
             if (e.pointerType !== 'pen') return;
-        } else if (touchCount > 1 && currentPointers.every(p => p.pointerType === 'touch')) {
+        } else if (touchCount > 1 && areAllActiveTouch()) {
             // Multi-touch pinch/pan/rotate: cancel any accidental initial finger mark instead of committing stray lines
             this._gestureLockedUntilRelease = true;
             if (this.isDrawing) {
@@ -697,16 +772,16 @@ export class Engine {
       }
 
       // Ignore simulated mouse events right after pen/touch press/release to prevent cursor teleportation
-      if (e.pointerType === 'mouse' && this.lastPenTouchTime && (now - this.lastPenTouchTime < 100)) {
+      const mouseSuppMs = (e.buttons === 0) ? 45 : 100;
+      if (e.pointerType === 'mouse' && this.lastPenTouchTime && (now - this.lastPenTouchTime < mouseSuppMs)) {
           return;
       }
 
-      // Ignore mouse moves over canvas ONLY if a non-mouse canvas pointer is genuinely active right now
-      const hasNonMouse = Array.from(this.activePointers.values()).some(p => p.pointerType !== 'mouse');
+      // Ignore mouse moves over canvas ONLY if a genuinely fresh non-mouse canvas pointer is active right now
+      const hasNonMouse = hasFreshNonMouse(now, e.pointerType === 'mouse' && e.buttons === 0);
       if (hasNonMouse && e.pointerType === 'mouse' && inCanvas && !isUiElement(e.target)) return;
 
-      const pointers = Array.from(this.activePointers.values());
-      const hasPen = pointers.some(p => p.pointerType === 'pen') || e.pointerType === 'pen';
+      const hasPen = (e.pointerType === 'pen') || hasPointerOfType('pen');
       if (hasPen && e.pointerType === 'touch') {
           this.activePointers.delete(e.pointerId);
           this._pointerTimes.delete(e.pointerId);
@@ -797,15 +872,37 @@ export class Engine {
     window.addEventListener('mousemove', (e) => {
         const now = performance.now();
         if (e.buttons === 0 && (this.isDrawing || this.isPanning || this.isZooming) && this._activeStrokePointerType !== 'touch') {
-            if (!this.lastPenTouchTime || (now - this.lastPenTouchTime > 150)) {
-                recoverOrphanedActiveState(e);
+            if (!this.lastPenTouchTime || (now - this.lastPenTouchTime > 100)) {
+                recoverOrphanedActiveState({
+                    pointerType: 'mouse',
+                    buttons: 0,
+                    clientX: e.clientX,
+                    clientY: e.clientY,
+                    target: e.target
+                });
             }
         }
         if (this.isDrawing || this.isPanning || this.isZooming || this.isGesture) return;
         if (now - (this._lastPointerMoveTime || 0) <= 25) return;
-        if (this.lastPenTouchTime && (now - this.lastPenTouchTime < 120)) return;
+        if (this.lastPenTouchTime && (now - this.lastPenTouchTime < 75)) return;
         this._handlePickerMove(e);
         this._updateBrushCursor(e);
+    });
+
+    // Mouseup fallback: if Chromium swallows pointerup when releasing off-window or during background flush
+    window.addEventListener('mouseup', (e) => {
+        if (e.button === 0 && e.buttons === 0 && (this.isDrawing || this.isPanning || this.isZooming) && this._activeStrokePointerType !== 'touch') {
+            const now = performance.now();
+            if (this._activeStrokePointerType === 'mouse' || !this.lastPenTouchTime || (now - this.lastPenTouchTime > 80)) {
+                recoverOrphanedActiveState({
+                    pointerType: 'mouse',
+                    buttons: 0,
+                    clientX: e.clientX,
+                    clientY: e.clientY,
+                    target: e.target
+                });
+            }
+        }
     });
 
     const endHandler = (e) => {
@@ -830,7 +927,7 @@ export class Engine {
 
         const matchesActiveStroke = (this._activeStrokePointerId != null && e.pointerId === this._activeStrokePointerId);
         const fallbackEnd = (this._activeStrokePointerId == null && !this.isGesture && !this._gestureLockedUntilRelease);
-        const orphanedNonTouchEnd = (this.activePointers.size === 0 && (this.isDrawing || this.isPanning || this.isZooming) && e.pointerType !== 'touch' && this._activeStrokePointerType !== 'touch');
+        const orphanedNonTouchEnd = ((this.isDrawing || this.isPanning || this.isZooming) && e.pointerType !== 'touch' && this._activeStrokePointerType !== 'touch' && !hasPointerOfType(this._activeStrokePointerType));
 
         if (!matchesActiveStroke && !fallbackEnd && !orphanedNonTouchEnd) {
             if (e.pointerType === 'touch') {
@@ -1070,18 +1167,24 @@ export class Engine {
     return _screenToWorld.call(this, x, y);
   }
 
-  _updateCursor() {
-    if (this.isPanning || this.keys[' ']) {
-        this.container.style.cursor = 'grab';
-    } else if (this.isZooming || this.keys['z']) {
-        this.container.style.cursor = 'zoom-in';
-    } else if (this.floatingSelection && this._gizmoCursor) {
-        this.container.style.cursor = this._gizmoCursor;
-    } else if (this.isDrawing) {
-        this.container.style.cursor = 'none';
-    } else {
-        this.container.style.cursor = 'crosshair';
+  _setContainerCursor(nextCursor) {
+    if (this.container && this.container.style.cursor !== nextCursor) {
+        this.container.style.cursor = nextCursor;
     }
+  }
+
+  _updateCursor() {
+    let nextCursor = 'crosshair';
+    if (this.isPanning || this.keys[' ']) {
+        nextCursor = 'grab';
+    } else if (this.isZooming || this.keys['z']) {
+        nextCursor = 'zoom-in';
+    } else if (this.floatingSelection && this._gizmoCursor) {
+        nextCursor = this._gizmoCursor;
+    } else if (this.isDrawing) {
+        nextCursor = 'none';
+    }
+    this._setContainerCursor(nextCursor);
   }
 
   _markDirty(id, layer, isEmpty = false) {
@@ -1887,12 +1990,7 @@ export class Engine {
                   const ly = this.isStatic ? -this.staticHeight / 2 : cy * this.chunkSize;
 
                   // Backup for undo
-                  const srcCanvas = chunk.canvases[this.activeLayer];
-                  const backup = document.createElement('canvas');
-                  backup.width = srcCanvas.width;
-                  backup.height = srcCanvas.height;
-                  backup.getContext('2d').drawImage(srcCanvas, 0, 0);
-                  affectedChunks.set(id, { layer: this.activeLayer, canvas: backup });
+                  affectedChunks.set(id, captureLayerSnapshot(this, chunk, this.activeLayer));
 
                   // Create chunk-local selection mask
                   const chunkMask = document.createElement('canvas');
@@ -2165,12 +2263,52 @@ export class Engine {
      return _cancelStroke.call(this);
   }
 
+  _ensureCursorNodes() {
+    if (!this.brushCursor) return;
+    if (!this._cursorTipCanvas) {
+        const tipCanvas = document.createElement('canvas');
+        tipCanvas.style.position = 'absolute';
+        tipCanvas.style.inset = '0';
+        tipCanvas.style.width = '100%';
+        tipCanvas.style.height = '100%';
+        tipCanvas.style.pointerEvents = 'none';
+        tipCanvas.style.display = 'none';
+        this.brushCursor.appendChild(tipCanvas);
+        this._cursorTipCanvas = tipCanvas;
+        this._cursorTipCtx = tipCanvas.getContext('2d');
+    }
+    if (!this._cursorOverlayEl) {
+        const overlayEl = document.createElement('div');
+        overlayEl.style.position = 'absolute';
+        overlayEl.style.inset = '0';
+        overlayEl.style.pointerEvents = 'none';
+        overlayEl.style.display = 'none';
+        this.brushCursor.appendChild(overlayEl);
+        this._cursorOverlayEl = overlayEl;
+    }
+    if (!this._cursorAppearance) {
+        this._cursorAppearance = {
+            w: -1,
+            h: -1,
+            br: null,
+            bg: null,
+            border: null,
+            boxShadow: null,
+            showTip: null,
+            overlayMode: null,
+            tipRef: null,
+            tipVer: -1,
+            tipColor: null
+        };
+    }
+  }
+
   _updateBrushCursor(e) {
     if (!this.brushCursor) return;
 
     this._updateCursor();
 
-    if (e && e.pointerType === 'mouse' && this.lastPenTouchTime && (performance.now() - this.lastPenTouchTime < 100)) {
+    if (e && e.pointerType === 'mouse' && this.lastPenTouchTime && (performance.now() - this.lastPenTouchTime < (e.buttons === 0 ? 40 : 90))) {
         return;
     }
 
@@ -2184,39 +2322,47 @@ export class Engine {
 
     // Clear cursor on pure touch if no pointers are touching (touch devices do not have hovering cursors)
     if (this.activePointers.size === 0 && e && e.pointerType === 'touch') {
-        this.brushCursor.style.display = 'none';
-        if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
+        if (this.brushCursor.style.display !== 'none') this.brushCursor.style.display = 'none';
+        if (this.brushCrosshair && this.brushCrosshair.style.display !== 'none') this.brushCrosshair.style.display = 'none';
         clearGizmoHoverUI(this);
         return;
     }
 
     const rect = this.getContainerRect();
 
-    // Hide if mouse is over UI
+    // Hide if mouse is over UI (fast path skips closest() when event targets canvas/container directly)
     const targetEl = (e && e.target instanceof Element) ? e.target : null;
-    if (targetEl && (targetEl.closest('.ui-panel') || targetEl.closest('#selection-mode-toolbar') || targetEl.closest('button') || targetEl.closest('input') || targetEl.closest('select') || targetEl.closest('textarea') || targetEl.closest('#top-bar') || targetEl.closest('#top-bar-ref'))) {
-        this.brushCursor.style.display = 'none';
-        if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
+    if (
+        targetEl &&
+        targetEl !== this.container &&
+        targetEl !== this.gpuCanvas &&
+        targetEl !== this.uiLayer &&
+        targetEl !== this.selectionViz &&
+        targetEl !== this.canvasWrapper &&
+        targetEl.closest('.ui-panel, #selection-mode-toolbar, button, input, select, textarea, #top-bar, #top-bar-ref')
+    ) {
+        if (this.brushCursor.style.display !== 'none') this.brushCursor.style.display = 'none';
+        if (this.brushCrosshair && this.brushCrosshair.style.display !== 'none') this.brushCrosshair.style.display = 'none';
         clearGizmoHoverUI(this);
-        if (this.container) this.container.style.cursor = 'default';
+        this._setContainerCursor('default');
         return;
     }
 
     // Position relative to container
-    let mX = mouseX - rect.left;
-    let mY = mouseY - rect.top;
+    const mX = mouseX - rect.left;
+    const mY = mouseY - rect.top;
 
     if (!this.isDrawing && (mX < 0 || mY < 0 || mX > rect.width || mY > rect.height)) {
-        this.brushCursor.style.display = 'none';
-        if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
+        if (this.brushCursor.style.display !== 'none') this.brushCursor.style.display = 'none';
+        if (this.brushCrosshair && this.brushCrosshair.style.display !== 'none') this.brushCrosshair.style.display = 'none';
         clearGizmoHoverUI(this);
         return;
     }
 
     // Unified Transform Gizmo cursor & prompt when floating selection is active
     if (this.floatingSelection && !this.isExportMode) {
-        this.brushCursor.style.display = 'none';
-        if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
+        if (this.brushCursor.style.display !== 'none') this.brushCursor.style.display = 'none';
+        if (this.brushCrosshair && this.brushCrosshair.style.display !== 'none') this.brushCrosshair.style.display = 'none';
         const isAltDown = Boolean((e && e.altKey) || this.keys['alt']);
         updateGizmoHoverUI(
             this,
@@ -2230,24 +2376,27 @@ export class Engine {
         clearGizmoHoverUI(this);
     }
 
-    // Manage brush crosshair visibility and positioning
-    let showCrosshair = this.isDrawing && !this.isExportMode && this.brush.type !== TOOLS.REF_MOVE;
-    if (showCrosshair) {
-        if (this.brushCrosshair) {
-            this.brushCrosshair.style.display = 'block';
-            this.brushCrosshair.style.left = `${mX - 8.5}px`;
-            this.brushCrosshair.style.top = `${mY - 8.5}px`;
+    // Manage brush crosshair visibility and GPU-composited positioning
+    const showCrosshair = this.isDrawing && !this.isExportMode && this.brush.type !== TOOLS.REF_MOVE;
+    if (this.brushCrosshair) {
+        if (showCrosshair) {
+            if (this.brushCrosshair.style.display !== 'block') this.brushCrosshair.style.display = 'block';
+            this.brushCrosshair.style.transform = `translate3d(${mX - 8.5}px, ${mY - 8.5}px, 0)`;
+        } else if (this.brushCrosshair.style.display !== 'none') {
+            this.brushCrosshair.style.display = 'none';
         }
-    } else {
-        if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
     }
 
-    // Manage brush cursor (stamp outer circle)
+    // Hide bulky stamp cursor during active strokes (except Liquify to show deformation radius)
     if (this.isDrawing && this.brush.type !== TOOLS.LIQUIFY) {
-        this.brushCursor.style.display = 'none'; // Hide bulky circle stamp when drawing/painting, except for Liquify to see the shape boundaries!
-    } else {
+        if (this.brushCursor.style.display !== 'none') this.brushCursor.style.display = 'none';
+        return;
+    }
+    if (this.brushCursor.style.display !== 'block') {
         this.brushCursor.style.display = 'block';
     }
+
+    this._ensureCursorNodes();
 
     const s = this.brush.size * this.zoom;
     let w = s;
@@ -2255,18 +2404,18 @@ export class Engine {
     let br = '0px';
     let bgColor = this.brush.color;
     let border = '1px solid rgba(0, 0, 0, 0.4)';
-    let mask = 'none';
     let boxShadow = 'none';
-
-    this.brushCursor.innerHTML = '';
+    let showTip = false;
+    let tipColor = this.brush.color;
+    let overlayMode = 'none';
 
     if (this.isExportMode) {
-        w = 32; h = 32;
+        w = 32;
+        h = 32;
         bgColor = 'transparent';
         border = '2px solid #000';
         br = '0';
-        mask = 'none';
-        this.brushCursor.innerHTML = '<div style="position:absolute;top:50%;left:0;right:0;height:1px;background:rgba(0,0,0,0.5)"></div><div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:rgba(0,0,0,0.5)"></div><div style="position:absolute;top:0;left:0;width:4px;height:4px;border-top:2px solid black;border-left:2px solid black"></div><div style="position:absolute;bottom:0;right:0;width:4px;height:4px;border-bottom:2px solid black;border-right:2px solid black"></div>';
+        overlayMode = 'export';
     } else if (this.brush.type === TOOLS.WIREFRAME) {
         br = '50%';
         bgColor = 'transparent';
@@ -2275,27 +2424,27 @@ export class Engine {
         bgColor = 'transparent';
         border = '1.5px dashed #333333';
     } else if (this.brush.type === TOOLS.BRUSH || this.brush.type === TOOLS.FLUID) {
-        h = (this.brush.type === TOOLS.BRUSH) ? s / 2 : s;
         if (this.brush.tip) {
-            h = s; // Tips are 1:1 usually
-            if (!this.brush.tip._dataUrl) {
-                this.brush.tip._dataUrl = this.brush.tip.toDataURL();
-            }
-            mask = `url(${this.brush.tip._dataUrl})`;
+            h = s;
+            bgColor = 'transparent';
+            border = 'none';
+            showTip = true;
+            tipColor = this.brush.color;
         } else {
+            h = (this.brush.type === TOOLS.BRUSH) ? s / 2 : s;
             br = '50%';
         }
     } else if (this.brush.type === TOOLS.ERASER || this.brush.type === TOOLS.SMUDGE) {
-        h = s / 2;
-        bgColor = 'transparent';
-        border = this.brush.type === TOOLS.ERASER ? '2px solid #ff4444' : '2px solid #3b82f6';
         if (this.brush.tip) {
             h = s;
-            if (!this.brush.tip._dataUrl) {
-                this.brush.tip._dataUrl = this.brush.tip.toDataURL();
-            }
-            mask = `url(${this.brush.tip._dataUrl})`;
-            bgColor = this.brush.type === TOOLS.ERASER ? 'rgba(255, 68, 68, 0.25)' : 'rgba(59, 130, 246, 0.25)';
+            bgColor = 'transparent';
+            border = 'none';
+            showTip = true;
+            tipColor = this.brush.type === TOOLS.ERASER ? 'rgba(255, 68, 68, 0.25)' : 'rgba(59, 130, 246, 0.25)';
+        } else {
+            h = s / 2;
+            bgColor = 'transparent';
+            border = this.brush.type === TOOLS.ERASER ? '2px solid #ff4444' : '2px solid #3b82f6';
         }
     } else if (this.brush.type === TOOLS.REF_MOVE) {
         w = 24;
@@ -2303,8 +2452,7 @@ export class Engine {
         bgColor = 'rgba(59, 130, 246, 0.4)';
         border = '2px solid #fff';
         br = '2px';
-        mask = 'none';
-        this.brushCursor.innerHTML = '<div style="position:absolute;top:50%;left:5px;right:5px;height:2px;background:white;transform:translateY(-50%)"></div><div style="position:absolute;left:50%;top:5px;bottom:5px;width:2px;background:white;transform:translateX(-50%)"></div>';
+        overlayMode = 'ref';
     } else if (this.brush.type === TOOLS.LASSO) {
         w = 10;
         h = 10;
@@ -2320,27 +2468,84 @@ export class Engine {
         boxShadow = '0 0 0 1.5px rgba(255, 255, 255, 0.65)';
     }
 
-    this.brushCursor.style.width = `${w}px`;
-    this.brushCursor.style.height = `${h}px`;
-    this.brushCursor.style.borderRadius = br;
-    this.brushCursor.style.backgroundColor = bgColor;
-    this.brushCursor.style.border = border;
-    this.brushCursor.style.boxShadow = boxShadow;
-    this.brushCursor.style.webkitMaskImage = mask;
-    this.brushCursor.style.webkitMaskSize = '100% 100%';
-    this.brushCursor.style.maskImage = mask;
-    this.brushCursor.style.maskSize = '100% 100%';
+    const ap = this._cursorAppearance;
+    const st = this.brushCursor.style;
 
-    this.brushCursor.style.mixBlendMode = 'normal';
+    if (ap.w !== w) {
+        ap.w = w;
+        st.width = `${w}px`;
+    }
+    if (ap.h !== h) {
+        ap.h = h;
+        st.height = `${h}px`;
+    }
+    if (ap.br !== br) {
+        ap.br = br;
+        st.borderRadius = br;
+    }
+    if (ap.bg !== bgColor) {
+        ap.bg = bgColor;
+        st.backgroundColor = bgColor;
+    }
+    if (ap.border !== border) {
+        ap.border = border;
+        st.border = border;
+    }
+    if (ap.boxShadow !== boxShadow) {
+        ap.boxShadow = boxShadow;
+        st.boxShadow = boxShadow;
+    }
 
-    this.brushCursor.style.left = `${mX - w/2}px`;
-    this.brushCursor.style.top = `${mY - h/2}px`;
-    
-    let transform = `rotate(${this.rotation}rad)`;
+    if (ap.overlayMode !== overlayMode) {
+        ap.overlayMode = overlayMode;
+        const ov = this._cursorOverlayEl;
+        if (overlayMode === 'export') {
+            ov.innerHTML = '<div style="position:absolute;top:50%;left:0;right:0;height:1px;background:rgba(0,0,0,0.5)"></div><div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:rgba(0,0,0,0.5)"></div><div style="position:absolute;top:0;left:0;width:4px;height:4px;border-top:2px solid black;border-left:2px solid black"></div><div style="position:absolute;bottom:0;right:0;width:4px;height:4px;border-bottom:2px solid black;border-right:2px solid black"></div>';
+            ov.style.display = 'block';
+        } else if (overlayMode === 'ref') {
+            ov.innerHTML = '<div style="position:absolute;top:50%;left:5px;right:5px;height:2px;background:white;transform:translateY(-50%)"></div><div style="position:absolute;left:50%;top:5px;bottom:5px;width:2px;background:white;transform:translateX(-50%)"></div>';
+            ov.style.display = 'block';
+        } else {
+            ov.style.display = 'none';
+            ov.innerHTML = '';
+        }
+    }
+
+    if (ap.showTip !== showTip) {
+        ap.showTip = showTip;
+        this._cursorTipCanvas.style.display = showTip ? 'block' : 'none';
+    }
+
+    if (showTip && this.brush.tip) {
+        const tip = this.brush.tip;
+        const tipVer = tip._tipVersion || 0;
+        if (ap.tipRef !== tip || ap.tipVer !== tipVer || ap.tipColor !== tipColor) {
+            ap.tipRef = tip;
+            ap.tipVer = tipVer;
+            ap.tipColor = tipColor;
+            const tc = this._cursorTipCanvas;
+            const tctx = this._cursorTipCtx;
+            const tw = Math.max(1, tip.width || 128);
+            const th = Math.max(1, tip.height || 128);
+            if (tc.width !== tw || tc.height !== th) {
+                tc.width = tw;
+                tc.height = th;
+            }
+            tctx.clearRect(0, 0, tw, th);
+            tctx.globalCompositeOperation = 'source-over';
+            tctx.drawImage(tip, 0, 0, tw, th);
+            tctx.globalCompositeOperation = 'source-in';
+            tctx.fillStyle = tipColor;
+            tctx.fillRect(0, 0, tw, th);
+            tctx.globalCompositeOperation = 'source-over';
+        }
+    }
+
+    let transform = `translate3d(${mX - w * 0.5}px, ${mY - h * 0.5}px, 0) rotate(${this.rotation}rad)`;
     if (this.isMirrored) {
         transform += ' scaleX(-1)';
     }
-    this.brushCursor.style.transform = transform;
+    st.transform = transform;
   }
 
   _drawLasso(from, to) {
@@ -2798,13 +3003,22 @@ export class Engine {
   }
 
   _notifyPicker(x, y, color, shouldSet = true) {
-    const el = document.getElementById('color-picker-indicator');
+    if (!this._colorPickerIndicator) {
+      this._colorPickerIndicator = document.getElementById('color-picker-indicator');
+    }
+    const el = this._colorPickerIndicator;
     if (!x) {
-      if (el) el.classList.add('hidden');
+      if (el && !this._pickerIndicatorHidden) {
+        el.classList.add('hidden');
+        this._pickerIndicatorHidden = true;
+      }
       return;
     }
     if (el) {
-      el.classList.remove('hidden');
+      if (this._pickerIndicatorHidden !== false) {
+        el.classList.remove('hidden');
+        this._pickerIndicatorHidden = false;
+      }
       el.style.left = `${x}px`;
       el.style.top = `${y}px`;
       el.style.backgroundColor = color;
@@ -3090,14 +3304,10 @@ export class Engine {
         if (!chunk) return;
 
         if (this.isDrawing && !this.currentStrokeDirtyChunks.has(id)) {
-            const srcCanvas = chunk.canvases[this.activeLayer];
-            const backup = document.createElement('canvas');
-            backup.width = srcCanvas.width; backup.height = srcCanvas.height;
-            // Only request willReadFrequently if performing costly pixel readback operations (e.g. Liquify)
-            const useReadBack = (this.brush.type === TOOLS.LIQUIFY);
-            backup.getContext('2d', useReadBack ? { willReadFrequently: true } : undefined).drawImage(srcCanvas, 0, 0);
-            this.currentStrokeDirtyChunks.set(id, { layer: this.activeLayer, canvas: backup });
-            this._markDirty(id, this.activeLayer);
+            backupChunkLayer(this, chunk, id, {
+                layer: this.activeLayer,
+                willReadFrequently: (this.brush.type === TOOLS.LIQUIFY)
+            });
         }
 
         if (!isEraser) {
@@ -3436,7 +3646,8 @@ export class Engine {
         tctx.fillRect(0,0,s,s);
     }
     
-    this._tipColorCache = { canvas: canv, key: `${airbrush}_${s}_${this.brush.brushSharpen || 0}`, color, srcTip: this.brush.tip };
+    const tipVer = this.brush.tip._tipVersion || 0;
+    this._tipColorCache = { canvas: canv, key: `${airbrush}_${s}_${this.brush.brushSharpen || 0}_${tipVer}`, color, srcTip: this.brush.tip };
   }
 
   _updateReliefCache(s, blur) {
@@ -3691,10 +3902,10 @@ export class Engine {
       if (!action) return;
       if (action.chunks) {
           action.chunks.forEach(data => {
-              if (data.canvas) {
-                  data.canvas.width = 1;
-                  data.canvas.height = 1;
+              if (data && data.canvas) {
+                  releaseBackupCanvas(this, data);
                   data.canvas = null;
+                  data.ctx = null;
               }
           });
           action.chunks.clear();
@@ -3769,20 +3980,9 @@ export class Engine {
         action.chunks.forEach((data, id) => {
             const chunk = this.chunks.get(id);
             if (chunk) {
-                const srcCanvas = chunk.canvases[data.layer];
-                const redoBackup = document.createElement('canvas');
-                redoBackup.width = srcCanvas.width;
-                redoBackup.height = srcCanvas.height;
-                redoBackup.getContext('2d').drawImage(srcCanvas, 0, 0);
-                redoAction.chunks.set(id, { layer: data.layer, canvas: redoBackup });
-
-                const ctx = chunk.ctxs[data.layer];
-                ctx.save();
-                ctx.setTransform(1, 0, 0, 1, 0, 0);
-                ctx.clearRect(0, 0, srcCanvas.width, srcCanvas.height);
-                ctx.drawImage(data.canvas, 0, 0);
-                ctx.restore();
-                this._markDirty(id, data.layer);
+                const redoBackup = captureLayerSnapshot(this, chunk, data.layer);
+                redoAction.chunks.set(id, redoBackup);
+                restoreBackupToLayer(this, chunk, id, data);
             }
         });
     }
@@ -3824,20 +4024,9 @@ export class Engine {
         action.chunks.forEach((data, id) => {
             const chunk = this.chunks.get(id);
             if (chunk) {
-                const srcCanvas = chunk.canvases[data.layer];
-                const undoBackup = document.createElement('canvas');
-                undoBackup.width = srcCanvas.width;
-                undoBackup.height = srcCanvas.height;
-                undoBackup.getContext('2d').drawImage(srcCanvas, 0, 0);
-                undoAction.chunks.set(id, { layer: data.layer, canvas: undoBackup });
-
-                const ctx = chunk.ctxs[data.layer];
-                ctx.save();
-                ctx.setTransform(1, 0, 0, 1, 0, 0);
-                ctx.clearRect(0, 0, srcCanvas.width, srcCanvas.height);
-                ctx.drawImage(data.canvas, 0, 0);
-                ctx.restore();
-                this._markDirty(id, data.layer);
+                const undoBackup = captureLayerSnapshot(this, chunk, data.layer);
+                undoAction.chunks.set(id, undoBackup);
+                restoreBackupToLayer(this, chunk, id, data);
             }
         });
     }
@@ -3862,11 +4051,7 @@ export class Engine {
   clearLayer(index) {
       const snap = new Map();
       this.chunks.forEach((chunk, id) => {
-          const backup = document.createElement('canvas');
-          backup.width = chunk.width;
-          backup.height = chunk.height;
-          backup.getContext('2d').drawImage(chunk.canvases[index], 0, 0);
-          snap.set(id, { layer: index, canvas: backup });
+          snap.set(id, captureLayerSnapshot(this, chunk, index));
       });
       this._pushHistory({ type: 'stroke', chunks: snap, zoom: this.zoom, pan: { ...this.pan } });
 

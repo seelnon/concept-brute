@@ -10,6 +10,8 @@
  * - Canvas2D chunk synchronization runs once on endStroke() with full Undo & Selection fidelity.
  */
 
+import { backupChunkLayer } from '../engine/backupPool.js';
+
 const TILE_SIZE = 256;
 const WORK_SIZE = 1024;
 const MAX_POOL_TILES = 48;
@@ -487,8 +489,10 @@ export class GpuSmudgeSolver {
   _dstBuf() { return this.curBufIdx === 0 ? this.bufB : this.bufA; }
   _swapBuf() { this.curBufIdx = 1 - this.curBufIdx; }
 
-  uploadTipMask(tipMaskFloat32) {
+  uploadTipMask(tipMaskFloat32, tipVersion = null) {
     if (!this.ready || !this.tipTex || !tipMaskFloat32) return;
+    if (tipVersion !== null && this._uploadedTipVersion === tipVersion) return;
+    this._uploadedTipVersion = tipVersion;
     const bytes = this.tipUploadBytes;
     const len = this.bufRes * this.bufRes;
     for (let i = 0; i < len; i++) {
@@ -506,17 +510,17 @@ export class GpuSmudgeSolver {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.bufRes, this.bufRes, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
   }
 
-  _ensureChunkBackup(engine, chunk, cx, cy) {
+  _ensureChunkBackup(engine, chunk, cx, cy, wasEmptyOverride = undefined) {
     const id = `${cx},${cy}`;
-    if (!engine.currentStrokeDirtyChunks.has(id)) {
-      const srcCanvas = chunk.canvases[engine.activeLayer];
-      const backup = document.createElement('canvas');
-      backup.width = srcCanvas.width;
-      backup.height = srcCanvas.height;
-      backup.getContext('2d').drawImage(srcCanvas, 0, 0);
-      engine.currentStrokeDirtyChunks.set(id, { layer: engine.activeLayer, canvas: backup });
-      engine._markDirty(id, engine.activeLayer, false);
-    }
+    const touched = this.touchedChunks.get(id);
+    const wasEmpty = wasEmptyOverride !== undefined
+      ? wasEmptyOverride
+      : (touched ? touched.wasEmpty : undefined);
+    backupChunkLayer(engine, chunk, id, {
+      layer: engine.activeLayer,
+      dirtyIsEmpty: false,
+      wasEmpty
+    });
   }
 
   _ensureTile(engine, tx, ty) {
@@ -763,9 +767,11 @@ export class GpuSmudgeSolver {
         const sh = ey - sy;
         if (sw <= 0 || sh <= 0) continue;
 
-        if (chunk.isEmpty) chunk.isEmpty[layer] = false;
         const id = `${cx},${cy}`;
-        this.touchedChunks.set(id, { cx, cy, chunk });
+        if (!this.touchedChunks.has(id)) {
+          this.touchedChunks.set(id, { cx, cy, chunk, wasEmpty: !!(chunk.isEmpty && chunk.isEmpty[layer]) });
+        }
+        if (chunk.isEmpty) chunk.isEmpty[layer] = false;
 
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, this.workOut.tex);
@@ -915,11 +921,11 @@ export class GpuSmudgeSolver {
     this._storeTilesAndUpdateChunks(engine, tiles, workX, workY, boxW, boxH);
   }
 
-  beginStroke(engine, worldPos, tipMaskFloat32) {
+  beginStroke(engine, worldPos, tipMaskFloat32, tipVersion = null) {
     if (!this.ready) return false;
     this._releaseAllTiles();
     this.touchedChunks.clear();
-    this.uploadTipMask(tipMaskFloat32);
+    this.uploadTipMask(tipMaskFloat32, tipVersion);
 
     this.curWorkIdx = 0;
     this.curBufIdx = 0;

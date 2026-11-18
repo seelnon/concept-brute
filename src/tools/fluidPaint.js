@@ -1,6 +1,7 @@
 import { TOOLS } from '../constants.js';
 import { hexToRgb, rgbToHsl, hslToRgb } from '../colorUtils.js';
 import { GpuFluidSolver } from './fluidPaintGpu.js';
+import { backupChunkLayer } from '../engine/backupPool.js';
 
 /**
  * Physical Fluid & Tip-Guided Self-Feeding Paint Engine
@@ -81,6 +82,10 @@ const _tipRaw = new Float32Array(TIP_RES * TIP_RES);
 const _tipBlurTmp = new Float32Array(TIP_RES * TIP_RES);
 const _tipBump = new Float32Array(TIP_RES * TIP_RES);
 const _tipActivePoints = [];
+let _preparedTipRef = null;
+let _preparedTipKey = '';
+let _preparedHasTip = false;
+let _preparedTipVersionCounter = 0;
 
 function ensureScratchBuffers(w, h) {
   if (!_litCanvas) {
@@ -281,8 +286,18 @@ function sampleCurlScalar(x, y, time, freq) {
 // BRUSH TIP SILHOUETTE & BUMP MAP BUILDER (64x64 L1-CACHED)
 // ----------------------------------------------------
 function prepareTipMaps(engine) {
+  const tip = engine?.brush?.tip || null;
+  const hardNorm = Math.max(0.0, Math.min(1.0, (fluidSettings.tipHardness ?? 50) / 100.0));
+  const tipVer = tip ? (tip._tipVersion || 0) : 0;
+  const key = tip ? `${tipVer}_${hardNorm.toFixed(3)}` : 'fallback';
+  if (_preparedTipRef === tip && _preparedTipKey === key) {
+    return _preparedHasTip;
+  }
+
+  _preparedTipRef = tip;
+  _preparedTipKey = key;
+  _preparedTipVersionCounter++;
   _tipActivePoints.length = 0;
-  const tip = engine?.brush?.tip;
 
   if (tip && tip.width > 0 && tip.height > 0) {
     if (!_tipWorkCanvas) {
@@ -294,8 +309,6 @@ function prepareTipMaps(engine) {
     _tipWorkCtx.clearRect(0, 0, TIP_RES, TIP_RES);
     _tipWorkCtx.drawImage(tip, 0, 0, TIP_RES, TIP_RES);
     const data = _tipWorkCtx.getImageData(0, 0, TIP_RES, TIP_RES).data;
-
-    const hardNorm = Math.max(0.0, Math.min(1.0, (fluidSettings.tipHardness ?? 50) / 100.0));
     let anyOpaque = false;
     for (let y = 0; y < TIP_RES; y++) {
       for (let x = 0; x < TIP_RES; x++) {
@@ -357,6 +370,7 @@ function prepareTipMaps(engine) {
         const bNorm = Math.min(1.0, _tipBump[i] * normScale);
         _tipBump[i] = _tipRaw[i] * (0.18 + 0.82 * bNorm);
       }
+      _preparedHasTip = true;
       return true;
     }
   }
@@ -381,6 +395,7 @@ function prepareTipMaps(engine) {
       }
     }
   }
+  _preparedHasTip = false;
   return false;
 }
 
@@ -389,15 +404,7 @@ function prepareTipMaps(engine) {
 // ----------------------------------------------------
 function ensureChunkBackup(engine, chunk, cx, cy) {
   const id = `${cx},${cy}`;
-  if (!engine.currentStrokeDirtyChunks.has(id)) {
-    const srcCanvas = chunk.canvases[engine.activeLayer];
-    const backup = document.createElement('canvas');
-    backup.width = srcCanvas.width;
-    backup.height = srcCanvas.height;
-    backup.getContext('2d').drawImage(srcCanvas, 0, 0);
-    engine.currentStrokeDirtyChunks.set(id, { layer: engine.activeLayer, canvas: backup });
-    engine._markDirty(id, engine.activeLayer, false);
-  }
+  backupChunkLayer(engine, chunk, id, { layer: engine.activeLayer, dirtyIsEmpty: false });
 }
 
 function ensureTile(engine, fb, tx, ty) {
@@ -868,6 +875,11 @@ function getGpuFluidSolver(engine) {
   return gr.fluidSolver.ready ? gr.fluidSolver : null;
 }
 
+export function warmFluidSolver(engine) {
+  if (!engine) return null;
+  return getGpuFluidSolver(engine);
+}
+
 // ----------------------------------------------------
 // PUBLIC STROKE LIFECYCLE
 // ----------------------------------------------------
@@ -881,7 +893,7 @@ export function startFluidPaintStroke(engine, worldPos) {
   prepareTipMaps(engine);
 
   const solver = getGpuFluidSolver(engine);
-  const useGpu = !!(solver && solver.beginStroke(engine, worldPos, _tipRaw, _tipBump));
+  const useGpu = !!(solver && solver.beginStroke(engine, worldPos, _tipRaw, _tipBump, _preparedTipVersionCounter));
 
   engine.activeFluidBrush = {
     useGpu,

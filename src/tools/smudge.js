@@ -1,5 +1,6 @@
 import { isMobileDevice } from '../colorUtils.js';
 import { GpuSmudgeSolver } from './smudgeGpu.js';
+import { backupChunkLayer } from '../engine/backupPool.js';
 
 const TILE_SIZE = 256;
 const SMUDGE_RES = 64;
@@ -18,6 +19,8 @@ function getGpuSmudgeSolver(engine) {
 let _tipWorkCanvas = null;
 let _tipWorkCtx = null;
 let _cachedTipRef = null;
+let _cachedTipVer = -1;
+let _smudgeTipVersionCounter = 0;
 const _tipMask = new Float32Array(SMUDGE_RES * SMUDGE_RES);
 
 let _tileReadCanvas = null;
@@ -60,11 +63,11 @@ function ensureScratch(w, h) {
 
 function updateTipMaskCache(tip) {
   const targetRef = tip || 'circle';
-  if (_cachedTipRef === targetRef && tip === null) return;
-  if (_cachedTipRef === tip && tip !== null) {
-    // Re-read in case custom tip canvas was edited in TipManager; cheap 64x64 read
-  }
+  const tipVer = tip ? (tip._tipVersion || 0) : 0;
+  if (_cachedTipRef === targetRef && _cachedTipVer === tipVer) return;
   _cachedTipRef = targetRef;
+  _cachedTipVer = tipVer;
+  _smudgeTipVersionCounter++;
 
   if (tip && tip.width > 0 && tip.height > 0) {
     if (!_tipWorkCanvas) {
@@ -109,15 +112,7 @@ function sampleTipMask(fx, fy) {
 
 function ensureChunkBackup(engine, chunk, cx, cy) {
   const id = `${cx},${cy}`;
-  if (!engine.currentStrokeDirtyChunks.has(id)) {
-    const srcCanvas = chunk.canvases[engine.activeLayer];
-    const backup = document.createElement('canvas');
-    backup.width = srcCanvas.width;
-    backup.height = srcCanvas.height;
-    backup.getContext('2d').drawImage(srcCanvas, 0, 0);
-    engine.currentStrokeDirtyChunks.set(id, { layer: engine.activeLayer, canvas: backup });
-    engine._markDirty(id, engine.activeLayer, false);
-  }
+  backupChunkLayer(engine, chunk, id, { layer: engine.activeLayer, dirtyIsEmpty: false });
 }
 
 function ensureSmudgeTile(engine, tx, ty) {
@@ -438,6 +433,12 @@ export function ensureSmudgeBuffers(engine) {
   }
 }
 
+export function warmSmudgeSolver(engine) {
+  if (!engine) return null;
+  ensureSmudgeBuffers(engine);
+  return getGpuSmudgeSolver(engine);
+}
+
 export function paintSmudgeOnChunks(engine, stamps, affectedChunks, flow, opacity, tip) {
   if (!stamps || stamps.length === 0) return;
   if (opacity <= 0.001 || flow <= 0.001) return;
@@ -633,7 +634,7 @@ export function startSmudgeStroke(engine, worldPos) {
   updateTipMaskCache(engine.brush.tip);
 
   const solver = getGpuSmudgeSolver(engine);
-  if (solver && solver.beginStroke(engine, worldPos, _tipMask)) {
+  if (solver && solver.beginStroke(engine, worldPos, _tipMask, _smudgeTipVersionCounter)) {
     engine.useGpuSmudge = true;
     engine.smudgeDirty = true;
     return;

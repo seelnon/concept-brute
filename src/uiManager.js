@@ -893,9 +893,6 @@ export function setupUI(app) {
     }
 
     // Perf Monitor settings panel wiring
-    const btnQuickPerf = document.getElementById('btn-quick-open-perf');
-    if (btnQuickPerf) btnQuickPerf.onclick = () => app.perfMonitor?.show();
-
     const btnOpenPerfFromSettings = document.getElementById('btn-open-perf-from-settings');
     if (btnOpenPerfFromSettings) btnOpenPerfFromSettings.onclick = () => app.perfMonitor?.show();
 
@@ -1045,7 +1042,7 @@ export function setupUI(app) {
     if (touchBrushSize) {
         touchBrushSize.oninput = (e) => {
             const sliderVal = parseInt(e.target.value);
-            const size = app._mapSliderToSize(sliderVal);
+            const size = Math.round(app._mapSliderToSize(sliderVal));
             
             if (app.activeTool) {
                 app.brushSettings[app.activeTool].size = size;

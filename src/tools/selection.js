@@ -1,3 +1,5 @@
+import { captureLayerSnapshot } from '../engine/backupPool.js';
+
 const ROTATE_BAND_PX = 90;
 const _svgCursorCache = new Map();
 
@@ -1022,12 +1024,7 @@ export function applySelection(engine) {
 
             // Backup for undo
             if (!applyHistory.has(id)) {
-                const srcCanvas = chunk.canvases[engine.activeLayer];
-                const backup = document.createElement('canvas');
-                backup.width = srcCanvas.width;
-                backup.height = srcCanvas.height;
-                backup.getContext('2d').drawImage(srcCanvas, 0, 0);
-                applyHistory.set(id, { layer: engine.activeLayer, canvas: backup });
+                applyHistory.set(id, captureLayerSnapshot(engine, chunk, engine.activeLayer));
             }
 
             ctx.save();

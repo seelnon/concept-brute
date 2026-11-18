@@ -286,7 +286,7 @@
                 <canvas id="tip-editor-canvas" width="128" height="128"></canvas>
              </div>
              <div id="tip-editor-toolbar">
-                <button id="btn-tip-capture" class="mini-btn" title="Sample from Canvas">T</button>
+                <button id="btn-tip-capture" class="mini-btn" title="Snap Brush Tip from Canvas">SNAP</button>
                 <div id="tip-editor-controls">
                    <button id="btn-tip-eraser" class="mini-btn" title="Tip Eraser">E</button>
                    <button id="btn-tip-reset" class="mini-btn" title="Reset Tip">R</button>
@@ -539,12 +539,6 @@
           <div class="panel-content settings-main" style="flex-grow: 1; overflow-y: auto;">
              <!-- GENERAL TAB -->
               <div id="tab-general" class="tab-pane active">
-                  <div style="margin-bottom: 8px;">
-                     <button id="btn-quick-open-perf" class="brutal-btn full-width" style="font-size: 9px; padding: 5px; font-weight: 900; background: #000; color: #fff; cursor: pointer;">
-                        ⚡ OPEN PERF MONITOR (60 FPS WATCHDOG)
-                     </button>
-                  </div>
-                  <div class="settings-divider"></div>
                   <div class="settings-group">
                      <label class="settings-label">CANVAS BACKGROUND</label>
                      <input type="color" id="settings-bg-color" value="#ffffff" class="settings-input-color">
@@ -721,25 +715,72 @@
              </div>
 
              <div id="tab-info" class="tab-pane">
-                 <label class="settings-label">HOTKEYS</label>
-                 <div class="hotkey-list" style="font-size: 9px; line-height: 1.6;">
-                    <div class="hotkey-item"><span>[1 - 6]</span> <span>BRUSH/WIRE/LASSO/SMUDGE/ERASE/REF</span></div>
-                    <div class="hotkey-item"><span>[B]</span> <span>MIRROR VIEW (OR SELECTION)</span></div>
-                    <div class="hotkey-item"><span>[X]</span> <span>ERASER (OR CTRL+X CUT)</span></div>
-                    <div class="hotkey-item"><span>[ALT]</span> <span>EYEDROPPER</span></div>
-                    <div class="hotkey-item"><span>[SPACE]</span> <span>PAN CANVAS</span></div>
-                    <div class="hotkey-item"><span>[SHIFT]</span> <span>STRAIGHT LINES</span></div>
-                    <div class="settings-divider"></div>
-                    <div class="hotkey-item"><span>[CTRL+Z]</span> <span>UNDO</span></div>
-                    <div class="hotkey-item"><span>[CTRL+Y]</span> <span>REDO</span></div>
-                    <div class="hotkey-item"><span>[CTRL+S]</span> <span>SAVE / EXPORT SELECTION</span></div>
-                    <div class="hotkey-item"><span>[[ / ]]</span> <span>BRUSH SIZE (ALSO W / E)</span></div>
-                    <div class="hotkey-item"><span>[S / D]</span> <span>OPACITY +/- (CTRL+D DESELECT)</span></div>
-                    <div class="hotkey-item"><span>[T]</span> <span>TRANSFORM SELECTION</span></div>
-                    <div class="hotkey-item"><span>[ENTER]</span> <span>APPLY TRANSFORM</span></div>
-                    <div class="hotkey-item"><span>[F]</span> <span>FULLSCREEN</span></div>
-                    <div class="hotkey-item"><span>[ESC]</span> <span>CANCEL / CLOSE ALL</span></div>
+                 <label class="settings-label">TOOLS &amp; BRUSH HOTKEYS</label>
+                 <div class="hotkey-list" style="font-size: 9px; line-height: 1.55;">
+                    <div class="hotkey-item"><span>[1] / [2]</span> <span>PAINT / WIREFRAME</span></div>
+                    <div class="hotkey-item"><span>[3] or [L]</span> <span>LASSO SELECT</span></div>
+                    <div class="hotkey-item"><span>[4]</span> <span>SMUDGE</span></div>
+                    <div class="hotkey-item"><span>[5] or [X]</span> <span>ERASER (CTRL+X CUT)</span></div>
+                    <div class="hotkey-item"><span>[6] or [G]</span> <span>LIQUIFY</span></div>
+                    <div class="hotkey-item"><span>[7] or [F]</span> <span>FLUID PAINT</span></div>
+                    <div class="hotkey-item"><span>[8] or [A]</span> <span>WATERCOLOR</span></div>
+                    <div class="hotkey-item"><span>[I]</span> <span>REF LAYER &lt;-&gt; PAINT</span></div>
+                    <div class="hotkey-item"><span>[ALT]</span> <span>EYEDROPPER PICK</span></div>
+                    <div class="hotkey-item"><span>[[ / ]] / [W / E]</span> <span>BRUSH SIZE - / +</span></div>
+                    <div class="hotkey-item"><span>[S / D]</span> <span>OPACITY - / +</span></div>
+                    <div class="hotkey-item"><span>[SHIFT + DRAG]</span> <span>AXIS-LOCKED LINES</span></div>
                  </div>
+
+                 <div class="settings-divider"></div>
+                 <label class="settings-label">VIEW, SELECTION &amp; HISTORY</label>
+                 <div class="hotkey-list" style="font-size: 9px; line-height: 1.55;">
+                    <div class="hotkey-item"><span>[SPACE]</span> <span>PAN (OR 2-FINGER)</span></div>
+                    <div class="hotkey-item"><span>[Z + DRAG / WHEEL]</span> <span>ZOOM (OR PINCH)</span></div>
+                    <div class="hotkey-item"><span>[R + DRAG]</span> <span>ROTATE (2x R RESET)</span></div>
+                    <div class="hotkey-item"><span>[B]</span> <span>MIRROR VIEW / SEL / REF</span></div>
+                    <div class="hotkey-item"><span>[T]</span> <span>TRANSFORM GIZMO</span></div>
+                    <div class="hotkey-item"><span>[ENTER]</span> <span>APPLY TRANSFORM</span></div>
+                    <div class="hotkey-item"><span>[CTRL+D]</span> <span>DESELECT / APPLY</span></div>
+                    <div class="hotkey-item"><span>[DEL / BACKSPACE]</span> <span>DELETE SEL / REF</span></div>
+                    <div class="hotkey-item"><span>[CTRL+C / X / V]</span> <span>COPY / CUT / PASTE</span></div>
+                    <div class="hotkey-item"><span>[CTRL+Z]</span> <span>UNDO</span></div>
+                    <div class="hotkey-item"><span>[CTRL+SHIFT+Z / Y]</span> <span>REDO</span></div>
+                    <div class="hotkey-item"><span>[CTRL+S]</span> <span>SAVE PROJECT</span></div>
+                    <div class="hotkey-item"><span>[CTRL+SHIFT+S]</span> <span>EXPORT IMAGE</span></div>
+                    <div class="hotkey-item"><span>[ESC]</span> <span>CANCEL / CLOSE</span></div>
+                 </div>
+
+                 <div class="settings-divider"></div>
+                 <label class="settings-label">SUMMONING HIDDEN TOOLS</label>
+                 <div class="info-guide-card">
+                    <div class="info-guide-title">■ TOUCH KIT (LAYERS HEADER)</div>
+                    <div class="info-guide-text">Click the small white square button in the top-right header of the <b>LAYERS</b> panel (next to <b>READY</b>) to toggle the floating Touch Kit (Undo/Redo, Picker, Size -/+, Tran, Apply, Desel, Mirror, Delete).</div>
+                    <div class="info-guide-title">⠿ TEXTURE PATTERN (COLOR HEADER)</div>
+                    <div class="info-guide-text">Click the small dotted button in the top-right header of the <b>COLOR PALETTE</b> panel (next to the active swatch) to open Screentone Texture Mode (<b>DOT / SQ / LINE / TRI</b>, Density &amp; Grid Size).</div>
+                    <div class="info-guide-title">● TIMELAPSE RECORDER (REF HEADER)</div>
+                    <div class="info-guide-text">Click the red <b>●</b> dot in the top-right header of the <b>REFERENCE</b> panel to open the Timelapse Recorder. Set your box size (on infinite canvas), stroke snap interval, resolution, scrub the timeline, and export MP4/WebM or JSON.</div>
+                    <div class="info-guide-title">◰ UNIFIED TRANSFORM GIZMO</div>
+                    <div class="info-guide-text">Draw a Lasso (<b>3</b>/<b>L</b>) and press <b>T</b>: drag <b>inside</b> to Move, drag <b>corners/sides</b> to Scale uniformly (hold <b>Alt</b> for Non-Uniform), hover <b>just outside</b> to Rotate (<b>Shift</b> = 15° snap), click <b>far outside</b> or <b>Enter</b> to Apply.</div>
+                 </div>
+
+                 <div class="settings-divider"></div>
+                 <label class="settings-label">BRUSH TEXTURES &amp; PROCEDURAL TIPS</label>
+                 <div class="info-guide-card">
+                    <div class="info-guide-title">TIP EDITOR BUTTONS (SNAP / E / R / C)</div>
+                    <div class="info-guide-text"><b>SNAP</b>: Arms canvas capture — click anywhere on your painting to snap that area into the active brush tip.<br><b>E</b>: Toggles Eraser mode inside the 128×128 tip pad.<br><b>R</b>: Resets the selected main tip slot back to default.<br><b>C</b>: Clears the tip canvas empty so you can draw a custom tip.</div>
+                    <div class="info-guide-title">PROCEDURAL BRUSH TIPS (↻ COLUMNS)</div>
+                    <div class="info-guide-text">Each column below the <b>↻</b> buttons procedurally synthesizes 3 combo stamps by layering 2 random base tips from your 6 main slots onto a 128×128 canvas: <b>Col 1</b> snaps to sharp 90° angles at 100% opacity, <b>Col 2</b> uses 45° steps at 50–100% opacity, and <b>Col 3</b> mixes full 0–360° rotations with random opacity for organic grain.</div>
+                 </div>
+
+                 <div class="settings-divider"></div>
+                 <label class="settings-label">PROCEDURAL COLORS &amp; S-VAL / S-HUE</label>
+                 <div class="info-guide-card">
+                    <div class="info-guide-title">PROCEDURAL PALETTE HARMONIES</div>
+                    <div class="info-guide-text"><b>Row 1</b> holds your 6 editable anchor swatches. Changing any anchor via the HSV picker (or Reference <b>EXTRACT</b>) live-recomputes Rows 2–5:<br>• <b>Row 2</b>: 50/50 pair mixes [1+2], [3+4], [5+6] warmed (+10° hue, +5% sat/light).<br>• <b>Row 3</b>: Soft tints of anchors 1 &amp; 6 flanking pure mixes [2+3], [4+5].<br>• <b>Row 4</b>: Cool vivid pair mixes (-10° hue, +10% sat, +15% light).<br>• <b>Row 5</b>: Bold shifted accents (+20° hue, +20% sat, +10% light).</div>
+                    <div class="info-guide-title">SPEED SLIDERS (S-VAL &amp; S-HUE)</div>
+                    <div class="info-guide-text">Open the <b>⋮</b> sensitivity drawer next to Opacity/Flow. As your stroke speed ramps toward <b>LIMIT SPEED</b>, a smooth ease curve shifts color live:<br>• <b>S-VAL (-100 to +100)</b>: Shifts lightness darker (<b>-</b>) or lighter (<b>+</b>) when moving fast — ideal for rapid highlights or crisp shadows.<br>• <b>S-HUE (-100 to +100)</b>: Rotates the hue wheel up to ±108° by stroke velocity for painterly warm/cool color variation.<br>• <b>S-SIZE / S-OPAC</b>: Scale size &amp; opacity with speed. Click <b>▼</b> above any slider to zero it out.</div>
+                 </div>
+
                  <div class="settings-divider"></div>
                  <p style="font-size: 8px; opacity: 0.6;">BRUTE_ENGINE v0.8.3</p>
              </div>

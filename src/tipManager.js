@@ -197,6 +197,7 @@ export class TipManager {
     cctx.drawImage(t2.canvas, -64, -64);
     cctx.restore();
 
+    combined._tipVersion = ((this.generatedTips[i].canvas && this.generatedTips[i].canvas._tipVersion) || 0) + 1;
     this.generatedTips[i].canvas = combined;
     this._applyDefaultAdvancedSettings(this.generatedTips[i]);
 
@@ -227,7 +228,7 @@ export class TipManager {
                             tc.getContext('2d').drawImage(img, 0, 0, 128, 128);
                             resolve(tc);
                         };
-                        img.onerror = () => reject(new Error('Error decoding _main_brushtip.png'));
+                        img.onerror = () => reject(new Error('Error decoding main_brushtip.png'));
                         img.src = objUrl;
                     });
                 } finally {
@@ -371,7 +372,8 @@ export class TipManager {
     c.width = 128; c.height = 128;
     const ctx = c.getContext('2d');
     ctx.drawImage(canvas, 0, 0, 128, 128);
-    
+    c._tipVersion = ((this.selectedTipCanvas && this.selectedTipCanvas._tipVersion) || 0) + 1;
+
     this.selectedTipCanvas = c;
     if (this.activeBankIndex >= 0 && this.tips[this.activeBankIndex]) {
         this.tips[this.activeBankIndex].canvas = c;
@@ -410,6 +412,7 @@ export class TipManager {
     const c = document.createElement('canvas');
     c.width = 128; c.height = 128;
     c.getContext('2d').drawImage(this.editorCanvas, 0, 0);
+    c._tipVersion = ((this.selectedTipCanvas && this.selectedTipCanvas._tipVersion) || 0) + 1;
     this.selectedTipCanvas = c;
     
     if (this.activeBankIndex >= 0 && this.tips[this.activeBankIndex]) {
@@ -569,6 +572,7 @@ export class TipManager {
     }
 
     if (tip && tip.canvas) {
+        if (!tip.canvas._tipVersion) tip.canvas._tipVersion = 1;
         this.selectedTipCanvas = tip.canvas;
         if (this.editorCtx) {
             this.editorCtx.save();

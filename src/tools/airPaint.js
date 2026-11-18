@@ -1,6 +1,7 @@
 import { TOOLS } from '../constants.js';
 import { hexToRgb, rgbToHsl, hslToRgb } from '../colorUtils.js';
 import { GpuWatercolorSolver } from './airWatercolorGpu.js';
+import { backupChunkLayer } from '../engine/backupPool.js';
 
 /**
  * Air Paint — Incompressible Navier-Stokes Watercolor Wash Engine
@@ -54,6 +55,9 @@ const _airTipGradX = new Float32Array(TIP_RES * TIP_RES);
 const _airTipGradY = new Float32Array(TIP_RES * TIP_RES);
 const _airTipRgbaBytes = new Uint8Array(TIP_RES * TIP_RES * 4);
 let _hasAirTip = false;
+let _preparedAirTipRef = null;
+let _preparedAirTipKey = '';
+let _preparedAirTipVersionCounter = 0;
 
 // Persistent sparse paper wetness & velocity cache across strokes
 const _paperWetTiles = new Map();
@@ -283,15 +287,7 @@ function samplePaperTooth(wx, wy) {
 // ----------------------------------------------------
 function ensureChunkBackup(engine, chunk, cx, cy) {
   const id = `${cx},${cy}`;
-  if (!engine.currentStrokeDirtyChunks.has(id)) {
-    const srcCanvas = chunk.canvases[engine.activeLayer];
-    const backup = document.createElement('canvas');
-    backup.width = srcCanvas.width;
-    backup.height = srcCanvas.height;
-    backup.getContext('2d').drawImage(srcCanvas, 0, 0);
-    engine.currentStrokeDirtyChunks.set(id, { layer: engine.activeLayer, canvas: backup });
-    engine._markDirty(id, engine.activeLayer, false);
-  }
+  backupChunkLayer(engine, chunk, id, { layer: engine.activeLayer, dirtyIsEmpty: false });
 }
 
 function getWetCacheKey(engine, tx, ty) {
@@ -692,7 +688,17 @@ function syncAirSettingsFromEngine(engine) {
 }
 
 function prepareAirTipMaps(engine) {
-  const tip = engine?.brush?.tip;
+  const tip = engine?.brush?.tip || null;
+  const hardNorm = Math.max(0.0, Math.min(1.0, (airSettings.tipHardness ?? 55) / 100.0));
+  const tipVer = tip ? (tip._tipVersion || 0) : 0;
+  const key = tip ? `${tipVer}_${hardNorm.toFixed(3)}` : 'none';
+  if (_preparedAirTipRef === tip && _preparedAirTipKey === key) {
+    return _hasAirTip;
+  }
+
+  _preparedAirTipRef = tip;
+  _preparedAirTipKey = key;
+  _preparedAirTipVersionCounter++;
   _hasAirTip = false;
   if (!tip || tip.width <= 0 || tip.height <= 0) return false;
 
@@ -705,8 +711,6 @@ function prepareAirTipMaps(engine) {
   _tipWorkCtx.clearRect(0, 0, TIP_RES, TIP_RES);
   _tipWorkCtx.drawImage(tip, 0, 0, TIP_RES, TIP_RES);
   const data = _tipWorkCtx.getImageData(0, 0, TIP_RES, TIP_RES).data;
-
-  const hardNorm = Math.max(0.0, Math.min(1.0, (airSettings.tipHardness ?? 55) / 100.0));
   let anyOpaque = false;
   for (let i = 0; i < TIP_RES * TIP_RES; i++) {
     let a = data[i * 4 + 3] / 255.0;
@@ -1548,6 +1552,11 @@ function getGpuSolver(engine) {
   return gr.airSolver.ready ? gr.airSolver : null;
 }
 
+export function warmAirSolver(engine) {
+  if (!engine) return null;
+  return getGpuSolver(engine);
+}
+
 function runGpuSmoothedBezier(engine, solver, ab, a, ctrl, b, radius, opacity, baseColor, flowFactor, params, timeSec, pointAngle = null, isDab = false) {
   const dx1 = ctrl.x - a.x;
   const dy1 = ctrl.y - a.y;
@@ -1615,7 +1624,7 @@ export function startAirPaintStroke(engine) {
 
   const solver = getGpuSolver(engine);
   if (solver) {
-    solver.uploadTipMaps(hasTip ? _airTipRgbaBytes : null, TIP_RES);
+    solver.uploadTipMaps(hasTip ? _airTipRgbaBytes : null, TIP_RES, _preparedAirTipVersionCounter);
   }
   const useGpu = !!(solver && solver.beginStroke(engine, startP, params.wetness));
 

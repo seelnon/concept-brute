@@ -1,3 +1,5 @@
+import { backupChunkLayer } from '../engine/backupPool.js';
+
 const TILE_SIZE = 256;
 const MAX_TILE_POOL = 64;
 
@@ -439,15 +441,7 @@ function _compositeDirtyBoundsToChunks(engine, state, dirtyBounds) {
                     if (ow <= 0 || oh <= 0) continue;
 
                     const id = `${cx},${cy}`;
-                    if (!engine.currentStrokeDirtyChunks.has(id)) {
-                        const srcCanvas = chunk.canvases[engine.activeLayer];
-                        const backup = document.createElement('canvas');
-                        backup.width = srcCanvas.width;
-                        backup.height = srcCanvas.height;
-                        backup.getContext('2d').drawImage(srcCanvas, 0, 0);
-                        engine.currentStrokeDirtyChunks.set(id, { layer: engine.activeLayer, canvas: backup });
-                        engine._markDirty(id, engine.activeLayer);
-                    }
+                    backupChunkLayer(engine, chunk, id, { layer: engine.activeLayer });
 
                     engine._ensureStrokeCanvas(chunk);
                     chunk.strokeCanvas.style.opacity = engine.brush.opacity ?? 1.0;
