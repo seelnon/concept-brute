@@ -2,36 +2,62 @@ import { LAYERS_COUNT, SECTOR_SIZE } from './constants.js';
 import { isCanvasEmpty, isMobileDevice } from './colorUtils.js';
 
 export function canvasToBlobAsync(canvas, type = 'image/webp', quality = 0.95) {
+  if (!canvas || canvas.width <= 0 || canvas.height <= 0) {
+    return Promise.resolve(null);
+  }
   return new Promise((resolve) => {
+    let settled = false;
+    const done = (val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(val);
+    };
+    const timer = setTimeout(() => done(null), 10000);
     try {
       canvas.toBlob((blob) => {
-        resolve(blob || null);
+        done(blob || null);
       }, type, quality);
     } catch (e) {
-      resolve(null);
+      done(null);
     }
   });
 }
 
 export function canvasToDataURLAsync(canvas, type = 'image/png', quality) {
+  if (!canvas || canvas.width <= 0 || canvas.height <= 0) {
+    return Promise.resolve('');
+  }
   return new Promise((resolve) => {
+    let settled = false;
+    const fallbackUrl = () => {
+      try {
+        return canvas.toDataURL(type, quality);
+      } catch (e) {
+        return '';
+      }
+    };
+    const done = (val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(val);
+    };
+    const timer = setTimeout(() => done(fallbackUrl()), 10000);
     try {
       canvas.toBlob((blob) => {
+        if (settled) return;
         if (!blob) {
-          resolve(canvas.toDataURL(type, quality));
+          done(fallbackUrl());
           return;
         }
         const reader = new FileReader();
-        reader.onloadend = () => {
-          resolve(reader.result);
-        };
-        reader.onerror = () => {
-          resolve(canvas.toDataURL(type, quality));
-        };
+        reader.onloadend = () => done(reader.result || '');
+        reader.onerror = () => done(fallbackUrl());
         reader.readAsDataURL(blob);
       }, type, quality);
     } catch (e) {
-      resolve(canvas.toDataURL(type, quality));
+      done(fallbackUrl());
     }
   });
 }
@@ -577,6 +603,15 @@ export async function renderProjectList(app) {
                 };
                 window.addEventListener('pointerup', cleanupIfAborted, { once: true });
                 window.addEventListener('pointercancel', cleanupIfAborted, { once: true });
+                // Safety sweep in case pointerup occurs outside window or loses capture
+                setTimeout(() => {
+                    if (!app._isSwitchingProject && app.currentProjectId !== proj.id) {
+                        const activeState = app._projectSlotStates?.get(proj.id);
+                        if (activeState && activeState.progress === 10 && activeState.badge === 'LOADING...') {
+                            setProjectSlotVisual(app, null, null);
+                        }
+                    }
+                }, 600);
             }
         });
 
@@ -639,10 +674,25 @@ export async function switchProject(app, id, options = {}) {
 
     app._isSwitchingProject = true;
     app._activeSwitchTargetId = id;
+    if (app.engine) {
+        app.engine._isLoadingProject = true;
+    }
 
     try {
-        // Yield a frame so the browser paints the active slot & progress UI immediately
-        await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+        // Yield a frame so the browser paints the active slot & progress UI immediately (capped so throttled rAF never stalls)
+        await new Promise(r => {
+            let done = false;
+            const finish = () => {
+                if (done) return;
+                done = true;
+                r();
+            };
+            const t = setTimeout(finish, 80);
+            requestAnimationFrame(() => setTimeout(() => {
+                clearTimeout(t);
+                finish();
+            }, 0));
+        });
 
         if (switchToken !== app._switchProjectGeneration || app._queuedSwitchId) return;
 
@@ -655,9 +705,22 @@ export async function switchProject(app, id, options = {}) {
             app._clearSaveTimer();
         }
 
-        // Wait for any in-flight auto-save to finish cleanly
+        // Wait for any in-flight auto-save/hot-save to finish cleanly (bounded so a wedged save never deadlocks project switching)
         if (app._activeSavePromise) {
-            try { await app._activeSavePromise; } catch (e) {}
+            setProjectSlotVisual(app, id, {
+                mode: isNewProject ? 'creating' : 'loading',
+                badge: 'FINISHING SAVE...',
+                sub: targetSub,
+                progress: 22
+            });
+            app._status('FINISHING SAVE...');
+            try {
+                await Promise.race([
+                    app._activeSavePromise,
+                    new Promise(r => setTimeout(r, 12000))
+                ]);
+            } catch (e) {}
+            if (switchToken !== app._switchProjectGeneration || app._queuedSwitchId) return;
         }
 
         let shouldSaveProjectsList = !!options.projectsListDirty;
@@ -855,9 +918,15 @@ export async function switchProject(app, id, options = {}) {
             app._queuedSwitchId = null;
             app._queuedSwitchOptions = null;
             switchProject(app, nextId, nextOpts);
-        } else if (app._switchProjectGeneration === switchToken && !app._slotReadyTimer) {
-            // If we exited early without hitting READY and without a queued switch, ensure overlays are cleared
-            setProjectSlotVisual(app, null, null);
+        } else {
+            if (app.engine) {
+                app.engine._isLoadingProject = false;
+                app.engine._resetInteractionState({ cancelActive: false });
+            }
+            if (app._switchProjectGeneration === switchToken && !app._slotReadyTimer) {
+                // If we exited early without hitting READY and without a queued switch, ensure overlays are cleared
+                setProjectSlotVisual(app, null, null);
+            }
         }
     }
 }
@@ -911,6 +980,9 @@ export async function loadProject(app, targetProjectId = null, switchToken = nul
     const tLoadStart = performance.now();
     app._status('LOADING...');
     app.engine.selectedRefIndex = -1; // Ensure de-selected on load
+    if (app.engine && app.engine.flushPendingGpuCommits) {
+        app.engine.flushPendingGpuCommits();
+    }
     try {
         if (switchToken !== null && switchToken !== app._switchProjectGeneration) return;
 
@@ -1177,6 +1249,9 @@ export async function saveProject(app, force = false, targetProjectId = null) {
     if (app.engine.isDrawing && force) {
         app.engine._endStroke();
     }
+    if (app.engine && app.engine.flushPendingGpuCommits) {
+        app.engine.flushPendingGpuCommits();
+    }
 
     const hasPendingTimelapse = !!(app.recorder && typeof app.recorder.hasPendingSave === 'function' && app.recorder.hasPendingSave());
     const isDirty = (app.engine.dirtyChunks && app.engine.dirtyChunks.size > 0) || app.engine.refsDirty || hasPendingTimelapse;
@@ -1186,8 +1261,26 @@ export async function saveProject(app, force = false, targetProjectId = null) {
         return;
     }
 
-    while (app._isSavingProject) {
-        try { await app._activeSavePromise; } catch (e) {}
+    if (app._isSavingProject) {
+        const waitStart = Date.now();
+        while (app._isSavingProject && (Date.now() - waitStart) < 12000) {
+            if (!app._activeSavePromise) {
+                app._isSavingProject = false;
+                break;
+            }
+            try {
+                await Promise.race([
+                    app._activeSavePromise,
+                    new Promise(r => setTimeout(r, 12000))
+                ]);
+            } catch (e) {}
+            if (app._isSavingProject && (Date.now() - waitStart) >= 12000) {
+                console.warn('[SAVE] Timed out waiting for prior save lock; clearing stale lock.');
+                app._isSavingProject = false;
+                app._activeSavePromise = null;
+                break;
+            }
+        }
     }
 
     let finishSave;
@@ -1364,6 +1457,9 @@ export async function saveProject(app, force = false, targetProjectId = null) {
 }
 
 export async function generateThumbnail(app, options = {}) {
+    if (app.engine && app.engine.flushPendingGpuCommits) {
+        app.engine.flushPendingGpuCommits();
+    }
     const size = 128;
     const thumbCanvas = document.createElement('canvas');
     thumbCanvas.width = size;
@@ -1404,7 +1500,9 @@ export async function generateThumbnail(app, options = {}) {
         const ly = app.engine.isStatic ? -app.engine.staticHeight / 2 : chunk.cy * app.engine.chunkSize;
         for (let i = 1; i < LAYERS_COUNT; i++) {
             if (chunk.isEmpty && chunk.isEmpty[i]) continue;
-            tctx.drawImage(chunk.canvases[i], lx, ly);
+            const layerCanvas = chunk.canvases ? chunk.canvases[i] : null;
+            if (!layerCanvas || layerCanvas.width <= 0 || layerCanvas.height <= 0) continue;
+            tctx.drawImage(layerCanvas, lx, ly);
         }
     });
     tctx.restore();
@@ -1438,6 +1536,9 @@ export async function updateStorageStat(app) {
 
 export async function performExport(app) {
     if (!app.currentExportRect) return;
+    if (app.engine && app.engine.flushPendingGpuCommits) {
+        app.engine.flushPendingGpuCommits();
+    }
     
     const w = parseInt(document.getElementById('export-width').value);
     const h = parseInt(document.getElementById('export-height').value);

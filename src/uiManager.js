@@ -303,6 +303,9 @@ export function setupUI(app) {
         const preserveArtwork = document.getElementById('settings-static-preserve') ? document.getElementById('settings-static-preserve').checked : true;
 
         // Find static chunk
+        if (app.engine && app.engine.flushPendingGpuCommits) {
+            app.engine.flushPendingGpuCommits();
+        }
         const chunk = app.engine.chunks.get("0,0");
         const backups = [];
 
@@ -765,6 +768,7 @@ export function setupUI(app) {
           const val = parseInt(e.target.value);
           if (falloffVal) falloffVal.innerText = `${val}%`;
           app.updateActiveSetting('falloff', val / 100);
+          if (app.engine) app.engine._updateBrushCursor();
         };
     }
 
@@ -919,6 +923,27 @@ export function setupUI(app) {
     if (checkPerfPaintOnly) {
         checkPerfPaintOnly.onchange = (e) => {
             if (app.perfMonitor) app.perfMonitor.paintOnly = e.target.checked;
+        };
+    }
+
+    const checkPerfPrewarm = document.getElementById('settings-perf-prewarm-tools');
+    if (checkPerfPrewarm) {
+        checkPerfPrewarm.checked = localStorage.getItem('perf_prewarm_tools') === 'true';
+        checkPerfPrewarm.onchange = (e) => {
+            const enabled = !!e.target.checked;
+            localStorage.setItem('perf_prewarm_tools', enabled ? 'true' : 'false');
+            if (enabled && typeof app.prewarmAllTools === 'function') {
+                app.prewarmAllTools(false);
+            }
+        };
+    }
+
+    const btnPerfPrewarmNow = document.getElementById('btn-perf-prewarm-now');
+    if (btnPerfPrewarmNow) {
+        btnPerfPrewarmNow.onclick = () => {
+            if (typeof app.prewarmAllTools === 'function') {
+                app.prewarmAllTools(true);
+            }
         };
     }
 

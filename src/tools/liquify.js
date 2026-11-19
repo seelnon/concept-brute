@@ -1,5 +1,44 @@
 import { wasmCore } from '../wasm/wasmBridge.js';
 import { backupChunkLayer } from '../engine/backupPool.js';
+import { GpuLiquifySolver } from './liquifyGpu.js';
+
+function getGpuLiquifySolver(engine) {
+    const gr = engine && engine.gpuRenderer;
+    if (!gr || !gr.supported || gr._contextLost || !gr.gl || gr.gl.isContextLost()) return null;
+    if (!gr.liquifySolver) {
+        gr.liquifySolver = new GpuLiquifySolver(gr);
+    }
+    return gr.liquifySolver.ready ? gr.liquifySolver : null;
+}
+
+export function warmLiquifySolver(engine) {
+    const solver = getGpuLiquifySolver(engine);
+    if (solver && solver.prewarmPipelines) {
+        solver.prewarmPipelines(engine);
+    }
+    return !!solver;
+}
+
+export function hasPendingLiquifyCommits(engine) {
+    const solver = engine && engine.gpuRenderer && engine.gpuRenderer.liquifySolver;
+    return !!(solver && solver.hasPendingCommits && solver.hasPendingCommits());
+}
+
+export function flushLiquifyGpuCommits(engine) {
+    const solver = engine && engine.gpuRenderer && engine.gpuRenderer.liquifySolver;
+    if (solver && solver.flushPendingCommits) {
+        solver.flushPendingCommits(engine);
+    }
+}
+
+export function whenLiquifyCommitsDone(engine, cb) {
+    const solver = engine && engine.gpuRenderer && engine.gpuRenderer.liquifySolver;
+    if (solver && solver.whenCommitsDone) {
+        solver.whenCommitsDone(cb);
+    } else if (typeof cb === 'function') {
+        cb();
+    }
+}
 
 /**
  * Ensures pristine chunk backup exists in CPU memory for undo/redo and zero-stall reads.
@@ -78,6 +117,19 @@ function _stampWorldRegion(engine, stroke, minWorldX, maxWorldX, minWorldY, maxW
 export function startLiquifyStroke(engine, worldPos) {
     if (engine.activeLayer === 0) return;
     if (engine.layerSettings[engine.activeLayer]?.locked) return;
+
+    flushLiquifyGpuCommits(engine);
+
+    const gpuSolver = getGpuLiquifySolver(engine);
+    if (gpuSolver && gpuSolver.beginStroke(engine)) {
+        engine.liquifyStroke = {
+            gpuMode: true,
+            active: true,
+            startPos: { x: worldPos.x, y: worldPos.y },
+            lastPos: { x: worldPos.x, y: worldPos.y }
+        };
+        return;
+    }
 
     // Fixed, high precision cell size of 8px (<0.01ms evaluation)
     const cellSize = 8.0;
@@ -293,6 +345,14 @@ export function paintLiquifyStroke(engine, from, to, dynamicSize, pressure) {
     const dist = Math.hypot(totalDx, totalDy);
     if (dist < 0.2) return;
 
+    if (stroke.gpuMode) {
+        const gpuSolver = getGpuLiquifySolver(engine);
+        if (gpuSolver && gpuSolver.stepMove(engine, from, to, dynamicSize, pressure)) {
+            stroke.lastPos = { x: to.x, y: to.y };
+        }
+        return;
+    }
+
     const currentSize = dynamicSize || engine.brush.size || 50;
     const R = Math.max(4.0, currentSize / 2);
 
@@ -431,6 +491,7 @@ export function paintLiquifyStroke(engine, from, to, dynamicSize, pressure) {
  * and cleans up WASM scratch memory.
  */
 export function endLiquifyStroke(engine) {
+    const wasGpu = !!(engine.liquifyStroke && engine.liquifyStroke.gpuMode);
     if (engine.liquifyStroke) {
         if (engine.liquifyStroke.lazyRafId) {
             cancelAnimationFrame(engine.liquifyStroke.lazyRafId);
@@ -438,6 +499,14 @@ export function endLiquifyStroke(engine) {
         }
         engine.liquifyStroke.active = false;
         engine.liquifyStroke = null;
+    }
+
+    if (wasGpu) {
+        const gpuSolver = getGpuLiquifySolver(engine);
+        if (gpuSolver) {
+            gpuSolver.endStroke(engine);
+        }
+        return;
     }
 
     // Synchronize chunk GPU state cleanly for subsequent tools
@@ -448,6 +517,26 @@ export function endLiquifyStroke(engine) {
     }
 
     wasmCore.liquifySessionEnd();
+}
+
+export function cancelLiquifyStroke(engine) {
+    const wasGpu = !!(engine.liquifyStroke && engine.liquifyStroke.gpuMode);
+    if (engine.liquifyStroke) {
+        if (engine.liquifyStroke.lazyRafId) {
+            cancelAnimationFrame(engine.liquifyStroke.lazyRafId);
+            engine.liquifyStroke.lazyRafId = null;
+        }
+        engine.liquifyStroke.active = false;
+        engine.liquifyStroke = null;
+    }
+    if (wasGpu) {
+        const gpuSolver = getGpuLiquifySolver(engine);
+        if (gpuSolver) {
+            gpuSolver.cancel(engine);
+        }
+    }
+    wasmCore.liquifySessionEnd();
+    wasmCore.liquifyEndAllSessions();
 }
 
 // ============================================================================

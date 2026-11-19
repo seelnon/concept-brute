@@ -281,21 +281,37 @@ export class TipManager {
   }
 
   _setupUI() {
-    const editor = document.getElementById('tip-editor-container');
     let drawing = false;
 
     const startDraw = (e) => {
+        if (e.button !== undefined && e.button !== 0 && e.pointerType === 'mouse') return;
+        e.preventDefault();
         try {
             this.editorCanvas.setPointerCapture(e.pointerId);
         } catch (_) {}
         drawing = true;
+        this._editorRect = this.editorCanvas.getBoundingClientRect();
         this._drawEditor(e, true);
     };
     
-    const moveDraw = (e) => { if (drawing) this._drawEditor(e); };
+    const moveDraw = (e) => {
+        if (!drawing) return;
+        e.preventDefault();
+        const events = (typeof e.getCoalescedEvents === 'function') ? e.getCoalescedEvents() : null;
+        if (events && events.length > 0) {
+            for (let i = 0; i < events.length; i++) {
+                this._drawEditor(events[i], false);
+            }
+        } else {
+            this._drawEditor(e, false);
+        }
+    };
+
     const stopDraw = (e) => { 
         if (drawing) { 
-            drawing = false; 
+            drawing = false;
+            this._finishEditorStroke();
+            this._editorRect = null;
             try {
                 if (e && e.pointerId !== undefined && this.editorCanvas.hasPointerCapture?.(e.pointerId)) {
                     this.editorCanvas.releasePointerCapture(e.pointerId);
@@ -396,16 +412,133 @@ export class TipManager {
     this._saveToStorage();
   }
 
+  _getEditorPoint(e) {
+    let rect = this._editorRect;
+    if (!rect || rect.width <= 0 || rect.height <= 0) {
+        rect = this.editorCanvas.getBoundingClientRect();
+        this._editorRect = rect;
+    }
+    const x = ((e.clientX - rect.left) / Math.max(1, rect.width)) * 128;
+    const y = ((e.clientY - rect.top) / Math.max(1, rect.height)) * 128;
+    const isPen = e.pointerType === 'pen' && typeof e.pressure === 'number' && e.pressure > 0;
+    const pressure = isPen ? Math.max(0.05, Math.min(1.0, e.pressure)) : 1.0;
+    const baseR = this.isEraser ? 6.0 : 5.0;
+    const r = isPen ? (1.2 + Math.pow(pressure, 0.8) * (this.isEraser ? 6.0 : 5.4)) : baseR;
+    return { x, y, r, isPen };
+  }
+
+  _strokeEditorSegment(ax, ay, ar, cx, cy, cr, bx, by, br, isQuadratic = true) {
+    const ctx = this.editorCtx;
+    ctx.save();
+    ctx.globalCompositeOperation = this.isEraser ? 'destination-out' : 'source-over';
+    ctx.globalAlpha = 1.0;
+
+    if (!this._strokeIsPen && Math.abs(ar - br) < 0.05) {
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = br * 2.0;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(ax, ay);
+        if (isQuadratic) {
+            ctx.quadraticCurveTo(cx, cy, bx, by);
+        } else {
+            ctx.lineTo(bx, by);
+        }
+        ctx.stroke();
+    } else {
+        ctx.fillStyle = '#000000';
+        const len = isQuadratic
+            ? (Math.hypot(cx - ax, cy - ay) + Math.hypot(bx - cx, by - cy))
+            : Math.hypot(bx - ax, by - ay);
+        const steps = Math.max(1, Math.ceil(len * 2.8));
+        for (let i = 0; i <= steps; i++) {
+            const t = i / steps;
+            let px, py, pr;
+            if (isQuadratic) {
+                const inv = 1 - t;
+                px = inv * inv * ax + 2 * inv * t * cx + t * t * bx;
+                py = inv * inv * ay + 2 * inv * t * cy + t * t * by;
+                pr = inv * inv * ar + 2 * inv * t * cr + t * t * br;
+            } else {
+                px = ax + (bx - ax) * t;
+                py = ay + (by - ay) * t;
+                pr = ar + (br - ar) * t;
+            }
+            ctx.beginPath();
+            ctx.arc(px, py, Math.max(0.6, pr), 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+    ctx.restore();
+  }
+
   _drawEditor(e, isStart = false) {
-    const rect = this.editorCanvas.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * 128;
-    const y = ((e.clientY - rect.top) / rect.height) * 128;
-    
-    this.editorCtx.globalCompositeOperation = this.isEraser ? 'destination-out' : 'source-over';
-    this.editorCtx.fillStyle = 'black';
-    this.editorCtx.beginPath();
-    this.editorCtx.arc(x, y, 6, 0, Math.PI*2);
-    this.editorCtx.fill();
+    const pt = this._getEditorPoint(e);
+
+    if (isStart || !this._strokePts) {
+        this._strokeIsPen = pt.isPen;
+        this._strokePts = [pt];
+        this._lastMid = { x: pt.x, y: pt.y, r: pt.r };
+        const ctx = this.editorCtx;
+        ctx.save();
+        ctx.globalCompositeOperation = this.isEraser ? 'destination-out' : 'source-over';
+        ctx.globalAlpha = 1.0;
+        ctx.fillStyle = '#000000';
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, pt.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+        return;
+    }
+
+    const pts = this._strokePts;
+    const prev = pts[pts.length - 1];
+    if (Math.hypot(pt.x - prev.x, pt.y - prev.y) < 0.25) return;
+
+    // Smooth rapid radius jumps on pen strokes so ink thickness flows cleanly
+    if (pt.isPen) {
+        pt.r = prev.r + (pt.r - prev.r) * 0.45;
+    }
+    pts.push(pt);
+
+    const mid = {
+        x: (prev.x + pt.x) * 0.5,
+        y: (prev.y + pt.y) * 0.5,
+        r: (prev.r + pt.r) * 0.5
+    };
+
+    if (pts.length === 2) {
+        this._strokeEditorSegment(
+            this._lastMid.x, this._lastMid.y, this._lastMid.r,
+            prev.x, prev.y, prev.r,
+            mid.x, mid.y, mid.r,
+            false
+        );
+    } else {
+        this._strokeEditorSegment(
+            this._lastMid.x, this._lastMid.y, this._lastMid.r,
+            prev.x, prev.y, prev.r,
+            mid.x, mid.y, mid.r,
+            true
+        );
+    }
+    this._lastMid = mid;
+  }
+
+  _finishEditorStroke() {
+    if (!this._strokePts || !this._lastMid) return;
+    if (this._strokePts.length >= 2) {
+        const last = this._strokePts[this._strokePts.length - 1];
+        this._strokeEditorSegment(
+            this._lastMid.x, this._lastMid.y, this._lastMid.r,
+            last.x, last.y, last.r,
+            last.x, last.y, last.r,
+            false
+        );
+    }
+    this._strokePts = null;
+    this._lastMid = null;
   }
 
   _updateFromEditor() {

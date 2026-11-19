@@ -185,7 +185,8 @@ export class SketchStorage {
       }
       
       transaction.oncomplete = () => resolve();
-      transaction.onerror = (event) => reject(event.target.error || new Error('Save sector failed'));
+      transaction.onerror = (event) => reject(event.target?.error || new Error('Save sector failed'));
+      transaction.onabort = (event) => reject(event.target?.error || new Error('Save sector aborted'));
     });
   }
 
@@ -203,7 +204,8 @@ export class SketchStorage {
       const request = store.get(key);
       
       request.onsuccess = () => resolve(request.result || null);
-      request.onerror = (event) => reject(event.target.error || new Error('Load sector failed'));
+      request.onerror = (event) => reject(event.target?.error || new Error('Load sector failed'));
+      transaction.onabort = (event) => reject(event.target?.error || new Error('Load sector aborted'));
     });
   }
 
@@ -238,9 +240,14 @@ export class SketchStorage {
         request.onerror = (event) => {
           if (failed) return;
           failed = true;
-          reject(event.target.error || new Error('Load sectors batch failed'));
+          reject(event.target?.error || new Error('Load sectors batch failed'));
         };
       });
+      transaction.onabort = (event) => {
+        if (failed) return;
+        failed = true;
+        reject(event.target?.error || new Error('Load sectors batch aborted'));
+      };
     });
   }
 
@@ -259,7 +266,8 @@ export class SketchStorage {
       const request = store.getAllKeys(range);
       
       request.onsuccess = () => resolve(request.result || []);
-      request.onerror = (event) => reject(event.target.error || new Error('Get keys failed'));
+      request.onerror = (event) => reject(event.target?.error || new Error('Get keys failed'));
+      transaction.onabort = (event) => reject(event.target?.error || new Error('Get keys aborted'));
     });
   }
 
@@ -278,7 +286,8 @@ export class SketchStorage {
       const request = store.getAllKeys(range);
       
       request.onsuccess = () => resolve(request.result || []);
-      request.onerror = (event) => reject(event.target.error || new Error('Get legacy keys failed'));
+      request.onerror = (event) => reject(event.target?.error || new Error('Get legacy keys failed'));
+      transaction.onabort = (event) => reject(event.target?.error || new Error('Get legacy keys aborted'));
     });
   }
 
@@ -294,7 +303,8 @@ export class SketchStorage {
       const request = store.get(id);
       
       request.onsuccess = () => resolve(request.result ? request.result.data : null);
-      request.onerror = (event) => reject(event.target.error || new Error('Load legacy chunk failed'));
+      request.onerror = (event) => reject(event.target?.error || new Error('Load legacy chunk failed'));
+      transaction.onabort = (event) => reject(event.target?.error || new Error('Load legacy chunk aborted'));
     });
   }
 
@@ -311,7 +321,8 @@ export class SketchStorage {
       store.delete(id);
       
       transaction.oncomplete = () => resolve();
-      transaction.onerror = (event) => reject(event.target.error || new Error('Delete legacy chunk failed'));
+      transaction.onerror = (event) => reject(event.target?.error || new Error('Delete legacy chunk failed'));
+      transaction.onabort = (event) => reject(event.target?.error || new Error('Delete legacy chunk aborted'));
     });
   }
 
@@ -331,7 +342,8 @@ export class SketchStorage {
       store.put({ id: key, value });
       
       transaction.oncomplete = () => resolve();
-      transaction.onerror = (event) => reject(event.target.error || new Error('Save setting failed'));
+      transaction.onerror = (event) => reject(event.target?.error || new Error('Save setting failed'));
+      transaction.onabort = (event) => reject(event.target?.error || new Error('Save setting aborted'));
     });
   }
 
@@ -357,7 +369,8 @@ export class SketchStorage {
       const request = store.get(key);
       
       request.onsuccess = () => resolve(request.result ? request.result.value : null);
-      request.onerror = (event) => reject(event.target.error || new Error('Load setting failed'));
+      request.onerror = (event) => reject(event.target?.error || new Error('Load setting failed'));
+      transaction.onabort = (event) => reject(event.target?.error || new Error('Load setting aborted'));
     });
   }
 
@@ -404,9 +417,14 @@ export class SketchStorage {
         request.onerror = (event) => {
           if (failed) return;
           failed = true;
-          reject(event.target.error || new Error('Batch settings load failed'));
+          reject(event.target?.error || new Error('Batch settings load failed'));
         };
       });
+      transaction.onabort = (event) => {
+        if (failed) return;
+        failed = true;
+        reject(event.target?.error || new Error('Batch settings load aborted'));
+      };
     });
   }
 
@@ -428,7 +446,8 @@ export class SketchStorage {
       store.put({ id, value });
       
       transaction.oncomplete = () => resolve();
-      transaction.onerror = (event) => reject(event.target.error || new Error('Save global setting failed'));
+      transaction.onerror = (event) => reject(event.target?.error || new Error('Save global setting failed'));
+      transaction.onabort = (event) => reject(event.target?.error || new Error('Save global setting aborted'));
     });
   }
 
@@ -474,12 +493,21 @@ export class SketchStorage {
           resolve(null);
         }
       };
+      transaction.onabort = () => {
+        try {
+          const raw = localStorage.getItem(`global_${id}`) || localStorage.getItem(id);
+          resolve(raw ? JSON.parse(raw) : null);
+        } catch (e) {
+          resolve(null);
+        }
+      };
     });
   }
 
   async getStorageStats(explicitProjectId = null) {
+    await this.ensureReady();
     const pid = explicitProjectId || this.projectId;
-    if (this.isFallback) {
+    if (this.isFallback || !this.db) {
       let size = 0;
       let sectors = 0;
       let chunks = 0;
@@ -497,8 +525,6 @@ export class SketchStorage {
       }
       return { size, sectors, chunks };
     }
-
-    if (!this.db) throw new Error('Database not initialized');
     
     return new Promise((resolve, reject) => {
       let size = 0;
@@ -525,12 +551,14 @@ export class SketchStorage {
         }
       };
       
-      request.onerror = (event) => reject(event.target.error || new Error('Get storage stats failed'));
+      request.onerror = (event) => reject(event.target?.error || new Error('Get storage stats failed'));
+      transaction.onabort = (event) => reject(event.target?.error || new Error('Get storage stats aborted'));
     });
   }
 
   async deleteProjectStoredData(targetProjectId) {
-    if (this.isFallback) {
+    await this.ensureReady();
+    if (this.isFallback || !this.db) {
       // 1. Delete matching sectors from fallback model
       const sectorPrefix = `p_${targetProjectId}_s_`;
       for (const k in this.fallbackStore.sectors) {
@@ -586,12 +614,14 @@ export class SketchStorage {
         console.log(`[STORAGE] Completed storage purge for project ID: ${targetProjectId}`);
         resolve();
       };
-      transaction.onerror = (event) => reject(event.target.error || new Error('Delete project stored data failed'));
+      transaction.onerror = (event) => reject(event.target?.error || new Error('Delete project stored data failed'));
+      transaction.onabort = (event) => reject(event.target?.error || new Error('Delete project stored data aborted'));
     });
   }
 
   async clearDatabase() {
-    if (this.isFallback) {
+    await this.ensureReady();
+    if (this.isFallback || !this.db) {
       this.fallbackStore = {
         chunks: {},
         settings: {},
@@ -612,8 +642,6 @@ export class SketchStorage {
       } catch (e) {}
       return;
     }
-
-    if (!this.db) throw new Error('Database not initialized');
     
     return new Promise((resolve, reject) => {
       const transaction = this.db.transaction(['chunks', 'settings', 'sectors'], 'readwrite');
@@ -622,7 +650,8 @@ export class SketchStorage {
       transaction.objectStore('sectors').clear();
       
       transaction.oncomplete = () => resolve();
-      transaction.onerror = (event) => reject(event.target.error || new Error('Clear database failed'));
+      transaction.onerror = (event) => reject(event.target?.error || new Error('Clear database failed'));
+      transaction.onabort = (event) => reject(event.target?.error || new Error('Clear database aborted'));
     });
   }
 }

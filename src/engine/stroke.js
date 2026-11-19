@@ -2,7 +2,7 @@ import { TOOLS } from '../constants.js';
 import { paintWireframeIncrementally, startWireframeStroke, paintWireframeMove, endWireframeStroke, cancelWireframeStroke } from '../tools/wireframe.js';
 import { paintSmudgeOnChunks, startSmudgeStroke, endSmudgeStroke, cancelSmudgeStroke } from '../tools/smudge.js';
 import { paintFluidOnChunks, startFluidPaintStroke, endFluidPaintStroke, cancelFluidAfterEffect } from '../tools/fluidPaint.js';
-import { startLiquifyStroke, paintLiquifyStroke, endLiquifyStroke } from '../tools/liquify.js';
+import { startLiquifyStroke, paintLiquifyStroke, endLiquifyStroke, cancelLiquifyStroke } from '../tools/liquify.js';
 import { paintAirIncrementally, clearAirParticles, startAirPaintStroke, endAirPaintStroke } from '../tools/airPaint.js';
 import { isMobileDevice } from '../colorUtils.js';
 import { wasmCore } from '../wasm/wasmBridge.js';
@@ -41,6 +41,10 @@ export function _startStroke(e) {
       this.transformAnchor = { x: e.clientX, y: e.clientY };
       this.lastMousePos = { x: e.clientX, y: e.clientY };
       return;
+  }
+
+  if (this.flushPendingGpuCommits) {
+      this.flushPendingGpuCommits();
   }
 
   // No Color Pick for Wireframe
@@ -787,6 +791,9 @@ export function _endStroke(e = null) {
   if (this.brush.type === TOOLS.SMUDGE) {
       endSmudgeStroke(this);
   }
+  if (this.brush.type === TOOLS.LIQUIFY) {
+      endLiquifyStroke(this);
+  }
   if (this.brush.type === TOOLS.FLUID) {
       endFluidPaintStroke(this);
   }
@@ -890,6 +897,9 @@ export function _endStroke(e = null) {
   } else {
       // If it was smudge, liquify, fluid paint, or air watercolor under active selection
       if ((this.brush.type === TOOLS.SMUDGE || this.brush.type === TOOLS.LIQUIFY || this.brush.type === TOOLS.FLUID || this.brush.type === TOOLS.AIR) && this.activeSelectionPath) {
+          if (this.flushPendingGpuCommits) {
+              this.flushPendingGpuCommits();
+          }
           this.currentStrokeDirtyChunks.forEach((data, id) => {
               const chunk = this.chunks.get(id);
               if (chunk && (data.canvas || data.wasEmpty)) {
@@ -1044,9 +1054,7 @@ export function _endStroke(e = null) {
       });
   }
 
-  if (this.brush.type === TOOLS.LIQUIFY) {
-      endLiquifyStroke(this);
-  } else {
+  if (this.brush.type !== TOOLS.LIQUIFY) {
       this.liquifyChunkData = null;
       wasmCore.liquifyEndAllSessions();
   }
@@ -1118,16 +1126,7 @@ export function _cancelStroke() {
   cancelFluidAfterEffect(this);
   clearAirParticles(this);
 
-  if (this.liquifyStroke) {
-      if (this.liquifyStroke.lazyRafId) {
-          cancelAnimationFrame(this.liquifyStroke.lazyRafId);
-          this.liquifyStroke.lazyRafId = null;
-      }
-      this.liquifyStroke.active = false;
-      this.liquifyStroke = null;
-  }
-  wasmCore.liquifySessionEnd();
-  wasmCore.liquifyEndAllSessions();
+  cancelLiquifyStroke(this);
   this.liquifyChunkData = null;
 
   if (this.brush.type === TOOLS.LASSO) {

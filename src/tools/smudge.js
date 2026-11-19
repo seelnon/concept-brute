@@ -8,7 +8,7 @@ const SMUDGE_MAX = SMUDGE_RES - 1;
 
 function getGpuSmudgeSolver(engine) {
   const gr = engine && engine.gpuRenderer;
-  if (!gr || !gr.supported || !gr.gl) return null;
+  if (!gr || !gr.supported || gr._contextLost || !gr.gl || gr.gl.isContextLost()) return null;
   if (!gr.smudgeSolver) {
     gr.smudgeSolver = new GpuSmudgeSolver(gr);
   }
@@ -436,7 +436,12 @@ export function ensureSmudgeBuffers(engine) {
 export function warmSmudgeSolver(engine) {
   if (!engine) return null;
   ensureSmudgeBuffers(engine);
-  return getGpuSmudgeSolver(engine);
+  updateTipMaskCache(engine.brush?.tip);
+  const solver = getGpuSmudgeSolver(engine);
+  if (solver && solver.prewarmPipelines) {
+    solver.prewarmPipelines(engine, _tipMask, _smudgeTipVersionCounter);
+  }
+  return solver;
 }
 
 export function paintSmudgeOnChunks(engine, stamps, affectedChunks, flow, opacity, tip) {

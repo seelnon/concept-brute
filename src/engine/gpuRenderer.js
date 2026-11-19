@@ -225,6 +225,85 @@ void main() {
 }
 `;
 
+const LIQUIFY_CURSOR_VS = `#version 300 es
+precision highp float;
+
+layout(location = 0) in vec2 a_unitPos;
+
+uniform vec2 u_viewport;
+uniform vec4 u_cursorRect;   // [leftCss, topCss, widthCss, heightCss]
+uniform vec2 u_cursorCenter; // [mxCss, myCss]
+
+out vec2 v_localPos;
+
+void main() {
+    vec2 screenPos = u_cursorRect.xy + a_unitPos * u_cursorRect.zw;
+    v_localPos = screenPos - u_cursorCenter;
+    vec2 clipPos = vec2(
+        (screenPos.x / u_viewport.x) * 2.0 - 1.0,
+        1.0 - (screenPos.y / u_viewport.y) * 2.0
+    );
+    gl_Position = vec4(clipPos, 0.0, 1.0);
+}
+`;
+
+const LIQUIFY_CURSOR_FS = `#version 300 es
+precision highp float;
+
+in vec2 v_localPos;
+
+uniform float u_cursorRadius;
+uniform float u_falloff;
+
+out vec4 outColor;
+
+void main() {
+    float outerR = max(2.0, u_cursorRadius);
+    float r = length(v_localPos);
+
+    // Outer solid circle at full brush radius
+    float dOuter = abs(r - outerR);
+    float darkOuter = 1.0 - smoothstep(0.95, 1.65, dOuter);
+    float whiteOuter = 1.0 - smoothstep(0.35, 1.05, dOuter);
+
+    // Inner dashed plateau circle showing hard-edge vs falloff zone
+    float rInnerRatio = clamp(1.0 - clamp(u_falloff, 0.0, 1.0), 0.0, 1.0);
+    float innerR = (rInnerRatio >= 0.96) ? max(1.0, outerR - 3.5) : (outerR * rInnerRatio);
+
+    float darkInner = 0.0;
+    float whiteInner = 0.0;
+    if (innerR >= 5.0) {
+        float dInner = abs(r - innerR);
+        float circum = 6.2831853 * innerR;
+        float dashCount = max(8.0, floor(circum / 11.0));
+        float dashPeriod = circum / dashCount;
+        float ang = atan(v_localPos.y, v_localPos.x) + 3.14159265;
+        float sArc = fract((ang / 6.2831853) * dashCount) * dashPeriod;
+        float signedArcD = abs(sArc - dashPeriod * 0.5) - dashPeriod * 0.27;
+        float dDash2D = length(vec2(max(0.0, signedArcD), dInner));
+        darkInner = 1.0 - smoothstep(0.95, 1.65, dDash2D);
+        whiteInner = 1.0 - smoothstep(0.35, 1.05, dDash2D);
+    }
+
+    // Center "+" crosshair
+    float dH = length(vec2(max(0.0, abs(v_localPos.x) - 4.5), abs(v_localPos.y)));
+    float dV = length(vec2(abs(v_localPos.x), max(0.0, abs(v_localPos.y) - 4.5)));
+    float dCross = min(dH, dV);
+    float darkCross = 1.0 - smoothstep(0.95, 1.65, dCross);
+    float whiteCross = 1.0 - smoothstep(0.35, 1.05, dCross);
+
+    float totalDark = max(darkOuter, max(darkInner, darkCross)) * 0.65;
+    float totalWhite = max(whiteOuter, max(whiteInner, whiteCross));
+    float a = clamp(max(totalDark, totalWhite), 0.0, 1.0);
+    if (a <= 0.002) {
+        discard;
+    }
+
+    vec3 rgb = mix(vec3(0.06), vec3(0.98), clamp(totalWhite, 0.0, 1.0));
+    outColor = vec4(rgb * a, a);
+}
+`;
+
 function parseHexColor(hex) {
   if (!hex || typeof hex !== 'string') return [1, 1, 1];
   const s = hex.trim();
@@ -276,10 +355,86 @@ export class GPURenderer {
 
     this.supported = !!this.gl;
     this._renderPending = false;
+    this._contextLost = false;
     this.selectionTexture = null;
+
+    this.canvas.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();
+      this.supported = false;
+      this._contextLost = true;
+      this._renderPending = false;
+      if (this.liquifySolver && this.liquifySolver.onContextLost) {
+        this.liquifySolver.onContextLost();
+      }
+      if (this.smudgeSolver) {
+        this.smudgeSolver.active = false;
+        this.smudgeSolver.ready = false;
+      }
+      if (this.fluidSolver) {
+        this.fluidSolver.active = false;
+        this.fluidSolver.ready = false;
+      }
+      if (this.airSolver) {
+        this.airSolver.active = false;
+        this.airSolver.ready = false;
+      }
+      this.canvas.style.display = 'none';
+      if (this.engine) {
+        if (typeof this.engine._resetInteractionState === 'function') {
+          this.engine._resetInteractionState({ cancelActive: false });
+        }
+        if (typeof this.engine._enableDomFallback === 'function') {
+          this.engine._enableDomFallback();
+        } else if (this.engine.canvasWrapper) {
+          this.engine.canvasWrapper.style.display = '';
+        }
+      }
+    });
+
+    this.canvas.addEventListener('webglcontextrestored', () => {
+      this._handleContextRestored();
+    });
 
     if (this.supported) {
       this._initGL();
+    }
+  }
+
+  _handleContextRestored() {
+    if (!this.gl || this.gl.isContextLost()) return;
+    this._contextLost = false;
+    this.supported = true;
+
+    this.selectionTexture = null;
+    this.airSolver = null;
+    this.airOverlay = null;
+    this.fluidSolver = null;
+    this.fluidOverlay = null;
+    this.smudgeSolver = null;
+    this.smudgeOverlay = null;
+    this.liquifySolver = null;
+
+    if (this.engine && this.engine.chunks) {
+      this.engine.chunks.forEach(chunk => {
+        if (chunk.gpuTextures) chunk.gpuTextures.fill(null);
+        chunk.gpuStrokeTexture = null;
+      });
+    }
+    if (this.engine && this.engine.referenceImages) {
+      this.engine.referenceImages.forEach(ref => {
+        ref.gpuTexture = null;
+        ref.gpuDirty = true;
+      });
+    }
+
+    this._initGL();
+    if (this.supported) {
+      this.canvas.style.display = '';
+      if (this.engine && this.engine.canvasWrapper) {
+        this.engine.canvasWrapper.style.display = 'none';
+      }
+      this.markAllChunksDirty();
+      this.requestRender();
     }
   }
 
@@ -314,8 +469,16 @@ export class GPURenderer {
 
   _initGL() {
     const gl = this.gl;
+    if (!gl || gl.isContextLost()) {
+      this.supported = false;
+      return;
+    }
     this.quadProgram = this._createProgram(QUAD_VS, QUAD_FS);
     this.gridProgram = this._createProgram(GRID_VS, GRID_FS);
+    if (!this.quadProgram || !this.gridProgram) {
+      this.supported = false;
+      return;
+    }
 
     // Cache uniform locations for quadProgram
     this.quadLocs = {
@@ -358,6 +521,17 @@ export class GPURenderer {
       u_clipToBoard: gl.getUniformLocation(this.gridProgram, 'u_clipToBoard'),
       u_boardHalfSize: gl.getUniformLocation(this.gridProgram, 'u_boardHalfSize')
     };
+
+    this.liquifyCursorProgram = this._createProgram(LIQUIFY_CURSOR_VS, LIQUIFY_CURSOR_FS);
+    if (this.liquifyCursorProgram) {
+      this.liquifyCursorLocs = {
+        u_viewport: gl.getUniformLocation(this.liquifyCursorProgram, 'u_viewport'),
+        u_cursorRect: gl.getUniformLocation(this.liquifyCursorProgram, 'u_cursorRect'),
+        u_cursorCenter: gl.getUniformLocation(this.liquifyCursorProgram, 'u_cursorCenter'),
+        u_cursorRadius: gl.getUniformLocation(this.liquifyCursorProgram, 'u_cursorRadius'),
+        u_falloff: gl.getUniformLocation(this.liquifyCursorProgram, 'u_falloff')
+      };
+    }
 
     // Unit quad VAO [0,0] -> [1,1]
     this.vao = gl.createVertexArray();
@@ -504,10 +678,14 @@ export class GPURenderer {
       this.smudgeSolver = null;
     }
     this.smudgeOverlay = null;
+    if (this.liquifySolver) {
+      this.liquifySolver.dispose();
+      this.liquifySolver = null;
+    }
   }
 
   requestRender() {
-    if (!this.supported || this._renderPending) return;
+    if (!this.supported || this._contextLost || this._renderPending || !this.gl || this.gl.isContextLost()) return;
     this._renderPending = true;
     requestAnimationFrame(() => {
       this._renderPending = false;
@@ -516,7 +694,7 @@ export class GPURenderer {
   }
 
   render() {
-    if (!this.supported) return;
+    if (!this.supported || this._contextLost || !this.gl || this.gl.isContextLost()) return;
     const gl = this.gl;
     const engine = this.engine;
     const rect = engine.getContainerRect();
@@ -530,6 +708,13 @@ export class GPURenderer {
       this.canvas.height = targetH;
     }
 
+    // Guarantee clean default screen framebuffer and compositor state regardless of tool passes
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+    gl.activeTexture(gl.TEXTURE0);
     gl.viewport(0, 0, targetW, targetH);
 
     // 1. Clear Desk / Infinite Canvas Background
@@ -852,6 +1037,34 @@ export class GPURenderer {
         // Restore mode 0 for remaining layers
         gl.uniform1i(this.quadLocs.u_mode, 0);
       }
+    }
+
+    // 6. Dual-ring dotted Liquify brush cursor overlay (zero DOM layout/box-shadow overhead)
+    const lc = engine._liquifyCursor;
+    if (
+      this.liquifyCursorProgram &&
+      lc &&
+      lc.visible &&
+      engine.brush.type === TOOLS.LIQUIFY &&
+      !engine.isExportMode &&
+      !engine.floatingSelection
+    ) {
+      const outerR = Math.max(2.0, lc.radiusCss || 4.0);
+      const padCss = 6.0;
+      const boxHalf = outerR + padCss;
+      gl.useProgram(this.liquifyCursorProgram);
+      gl.uniform2f(this.liquifyCursorLocs.u_viewport, viewW, viewH);
+      gl.uniform4f(
+        this.liquifyCursorLocs.u_cursorRect,
+        lc.mx - boxHalf,
+        lc.my - boxHalf,
+        boxHalf * 2.0,
+        boxHalf * 2.0
+      );
+      gl.uniform2f(this.liquifyCursorLocs.u_cursorCenter, lc.mx, lc.my);
+      gl.uniform1f(this.liquifyCursorLocs.u_cursorRadius, outerR);
+      gl.uniform1f(this.liquifyCursorLocs.u_falloff, lc.falloff !== undefined ? lc.falloff : 0.5);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
 
     gl.bindVertexArray(null);

@@ -1,24 +1,39 @@
 import { TOOLS, LAYERS_COUNT } from './constants.js';
 
 function canvasToDataURLAsync(canvas, type = 'image/png', quality) {
+  if (!canvas || canvas.width <= 0 || canvas.height <= 0) {
+    return Promise.resolve('');
+  }
   return new Promise((resolve) => {
+    let settled = false;
+    const fallbackUrl = () => {
+      try {
+        return canvas.toDataURL(type, quality);
+      } catch (e) {
+        return '';
+      }
+    };
+    const done = (val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(val);
+    };
+    const timer = setTimeout(() => done(fallbackUrl()), 10000);
     try {
       canvas.toBlob((blob) => {
+        if (settled) return;
         if (!blob) {
-          resolve(canvas.toDataURL(type, quality));
+          done(fallbackUrl());
           return;
         }
         const reader = new FileReader();
-        reader.onloadend = () => {
-          resolve(reader.result);
-        };
-        reader.onerror = () => {
-          resolve(canvas.toDataURL(type, quality));
-        };
+        reader.onloadend = () => done(reader.result || '');
+        reader.onerror = () => done(fallbackUrl());
         reader.readAsDataURL(blob);
       }, type, quality);
     } catch (e) {
-      resolve(canvas.toDataURL(type, quality));
+      done(fallbackUrl());
     }
   });
 }
@@ -57,6 +72,7 @@ export class TimelapseRecorder {
     this._isEncodingBuffer = false;
     this._flushPromise = null;
     this._maxBufferedRawFrames = 18;
+    this._pendingGpuCapture = false;
 
     this._initStyles();
     this.resetSession();
@@ -93,7 +109,7 @@ export class TimelapseRecorder {
   }
 
   hasPendingSave() {
-    return Boolean(this._hasUnsavedChanges || this._hasBufferedFrames());
+    return Boolean(this._hasUnsavedChanges || this._hasBufferedFrames() || this._pendingGpuCapture);
   }
 
   _clearEncodeTimer() {
@@ -143,12 +159,16 @@ export class TimelapseRecorder {
   }
 
   async flushBufferedFrames() {
+    if (this._pendingGpuCapture && this.engine && typeof this.engine.flushPendingGpuCommits === 'function') {
+      this.engine.flushPendingGpuCommits();
+    }
     if (this._flushPromise) return this._flushPromise;
     this._clearEncodeTimer();
     if (!this._hasBufferedFrames()) return;
 
     this._flushPromise = (async () => {
-      while (this._isEncodingBuffer) {
+      const waitStart = Date.now();
+      while (this._isEncodingBuffer && (Date.now() - waitStart) < 12000) {
         await new Promise(r => setTimeout(r, 10));
       }
       for (let i = 0; i < this.frames.length; i++) {
@@ -245,6 +265,7 @@ export class TimelapseRecorder {
   resetSession() {
     this._clearEncodeTimer();
     this._disposeAllBufferedFrames();
+    this._pendingGpuCapture = false;
     this.sessionId = 'REC-' + new Date().toISOString().replace(/[-:T]/g, '').slice(2, 14);
     this.frames = [];
     this.currentFrameIdx = 0;
@@ -590,6 +611,17 @@ export class TimelapseRecorder {
 
   captureFrame() {
     try {
+      if (this.engine && typeof this.engine.hasPendingGpuCommits === 'function' && this.engine.hasPendingGpuCommits()) {
+        if (!this._pendingGpuCapture) {
+          this._pendingGpuCapture = true;
+          this.engine.whenGpuCommitsDone(() => {
+            this._pendingGpuCapture = false;
+            this.captureFrame();
+          });
+        }
+        return;
+      }
+
       let cropX = 0;
       let cropY = 0;
       let cropW = 0;
@@ -1220,6 +1252,7 @@ export class TimelapseRecorder {
     this._clearEncodeTimer();
     this._disposeAllBufferedFrames();
     this._hasUnsavedChanges = false;
+    this._pendingGpuCapture = false;
 
     // 1. If currently playing, stop it cleanly
     if (this.isPlaying) {

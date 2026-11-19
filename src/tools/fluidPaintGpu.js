@@ -522,6 +522,7 @@ export class GpuFluidSolver {
     this.gpuRenderer = gpuRenderer;
     this.gl = gpuRenderer.gl;
     this.ready = false;
+    this._pipelinesWarmed = false;
 
     this.active = false;
     this.activeLayer = -1;
@@ -698,7 +699,202 @@ export class GpuFluidSolver {
     ]);
     this.unpremultLocs = this._cacheLocs(this.progUnpremult, ['u_tex']);
 
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.ready = true;
+  }
+
+  prewarmPipelines(engine = null, tipRaw = null, tipBump = null, tipVersion = null) {
+    const gl = this.gl;
+    if (!this.ready || !gl || gl.isContextLost() || !this.gpuRenderer?.vao) return;
+
+    if (!this._commitCanvas) {
+      this._commitCanvas = document.createElement('canvas');
+      this._commitCanvas.width = TILE_SIZE;
+      this._commitCanvas.height = TILE_SIZE;
+      this._commitCtx = this._commitCanvas.getContext('2d');
+      this._readBuf = new Uint8Array(TILE_SIZE * TILE_SIZE * 4);
+    }
+
+    if (tipRaw && tipBump) {
+      this.uploadTipMaps(tipRaw, tipBump, 64, tipVersion);
+    }
+
+    if (this._pipelinesWarmed) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.activeTexture(gl.TEXTURE0);
+      return;
+    }
+
+    // Trigger real 4x4 (and 1x1) scissored draws across all 6 shaders & MRT targets
+    // so ANGLE/GPU native PSO compilation completes ahead of stroke 1.
+    gl.disable(gl.BLEND);
+    gl.enable(gl.SCISSOR_TEST);
+    gl.bindVertexArray(this.gpuRenderer.vao);
+
+    gl.scissor(0, 0, 4, 4);
+    gl.viewport(0, 0, WORK_SIZE, WORK_SIZE);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.workPaintA.fbo);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.workStateA.fbo);
+    gl.clearColor(0, 0, -100000.0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    gl.scissor(0, 0, 1, 1);
+    gl.viewport(0, 0, 1, 1);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.carriedA.fbo);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    // 1. progRectMap: workPaintA -> workPaintB
+    gl.scissor(0, 0, 4, 4);
+    gl.viewport(0, 0, WORK_SIZE, WORK_SIZE);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.workPaintB.fbo);
+    gl.useProgram(this.progRectMap);
+    gl.uniform4f(this.rectLocs.u_srcRect, 0, 0, TILE_SIZE, TILE_SIZE);
+    gl.uniform4f(this.rectLocs.u_dstRect, 0, 0, WORK_SIZE, WORK_SIZE);
+    gl.uniform4f(this.rectLocs.u_uvSubRect, 0, 0, 1, 1);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.workPaintA.tex);
+    gl.uniform1i(this.rectLocs.u_tex, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 2. progPickup: carriedA + workPaintA + workStateA -> carriedB
+    gl.disable(gl.SCISSOR_TEST);
+    gl.viewport(0, 0, 1, 1);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.carriedB.fbo);
+    gl.useProgram(this.progPickup);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.carriedA.tex);
+    gl.uniform1i(this.pickupLocs.u_prevCarried, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.workPaintA.tex);
+    gl.uniform1i(this.pickupLocs.u_paint, 1);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.workStateA.tex);
+    gl.uniform1i(this.pickupLocs.u_state, 2);
+    gl.uniform2f(this.pickupLocs.u_workOrigin, 0, 0);
+    gl.uniform2f(this.pickupLocs.u_workSize, WORK_SIZE, WORK_SIZE);
+    gl.uniform4f(this.pickupLocs.u_uvClamp, 0.001, 0.001, 0.999, 0.999);
+    gl.uniform2f(this.pickupLocs.u_to, 2, 2);
+    gl.uniform1f(this.pickupLocs.u_radius, 12.0);
+    gl.uniform1f(this.pickupLocs.u_prevDistTotal, 0.0);
+    gl.uniform1f(this.pickupLocs.u_coverWindow, 24.0);
+    gl.uniform1f(this.pickupLocs.u_pickupRatio, 0.5);
+    gl.uniform1f(this.pickupLocs.u_retentionRatio, 0.5);
+    gl.uniform3f(this.pickupLocs.u_stepColor, 0, 0, 0);
+    gl.uniform1i(this.pickupLocs.u_isFirst, 1);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 3. progInject (MRT): workPaintA + workStateA + tipTex + carriedB -> mrtWorkB
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(0, 0, 4, 4);
+    gl.viewport(0, 0, WORK_SIZE, WORK_SIZE);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.mrtWorkB);
+    gl.useProgram(this.progInject);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.workPaintA.tex);
+    gl.uniform1i(this.injectLocs.u_paint, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.workStateA.tex);
+    gl.uniform1i(this.injectLocs.u_state, 1);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.tipTex);
+    gl.uniform1i(this.injectLocs.u_tip, 2);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.carriedB.tex);
+    gl.uniform1i(this.injectLocs.u_carried, 3);
+    gl.uniform2f(this.injectLocs.u_simOrigin, 0, 0);
+    gl.uniform2f(this.injectLocs.u_texel, 1 / WORK_SIZE, 1 / WORK_SIZE);
+    gl.uniform4f(this.injectLocs.u_uvClamp, 0.001, 0.001, 0.999, 0.999);
+    gl.uniform2f(this.injectLocs.u_from, 1, 1);
+    gl.uniform2f(this.injectLocs.u_dir, 1, 0);
+    gl.uniform2f(this.injectLocs.u_prevDir, 1, 0);
+    gl.uniform1f(this.injectLocs.u_safeDist, 1.0);
+    gl.uniform1f(this.injectLocs.u_prevDistTotal, 0.0);
+    gl.uniform1f(this.injectLocs.u_coverWindow, 24.0);
+    gl.uniform1f(this.injectLocs.u_radius, 12.0);
+    gl.uniform1f(this.injectLocs.u_rotCos, 1.0);
+    gl.uniform1f(this.injectLocs.u_rotSin, 0.0);
+    gl.uniform1f(this.injectLocs.u_time, 0.0);
+    gl.uniform1f(this.injectLocs.u_curlFreq, 0.05);
+    gl.uniform1i(this.injectLocs.u_hasCurl, 0);
+    gl.uniform1f(this.injectLocs.u_dragAmp, 0.5);
+    gl.uniform1f(this.injectLocs.u_swirlAmp, 0.0);
+    gl.uniform1f(this.injectLocs.u_curlAmp, 0.0);
+    gl.uniform1f(this.injectLocs.u_lagDistBase, 1.0);
+    gl.uniform1f(this.injectLocs.u_advMixBase, 0.5);
+    gl.uniform1f(this.injectLocs.u_trailFeatherInv, 0.1);
+    gl.uniform1f(this.injectLocs.u_brFreq, 12.0);
+    gl.uniform1f(this.injectLocs.u_bristleContrast, 0.5);
+    gl.uniform1f(this.injectLocs.u_fluidity, 0.5);
+    gl.uniform1f(this.injectLocs.u_vortex, 0.0);
+    gl.uniform1f(this.injectLocs.u_turb, 0.0);
+    gl.uniform1f(this.injectLocs.u_depthScale, 0.5);
+    gl.uniform1f(this.injectLocs.u_paintSupply, 0.5);
+    gl.uniform1f(this.injectLocs.u_supplyThreshold, 0.1);
+    gl.uniform1f(this.injectLocs.u_strokeOpacity, 1.0);
+    gl.uniform1f(this.injectLocs.u_recolorRateBase, 0.5);
+    gl.uniform1i(this.injectLocs.u_nSteps, 1);
+    gl.uniform1i(this.injectLocs.u_alphaLock, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 4. progStreamer (MRT): workPaintB + workStateB -> mrtWorkA
+    this.segPosArr.fill(0);
+    this.segColArr.fill(0);
+    this.segMetaArr.fill(0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.mrtWorkA);
+    gl.useProgram(this.progStreamer);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.workPaintB.tex);
+    gl.uniform1i(this.streamerLocs.u_paint, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.workStateB.tex);
+    gl.uniform1i(this.streamerLocs.u_state, 1);
+    gl.uniform2f(this.streamerLocs.u_simOrigin, 0, 0);
+    gl.uniform1i(this.streamerLocs.u_segCount, 1);
+    gl.uniform4fv(this.streamerLocs.u_segPos, this.segPosArr);
+    gl.uniform4fv(this.streamerLocs.u_segCol, this.segColArr);
+    gl.uniform4fv(this.streamerLocs.u_segMeta, this.segMetaArr);
+    gl.uniform1i(this.streamerLocs.u_alphaLock, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 5. progLight: workPaintA + workStateA -> workLit
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.workLit.fbo);
+    gl.useProgram(this.progLight);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.workPaintA.tex);
+    gl.uniform1i(this.lightLocs.u_paint, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.workStateA.tex);
+    gl.uniform1i(this.lightLocs.u_state, 1);
+    gl.uniform2f(this.lightLocs.u_texel, 1 / WORK_SIZE, 1 / WORK_SIZE);
+    gl.uniform4f(this.lightLocs.u_uvClamp, 0.001, 0.001, 0.999, 0.999);
+    gl.uniform1i(this.lightLocs.u_doShade, 1);
+    gl.uniform1f(this.lightLocs.u_bumpScale, 0.2);
+    gl.uniform1f(this.lightLocs.u_diffIntensity, 0.5);
+    gl.uniform1f(this.lightLocs.u_rimMax, 10.0);
+    gl.uniform1f(this.lightLocs.u_specScale, 0.5);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 6. progUnpremult: workLit -> workPaintB
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.workPaintB.fbo);
+    gl.useProgram(this.progUnpremult);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.workLit.tex);
+    gl.uniform1i(this.unpremultLocs.u_tex, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // Restore WebGL compositor state cleanly
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.bindVertexArray(null);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+    gl.activeTexture(gl.TEXTURE0);
+
+    this._pipelinesWarmed = true;
   }
 
   _allocTileGpu() {
@@ -876,6 +1072,7 @@ export class GpuFluidSolver {
         if (t) tiles.push(t);
       }
     }
+    if (tiles.length === 0) return tiles;
 
     gl.disable(gl.BLEND);
     gl.enable(gl.SCISSOR_TEST);
@@ -910,6 +1107,9 @@ export class GpuFluidSolver {
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
 
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.enable(gl.BLEND);
     return tiles;
   }
 
@@ -1053,7 +1253,7 @@ export class GpuFluidSolver {
   }
 
   beginStroke(engine, _startPoint, tipRaw, tipBump, tipVersion = null) {
-    if (!this.ready) return false;
+    if (!this.ready || !this.gl || this.gl.isContextLost()) return false;
     this._releaseAllTiles();
     this.touchedChunks.clear();
     this.uploadTipMaps(tipRaw, tipBump, 64, tipVersion);
@@ -1068,7 +1268,7 @@ export class GpuFluidSolver {
   }
 
   runStep(engine, params) {
-    if (!this.ready || !this.active) return;
+    if (!this.ready || !this.active || !this.gl || this.gl.isContextLost()) return;
 
     this.lastShadeParams = {
       isShading: params.isShading,
@@ -1531,5 +1731,6 @@ export class GpuFluidSolver {
     this._readBuf = null;
     this.ready = false;
     this.active = false;
+    this._pipelinesWarmed = false;
   }
 }

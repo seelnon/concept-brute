@@ -671,6 +671,7 @@ export class GpuWatercolorSolver {
     this.gpuRenderer = gpuRenderer;
     this.gl = gpuRenderer.gl;
     this.ready = false;
+    this._pipelinesWarmed = false;
 
     this.active = false;
     this.activeLayer = -1;
@@ -874,7 +875,218 @@ export class GpuWatercolorSolver {
     ]);
     this.unpremultLocs = this._cacheLocs(this.progUnpremult, ['u_tex']);
 
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.ready = true;
+  }
+
+  prewarmPipelines(engine = null, tipRgbaBytes = null, res = 64, tipVersion = null) {
+    const gl = this.gl;
+    if (!this.ready || !gl || gl.isContextLost() || !this.gpuRenderer?.vao) return;
+
+    if (!this._commitCanvas) {
+      this._commitCanvas = document.createElement('canvas');
+      this._commitCanvas.width = TILE_SIZE;
+      this._commitCanvas.height = TILE_SIZE;
+      this._commitCtx = this._commitCanvas.getContext('2d');
+      this._readBuf = new Uint8Array(TILE_SIZE * TILE_SIZE * 4);
+    }
+
+    if (tipRgbaBytes) {
+      this.uploadTipMaps(tipRgbaBytes, res, tipVersion);
+    }
+
+    if (this._pipelinesWarmed) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.activeTexture(gl.TEXTURE0);
+      return;
+    }
+
+    const zeroVel = this.isFloatVel ? 0.0 : (127.0 / 255.0);
+    const texel = 1.0 / WORK_SIZE;
+
+    gl.disable(gl.BLEND);
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(0, 0, 4, 4);
+    gl.bindVertexArray(this.gpuRenderer.vao);
+    gl.viewport(0, 0, WORK_SIZE, WORK_SIZE);
+
+    gl.clearColor(0, 0, 0, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.workPigA.fbo);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.workPressA.fbo);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.clearColor(zeroVel, zeroVel, 0, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.workVelA.fbo);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    // 1. progRectMap: workPigA -> workPigB
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.workPigB.fbo);
+    gl.useProgram(this.progRectMap);
+    gl.uniform4f(this.rectLocs.u_srcRect, 0, 0, TILE_SIZE, TILE_SIZE);
+    gl.uniform4f(this.rectLocs.u_dstRect, 0, 0, WORK_SIZE, WORK_SIZE);
+    gl.uniform4f(this.rectLocs.u_uvSubRect, 0, 0, 1, 1);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.workPigA.tex);
+    gl.uniform1i(this.rectLocs.u_tex, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 2. progBlit: workPigB -> workPigA
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.workPigA.fbo);
+    gl.useProgram(this.progBlit);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.workPigB.tex);
+    gl.uniform1i(this.blitLocs.u_tex, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 3. progPrep: workVelA -> workVelB
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.workVelB.fbo);
+    gl.useProgram(this.progPrep);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.workVelA.tex);
+    gl.uniform1i(this.prepLocs.u_vel, 0);
+    gl.uniform1f(this.prepLocs.u_decay, 0.5);
+    gl.uniform1i(this.prepLocs.u_isFloat, this.isFloatVel ? 1 : 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 4. progInject (MRT): workPigA + workVelA + tipTex -> mrtWorkB
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.mrtWorkB);
+    gl.useProgram(this.progInject);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.workPigA.tex);
+    gl.uniform1i(this.injectLocs.u_pigment, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.workVelA.tex);
+    gl.uniform1i(this.injectLocs.u_vel, 1);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.tipTex);
+    gl.uniform1i(this.injectLocs.u_tip, 2);
+    gl.uniform2f(this.injectLocs.u_simOrigin, 0, 0);
+    gl.uniform2f(this.injectLocs.u_from, 1, 1);
+    gl.uniform2f(this.injectLocs.u_to, 2, 2);
+    gl.uniform2f(this.injectLocs.u_dir, 1, 0);
+    gl.uniform1f(this.injectLocs.u_radius, 12.0);
+    gl.uniform3f(this.injectLocs.u_color, 0, 0, 0);
+    gl.uniform1f(this.injectLocs.u_opacity, 0.5);
+    gl.uniform1f(this.injectLocs.u_flow, 0.5);
+    gl.uniform1f(this.injectLocs.u_wetness, 0.5);
+    gl.uniform1f(this.injectLocs.u_streamFlow, 0.5);
+    gl.uniform1f(this.injectLocs.u_bloom, 0.3);
+    gl.uniform1f(this.injectLocs.u_edge, 0.3);
+    gl.uniform1f(this.injectLocs.u_granulation, 0.2);
+    gl.uniform1f(this.injectLocs.u_time, 0.0);
+    gl.uniform1f(this.injectLocs.u_segLen, 1.0);
+    gl.uniform1f(this.injectLocs.u_maxVel, this.maxVel);
+    gl.uniform1i(this.injectLocs.u_isFloat, this.isFloatVel ? 1 : 0);
+    gl.uniform1i(this.injectLocs.u_alphaLock, 0);
+    gl.uniform1i(this.injectLocs.u_hasTip, this.hasTip ? 1 : 0);
+    gl.uniform1i(this.injectLocs.u_isDab, 0);
+    gl.uniform1f(this.injectLocs.u_rotCos, 1.0);
+    gl.uniform1f(this.injectLocs.u_rotSin, 0.0);
+    gl.uniform1f(this.injectLocs.u_tipPour, 0.5);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 5. progVort: workVelB -> workCurl
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.workCurl.fbo);
+    gl.useProgram(this.progVort);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.workVelB.tex);
+    gl.uniform1i(this.vortLocs.u_vel, 0);
+    gl.uniform2f(this.vortLocs.u_texel, texel, texel);
+    gl.uniform4f(this.vortLocs.u_uvClamp, 0.001, 0.001, 0.999, 0.999);
+    gl.uniform1f(this.vortLocs.u_maxVel, this.maxVel);
+    gl.uniform1i(this.vortLocs.u_isFloat, this.isFloatVel ? 1 : 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 6. progConfDiv (MRT): workVelB + workCurl -> mrtTmpDiv
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.mrtTmpDiv);
+    gl.useProgram(this.progConfDiv);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.workVelB.tex);
+    gl.uniform1i(this.confDivLocs.u_vel, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.workCurl.tex);
+    gl.uniform1i(this.confDivLocs.u_vort, 1);
+    gl.uniform2f(this.confDivLocs.u_texel, texel, texel);
+    gl.uniform4f(this.confDivLocs.u_uvClamp, 0.001, 0.001, 0.999, 0.999);
+    gl.uniform1f(this.confDivLocs.u_vortAmp, 0.3);
+    gl.uniform1f(this.confDivLocs.u_maxVel, this.maxVel);
+    gl.uniform1i(this.confDivLocs.u_isFloat, this.isFloatVel ? 1 : 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 7. progJacobi: workPressA + workDiv -> workPressB
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.workPressB.fbo);
+    gl.useProgram(this.progJacobi);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.workPressA.tex);
+    gl.uniform1i(this.jacobiLocs.u_press, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.workDiv.tex);
+    gl.uniform1i(this.jacobiLocs.u_div, 1);
+    gl.uniform2f(this.jacobiLocs.u_texel, texel, texel);
+    gl.uniform4f(this.jacobiLocs.u_uvClamp, 0.001, 0.001, 0.999, 0.999);
+    gl.uniform1f(this.jacobiLocs.u_maxVel, this.maxVel);
+    gl.uniform1i(this.jacobiLocs.u_isFloat, this.isFloatVel ? 1 : 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 8. progFlowEdge (MRT): workPigB + workVelTmp + workPressB -> mrtWorkA
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.mrtWorkA);
+    gl.useProgram(this.progFlowEdge);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.workPigB.tex);
+    gl.uniform1i(this.flowEdgeLocs.u_pigment, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.workVelTmp.tex);
+    gl.uniform1i(this.flowEdgeLocs.u_vel, 1);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.workPressB.tex);
+    gl.uniform1i(this.flowEdgeLocs.u_press, 2);
+    gl.uniform2f(this.flowEdgeLocs.u_texel, texel, texel);
+    gl.uniform4f(this.flowEdgeLocs.u_uvClamp, 0.001, 0.001, 0.999, 0.999);
+    gl.uniform2f(this.flowEdgeLocs.u_simOrigin, 0, 0);
+    gl.uniform1f(this.flowEdgeLocs.u_wetness, 0.5);
+    gl.uniform1f(this.flowEdgeLocs.u_streamFlow, 0.5);
+    gl.uniform1f(this.flowEdgeLocs.u_bloom, 0.3);
+    gl.uniform1f(this.flowEdgeLocs.u_edge, 0.3);
+    gl.uniform1f(this.flowEdgeLocs.u_granulation, 0.2);
+    gl.uniform1f(this.flowEdgeLocs.u_maxVel, this.maxVel);
+    gl.uniform1f(this.flowEdgeLocs.u_dt, 1.0);
+    gl.uniform1i(this.flowEdgeLocs.u_isFloat, this.isFloatVel ? 1 : 0);
+    gl.uniform1i(this.flowEdgeLocs.u_alphaLock, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 9. progDrySharpen (MRT): workPigA + workVelA -> mrtWorkB
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.mrtWorkB);
+    gl.useProgram(this.progDrySharpen);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.workPigA.tex);
+    gl.uniform1i(this.drySharpenLocs.u_pigment, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.workVelA.tex);
+    gl.uniform1i(this.drySharpenLocs.u_vel, 1);
+    gl.uniform2f(this.drySharpenLocs.u_texel, texel, texel);
+    gl.uniform4f(this.drySharpenLocs.u_uvClamp, 0.001, 0.001, 0.999, 0.999);
+    gl.uniform1f(this.drySharpenLocs.u_edge, 0.3);
+    gl.uniform1f(this.drySharpenLocs.u_wetness, 0.5);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 10. progUnpremult: workPigB -> workPigA
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.workPigA.fbo);
+    gl.useProgram(this.progUnpremult);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.workPigB.tex);
+    gl.uniform1i(this.unpremultLocs.u_tex, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // Restore WebGL compositor state cleanly
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.bindVertexArray(null);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+    gl.activeTexture(gl.TEXTURE0);
+
+    this._pipelinesWarmed = true;
   }
 
   _allocTileGpu() {
@@ -951,6 +1163,7 @@ export class GpuWatercolorSolver {
     gl.bindTexture(gl.TEXTURE_2D, tile.vel.tex);
     gl.uniform1i(this.blitLocs.u_tex, 0);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
   _clearWetCache() {
@@ -970,6 +1183,19 @@ export class GpuWatercolorSolver {
       }
     }
     this.wetPool = [];
+  }
+
+  clearWetCacheForProject(projId) {
+    if (!projId) return;
+    const prefix = `${projId}:`;
+    for (const [key, entry] of this.wetCache.entries()) {
+      if (key.startsWith(prefix)) {
+        this.wetCache.delete(key);
+        if (entry && entry.vel) {
+          this.wetPool.push(entry.vel);
+        }
+      }
+    }
   }
 
   _srcPig() { return this.curWorkIdx === 0 ? this.workPigA : this.workPigB; }
@@ -1131,6 +1357,7 @@ export class GpuWatercolorSolver {
         if (t) tiles.push(t);
       }
     }
+    if (tiles.length === 0) return tiles;
 
     gl.disable(gl.BLEND);
     gl.enable(gl.SCISSOR_TEST);
@@ -1166,6 +1393,9 @@ export class GpuWatercolorSolver {
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
 
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.enable(gl.BLEND);
     return tiles;
   }
 
@@ -1310,7 +1540,7 @@ export class GpuWatercolorSolver {
   }
 
   beginStroke(engine, _startPoint, wetnessNorm) {
-    if (!this.ready) return false;
+    if (!this.ready || !this.gl || this.gl.isContextLost()) return false;
     this._releaseAllTiles();
     this.touchedChunks.clear();
 
@@ -1327,7 +1557,7 @@ export class GpuWatercolorSolver {
   }
 
   beginStepBatch(engine, minX, minY, maxX, maxY) {
-    if (!this.ready || !this.active) return;
+    if (!this.ready || !this.active || !this.gl || this.gl.isContextLost()) return;
     const apron = 8;
     const rawMinX = Math.floor(minX) - apron;
     const rawMinY = Math.floor(minY) - apron;
@@ -1350,7 +1580,7 @@ export class GpuWatercolorSolver {
   }
 
   injectSegment(engine, from, to, radius, colorRgb, opacity, flow, params, timeSec, tipInfo = null) {
-    if (!this.ready || !this.active) return;
+    if (!this.ready || !this.active || !this.gl || this.gl.isContextLost()) return;
 
     const tipPour = tipInfo ? tipInfo.tipPour : (params.tipPour ?? 1.0);
     const pad = Math.ceil(radius * (1.10 + params.bloom * 0.35 + tipPour * 0.22)) + 16;
@@ -1447,7 +1677,7 @@ export class GpuWatercolorSolver {
   }
 
   solveAndFlowStep(engine, minX, minY, maxX, maxY, params, dt = 1.0) {
-    if (!this.ready || !this.active) return;
+    if (!this.ready || !this.active || !this.gl || this.gl.isContextLost()) return;
 
     let workX = this.batchWorkX;
     let workY = this.batchWorkY;
@@ -1882,5 +2112,6 @@ export class GpuWatercolorSolver {
     this._readBuf = null;
     this.ready = false;
     this.active = false;
+    this._pipelinesWarmed = false;
   }
 }

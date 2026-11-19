@@ -868,7 +868,7 @@ function drawStreamerSegToPatch(boxX, boxY, boxW, boxH, x0, y0, x1, y1, r, g, b,
 
 function getGpuFluidSolver(engine) {
   const gr = engine && engine.gpuRenderer;
-  if (!gr || !gr.supported || !gr.gl) return null;
+  if (!gr || !gr.supported || gr._contextLost || !gr.gl || gr.gl.isContextLost()) return null;
   if (!gr.fluidSolver) {
     gr.fluidSolver = new GpuFluidSolver(gr);
   }
@@ -877,7 +877,16 @@ function getGpuFluidSolver(engine) {
 
 export function warmFluidSolver(engine) {
   if (!engine) return null;
-  return getGpuFluidSolver(engine);
+  if (engine.app && typeof engine.app.getCurrentTipSettings === 'function') {
+    const tipSettings = engine.app.getCurrentTipSettings();
+    if (tipSettings) syncFluidSettingsFromTip(tipSettings);
+  }
+  prepareTipMaps(engine);
+  const solver = getGpuFluidSolver(engine);
+  if (solver && solver.prewarmPipelines) {
+    solver.prewarmPipelines(engine, _tipRaw, _tipBump, _preparedTipVersionCounter);
+  }
+  return solver;
 }
 
 // ----------------------------------------------------

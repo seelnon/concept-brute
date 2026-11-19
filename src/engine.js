@@ -84,6 +84,7 @@ export class Engine {
     this.keys = {};
     this.lastRKeyTime = 0;
     this.isMouseDown = false;
+    this._isLoadingProject = false;
     
     this.brush = {
       size: 40,
@@ -271,7 +272,61 @@ export class Engine {
       requestAnimationFrame(loop);
   }
 
+  hasPendingGpuCommits() {
+      return liquify.hasPendingLiquifyCommits(this);
+  }
+
+  flushPendingGpuCommits() {
+      liquify.flushLiquifyGpuCommits(this);
+  }
+
+  whenGpuCommitsDone(cb) {
+      liquify.whenLiquifyCommitsDone(this, cb);
+  }
+
+  _resetInteractionState(options = {}) {
+      const cancelActive = options.cancelActive !== false;
+      if (cancelActive && this.isDrawing) {
+          try { this._cancelStroke(); } catch (_) {}
+      } else if (this.liquifyStroke) {
+          if (this.liquifyStroke.lazyRafId) {
+              cancelAnimationFrame(this.liquifyStroke.lazyRafId);
+          }
+          this.liquifyStroke = null;
+          if (this.gpuRenderer && this.gpuRenderer.liquifySolver && this.gpuRenderer.liquifySolver.active) {
+              this.gpuRenderer.liquifySolver.cancel(this);
+          }
+      }
+      if (this.activePointers) this.activePointers.clear();
+      if (this._pointerTimes) this._pointerTimes.clear();
+      this._activeStrokePointerId = null;
+      this._activeStrokePointerType = null;
+      this.isDrawing = false;
+      this.isPanning = false;
+      this.isZooming = false;
+      this.isGesture = false;
+      this._gestureLockedUntilRelease = false;
+      this.isMouseDown = false;
+      this.lastPos = null;
+      this.lassoPath = null;
+      this.lassoStrokeMode = null;
+      this._gizmoDrag = null;
+      this._transformStateBeforeDrag = null;
+      this.shiftOrigin = null;
+      this.shiftLockAxis = null;
+      this.keys = {};
+      this._updateCursor();
+  }
+
   resetEngineState() {
+      this.flushPendingGpuCommits();
+      if (this.liquifyStroke) {
+          if (this.liquifyStroke.lazyRafId) {
+              cancelAnimationFrame(this.liquifyStroke.lazyRafId);
+          }
+          this.liquifyStroke = null;
+      }
+      this._resetInteractionState({ cancelActive: false });
       if (this.gpuRenderer) {
           this.gpuRenderer.disposeAllTextures();
       }
@@ -338,6 +393,7 @@ export class Engine {
   }
 
   captureArea(screenX, screenY, size = 128) {
+    this.flushPendingGpuCommits();
     const temp = document.createElement('canvas');
     temp.width = size;
     temp.height = size;
@@ -442,12 +498,23 @@ export class Engine {
                     this._pointerTimes.delete(id);
                     continue;
                 }
-            } else if (p.pointerType === 'touch' && !this.isGesture && (now - ts > 1200)) {
-                this.activePointers.delete(id);
-                this._pointerTimes.delete(id);
-                continue;
+            } else if (p.pointerType === 'touch') {
+                // Even if isGesture got stuck after dropped touchend/pointerup, expire stale touches
+                const maxTouchIdleMs = this.isGesture ? 1800 : 1000;
+                if (now - ts > maxTouchIdleMs) {
+                    this.activePointers.delete(id);
+                    this._pointerTimes.delete(id);
+                    continue;
+                }
             }
             found = true;
+        }
+        const touchesLeft = countTouchPointers();
+        if (touchesLeft < 2 && this.isGesture) {
+            this.isGesture = false;
+        }
+        if (touchesLeft === 0) {
+            this._gestureLockedUntilRelease = false;
         }
         return found;
     };
@@ -497,10 +564,18 @@ export class Engine {
         const isSimulatedMouse = e.pointerType === 'mouse' && this.lastPenTouchTime && (now - this.lastPenTouchTime < 100);
         if (isSimulatedMouse) return false;
 
-        pruneStalePointers(e.pointerType, 1200);
+        pruneStalePointers(e.pointerType, 800);
+
+        const activeTouchStillAlive = this._activeStrokePointerType === 'touch' && countTouchPointers() > 0;
+        if (activeTouchStillAlive) return false;
 
         let recovered = false;
-        if ((this.isPanning || this.isZooming) && this._activeStrokePointerType !== 'touch') {
+        if (this.isGesture || this._gestureLockedUntilRelease) {
+            this.isGesture = false;
+            this._gestureLockedUntilRelease = false;
+            recovered = true;
+        }
+        if (this.isPanning || this.isZooming) {
             this.isPanning = false;
             this.isZooming = false;
             this.isMouseDown = false;
@@ -509,11 +584,11 @@ export class Engine {
             this._updateCursor();
             recovered = true;
         }
-        if (this.isDrawing && this._activeStrokePointerType !== 'touch') {
+        if (this.isDrawing) {
             this.isMouseDown = false;
             this._endStroke(e);
             recovered = true;
-        } else if (!this.isDrawing && this.isMouseDown && this._activeStrokePointerType !== 'touch') {
+        } else if (this.isMouseDown) {
             this.isMouseDown = false;
             this._activeStrokePointerId = null;
             this._activeStrokePointerType = null;
@@ -541,6 +616,7 @@ export class Engine {
         if (!this.isDrawing && e.pointerType !== 'touch') {
             if (this.brushCursor) this.brushCursor.style.display = 'none';
             if (this.brushCrosshair) this.brushCrosshair.style.display = 'none';
+            this._hideLiquifyCursor();
             clearGizmoHoverUI(this);
         }
     });
@@ -555,6 +631,12 @@ export class Engine {
 
         // UI SHIELD: Ignore if hitting any UI element (must run BEFORE modifying focus!)
         if (targetEl && e.target !== this.container && isUiElement(targetEl)) {
+            return;
+        }
+
+        // Ignore canvas presses while project load/switch is actively rebuilding chunks & engine state
+        if (this._isLoadingProject) {
+            if (e.cancelable) e.preventDefault();
             return;
         }
 
@@ -613,6 +695,7 @@ export class Engine {
             }
             if (countTouchPointers() === 0) {
                 this._gestureLockedUntilRelease = false;
+                this.isGesture = false;
             }
         } else if (e.pointerType === 'pen') {
             // Fresh stylus press replaces any leftover orphaned pen/mouse entries if not actively pinching
@@ -630,8 +713,13 @@ export class Engine {
         // If we have an active pen/touch right now, ignore simulated mouse downs
         if (hasNonMouse && e.pointerType === 'mouse') return;
 
-        // Clear ANY leftover non-touch active stroke/pan/zoom (even with matching pointerId if Windows Ink dropped pointerup!)
-        if (e.pointerType !== 'touch' && (this.isDrawing || this.isPanning || this.isZooming) && this._activeStrokePointerType !== 'touch') {
+        // Clear ANY leftover orphaned active stroke/pan/zoom before starting a new stroke
+        // (including orphaned touch state when no touch pointers remain).
+        if (
+            e.pointerType !== 'touch' &&
+            (this.isDrawing || this.isPanning || this.isZooming) &&
+            (this._activeStrokePointerType !== 'touch' || countTouchPointers() === 0)
+        ) {
             this.isMouseDown = false;
             if (this.isDrawing) {
                 this._endStroke(e);
@@ -811,11 +899,30 @@ export class Engine {
       }
 
       if ((this.isDrawing || this.isPanning || this.isZooming) && this._activeStrokePointerId != null && e.pointerId !== this._activeStrokePointerId) {
-          if (e.pointerType !== 'touch') {
-              this._handlePickerMove(e);
-              this._updateBrushCursor(e);
+          // Recover automatically if the previously active pointer disappeared without a pointerup
+          const activeStillInMap = this.activePointers.has(this._activeStrokePointerId);
+          if (!activeStillInMap && e.pointerType !== 'touch' && (this._activeStrokePointerType !== 'touch' || countTouchPointers() === 0)) {
+              if (e.buttons === 0) {
+                  recoverOrphanedActiveState(e);
+              } else {
+                  this.isMouseDown = false;
+                  if (this.isDrawing) {
+                      this._endStroke(e);
+                  } else {
+                      this.isPanning = false;
+                      this.isZooming = false;
+                      this._activeStrokePointerId = null;
+                      this._activeStrokePointerType = null;
+                      this._updateCursor();
+                  }
+              }
+          } else {
+              if (e.pointerType !== 'touch') {
+                  this._handlePickerMove(e);
+                  this._updateBrushCursor(e);
+              }
+              return;
           }
-          return;
       }
 
       if (this.isExportMode && this.isDrawing) {
@@ -1122,6 +1229,7 @@ export class Engine {
         this.setZoom(this.zoom * delta, e.clientX, e.clientY);
       }
       this._updateCursor();
+      this._updateBrushCursor(e);
     }, { passive: false });
   }
 
@@ -1428,6 +1536,7 @@ export class Engine {
   }
 
   promoteAllToGPU() {
+    this.flushPendingGpuCommits();
     if (this.gpuRenderer && this.gpuRenderer.supported) {
         this.gpuRenderer.markAllChunksDirty();
         return;
@@ -1445,6 +1554,41 @@ export class Engine {
             }
         }
     });
+  }
+
+  _enableDomFallback() {
+    if (this.canvasWrapper) {
+        this.canvasWrapper.style.display = '';
+    }
+    this.chunks.forEach(chunk => {
+        if (!chunk.element) {
+            chunk.element = document.createElement('div');
+            chunk.element.className = 'absolute pointer-events-none';
+            for (let i = 0; i < LAYERS_COUNT; i++) {
+                const canv = chunk.canvases && chunk.canvases[i];
+                if (!canv) continue;
+                canv.className = 'absolute inset-0';
+                canv.style.touchAction = 'none';
+                canv.style.imageRendering = 'auto';
+                canv.style.backfaceVisibility = 'hidden';
+                canv.style.webkitBackfaceVisibility = 'hidden';
+                canv.style.transform = 'translate3d(0, 0, 0)';
+                canv.style.willChange = 'transform';
+                if (this.layerSettings[i]) {
+                    canv.style.display = this.layerSettings[i].visible ? 'block' : 'none';
+                }
+                chunk.element.appendChild(canv);
+            }
+            chunk.isAttached = false;
+        }
+        if (chunk.strokeCanvas && !chunk.strokeCanvas.parentNode && chunk.element) {
+            chunk.strokeCanvas.className = 'absolute inset-0';
+            chunk.element.appendChild(chunk.strokeCanvas);
+        }
+        this._updateChunkTransform(chunk);
+    });
+    this.updateCulling(true);
+    this.refresh();
   }
 
   updateCulling(force = false) {
@@ -1918,6 +2062,7 @@ export class Engine {
   }
 
   _getSelectionData(clearSource = false) {
+      this.flushPendingGpuCommits();
       if (!this.activeSelectionPath) return null;
       
       const norm = this.normalizeSelectionPath(this.activeSelectionPath);
@@ -2168,6 +2313,7 @@ export class Engine {
   }
 
   pickColor(x, y) {
+    this.flushPendingGpuCommits();
     const m = this._getMousePos({ clientX: x, clientY: y, altKey: true });
     const wx = m.wx;
     const wy = m.wy;
@@ -2296,10 +2442,20 @@ export class Engine {
             boxShadow: null,
             showTip: null,
             overlayMode: null,
+            overlayFalloff: -1,
             tipRef: null,
             tipVer: -1,
             tipColor: null
         };
+    }
+  }
+
+  _hideLiquifyCursor() {
+    if (this._liquifyCursor && this._liquifyCursor.visible) {
+        this._liquifyCursor.visible = false;
+        if (this.gpuRenderer && this.gpuRenderer.supported) {
+            this.gpuRenderer.requestRender();
+        }
     }
   }
 
@@ -2324,6 +2480,7 @@ export class Engine {
     if (this.activePointers.size === 0 && e && e.pointerType === 'touch') {
         if (this.brushCursor.style.display !== 'none') this.brushCursor.style.display = 'none';
         if (this.brushCrosshair && this.brushCrosshair.style.display !== 'none') this.brushCrosshair.style.display = 'none';
+        this._hideLiquifyCursor();
         clearGizmoHoverUI(this);
         return;
     }
@@ -2343,6 +2500,7 @@ export class Engine {
     ) {
         if (this.brushCursor.style.display !== 'none') this.brushCursor.style.display = 'none';
         if (this.brushCrosshair && this.brushCrosshair.style.display !== 'none') this.brushCrosshair.style.display = 'none';
+        this._hideLiquifyCursor();
         clearGizmoHoverUI(this);
         this._setContainerCursor('default');
         return;
@@ -2355,6 +2513,7 @@ export class Engine {
     if (!this.isDrawing && (mX < 0 || mY < 0 || mX > rect.width || mY > rect.height)) {
         if (this.brushCursor.style.display !== 'none') this.brushCursor.style.display = 'none';
         if (this.brushCrosshair && this.brushCrosshair.style.display !== 'none') this.brushCrosshair.style.display = 'none';
+        this._hideLiquifyCursor();
         clearGizmoHoverUI(this);
         return;
     }
@@ -2363,6 +2522,7 @@ export class Engine {
     if (this.floatingSelection && !this.isExportMode) {
         if (this.brushCursor.style.display !== 'none') this.brushCursor.style.display = 'none';
         if (this.brushCrosshair && this.brushCrosshair.style.display !== 'none') this.brushCrosshair.style.display = 'none';
+        this._hideLiquifyCursor();
         const isAltDown = Boolean((e && e.altKey) || this.keys['alt']);
         updateGizmoHoverUI(
             this,
@@ -2375,6 +2535,31 @@ export class Engine {
     } else {
         clearGizmoHoverUI(this);
     }
+
+    // Zero-DOM WebGL2 MOKO-style dual-ring dotted cursor for Liquify (eliminates large DOM border/box-shadow lag)
+    if (
+        !this.isExportMode &&
+        this.brush.type === TOOLS.LIQUIFY &&
+        this.gpuRenderer &&
+        this.gpuRenderer.supported &&
+        this.gpuRenderer.liquifyCursorProgram
+    ) {
+        if (this.brushCursor.style.display !== 'none') this.brushCursor.style.display = 'none';
+        if (this.brushCrosshair && this.brushCrosshair.style.display !== 'none') this.brushCrosshair.style.display = 'none';
+        if (!this._liquifyCursor) {
+            this._liquifyCursor = { visible: false, mx: 0, my: 0, radiusCss: 25, falloff: 0.5 };
+        }
+        const radiusCss = Math.max(2.0, (this.brush.size * this.zoom) * 0.5);
+        const falloffVal = this.brush.falloff !== undefined ? this.brush.falloff : 0.5;
+        this._liquifyCursor.visible = true;
+        this._liquifyCursor.mx = mX;
+        this._liquifyCursor.my = mY;
+        this._liquifyCursor.radiusCss = radiusCss;
+        this._liquifyCursor.falloff = falloffVal;
+        this.gpuRenderer.requestRender();
+        return;
+    }
+    this._hideLiquifyCursor();
 
     // Manage brush crosshair visibility and GPU-composited positioning
     const showCrosshair = this.isDrawing && !this.isExportMode && this.brush.type !== TOOLS.REF_MOVE;
@@ -2462,14 +2647,16 @@ export class Engine {
     } else if (this.brush.type === TOOLS.LIQUIFY) {
         w = s;
         h = s;
-        br = '50%';
+        br = '0px';
         bgColor = 'transparent';
-        border = '1.5px solid rgba(0, 0, 0, 0.75)';
-        boxShadow = '0 0 0 1.5px rgba(255, 255, 255, 0.65)';
+        border = 'none';
+        boxShadow = 'none';
+        overlayMode = 'liquify';
     }
 
     const ap = this._cursorAppearance;
     const st = this.brushCursor.style;
+    const overlayFalloff = overlayMode === 'liquify' ? (this.brush.falloff !== undefined ? this.brush.falloff : 0.5) : -1;
 
     if (ap.w !== w) {
         ap.w = w;
@@ -2496,14 +2683,23 @@ export class Engine {
         st.boxShadow = boxShadow;
     }
 
-    if (ap.overlayMode !== overlayMode) {
+    if (ap.overlayMode !== overlayMode || (overlayMode === 'liquify' && ap.overlayFalloff !== overlayFalloff)) {
         ap.overlayMode = overlayMode;
+        ap.overlayFalloff = overlayFalloff;
         const ov = this._cursorOverlayEl;
         if (overlayMode === 'export') {
             ov.innerHTML = '<div style="position:absolute;top:50%;left:0;right:0;height:1px;background:rgba(0,0,0,0.5)"></div><div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:rgba(0,0,0,0.5)"></div><div style="position:absolute;top:0;left:0;width:4px;height:4px;border-top:2px solid black;border-left:2px solid black"></div><div style="position:absolute;bottom:0;right:0;width:4px;height:4px;border-bottom:2px solid black;border-right:2px solid black"></div>';
             ov.style.display = 'block';
         } else if (overlayMode === 'ref') {
             ov.innerHTML = '<div style="position:absolute;top:50%;left:5px;right:5px;height:2px;background:white;transform:translateY(-50%)"></div><div style="position:absolute;left:50%;top:5px;bottom:5px;width:2px;background:white;transform:translateX(-50%)"></div>';
+            ov.style.display = 'block';
+        } else if (overlayMode === 'liquify') {
+            const rInnerRatio = Math.max(0, Math.min(1, 1.0 - overlayFalloff));
+            const innerR = rInnerRatio >= 0.96 ? 48.0 : (49.0 * rInnerRatio);
+            const innerCircle = innerR >= 2.0
+                ? `<circle cx="50" cy="50" r="${innerR.toFixed(2)}" fill="none" stroke="rgba(0,0,0,0.6)" stroke-width="2.2" stroke-dasharray="5 4" vector-effect="non-scaling-stroke"/><circle cx="50" cy="50" r="${innerR.toFixed(2)}" fill="none" stroke="rgba(255,255,255,0.92)" stroke-width="1.2" stroke-dasharray="5 4" vector-effect="non-scaling-stroke"/>`
+                : '';
+            ov.innerHTML = `<svg width="100%" height="100%" viewBox="0 0 100 100" style="display:block;overflow:visible"><circle cx="50" cy="50" r="49" fill="none" stroke="rgba(0,0,0,0.6)" stroke-width="2.4" vector-effect="non-scaling-stroke"/><circle cx="50" cy="50" r="49" fill="none" stroke="rgba(255,255,255,0.95)" stroke-width="1.3" vector-effect="non-scaling-stroke"/>${innerCircle}</svg>`;
             ov.style.display = 'block';
         } else {
             ov.style.display = 'none';
@@ -3965,6 +4161,7 @@ export class Engine {
   }
 
   undo() {
+    this.flushPendingGpuCommits();
     if (this.history.length === 0) return;
     
     const action = this.history.pop();
@@ -4010,6 +4207,7 @@ export class Engine {
   }
 
   redo() {
+    this.flushPendingGpuCommits();
     if (this.redoStack.length === 0) return;
     
     const action = this.redoStack.pop();
@@ -4049,6 +4247,7 @@ export class Engine {
   }
 
   clearLayer(index) {
+      this.flushPendingGpuCommits();
       const snap = new Map();
       this.chunks.forEach((chunk, id) => {
           snap.set(id, captureLayerSnapshot(this, chunk, index));
@@ -4064,6 +4263,7 @@ export class Engine {
   }
 
   clear() {
+    this.flushPendingGpuCommits();
     this.chunks.forEach((chunk, id) => {
       chunk.ctxs.forEach((ctx, index) => {
           ctx.clearRect(0, 0, chunk.width, chunk.height);

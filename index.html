@@ -709,6 +709,23 @@
                      </div>
                  </div>
                  <div class="settings-divider" style="margin: 10px 0;"></div>
+                 <div class="settings-row" style="display: flex; justify-content: space-between; align-items: center;">
+                     <label class="settings-label" for="settings-perf-prewarm-tools">PREWARM ALL TOOLS ON STARTUP</label>
+                     <div class="checkbox-wrapper">
+                         <input type="checkbox" id="settings-perf-prewarm-tools" class="settings-input-check">
+                         <span class="checkbox-custom"></span>
+                     </div>
+                 </div>
+                 <p style="font-size: 8px; line-height: 1.35; opacity: 0.72; margin: 4px 0 8px 0;">
+                     Optional: runs a hidden 1-stroke warmup across every tool (Brush, Wireframe, Lasso, Smudge, Eraser, Liquify, Fluid Paint, Watercolor) on an invisible scratch buffer after load so the very first stroke of any tool has zero shader/tip init stutter.
+                 </p>
+                 <div style="display: flex; gap: 6px; align-items: center; margin-bottom: 4px;">
+                     <button id="btn-perf-prewarm-now" class="brutal-btn full-width" style="font-size: 9px; padding: 5px; font-weight: 900;">
+                         PREWARM ALL TOOLS NOW
+                     </button>
+                 </div>
+                 <div id="perf-prewarm-status" style="font-size: 8px; font-family: monospace; opacity: 0.75; min-height: 12px;">IDLE</div>
+                 <div class="settings-divider" style="margin: 10px 0;"></div>
                  <button id="btn-perf-test-drop-settings" class="brutal-btn full-width" style="font-size: 9px; padding: 5px; font-weight: 900;">
                      SIMULATE TEST DROP
                  </button>

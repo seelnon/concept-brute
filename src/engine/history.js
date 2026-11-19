@@ -66,6 +66,7 @@ export function undo() {
   }
 
   if (this.history.length === 0) return;
+  if (this.flushPendingGpuCommits) this.flushPendingGpuCommits();
   
   const action = this.history.pop();
   if (action && action.type === 'stroke' && this.app && this.app.recorder) {
@@ -137,6 +138,7 @@ export function redo() {
   }
 
   if (this.redoStack.length === 0) return;
+  if (this.flushPendingGpuCommits) this.flushPendingGpuCommits();
   
   const action = this.redoStack.pop();
   if (action && action.type === 'stroke' && this.app && this.app.recorder) {
@@ -262,24 +264,39 @@ export function toggleFloatingSelectionMirrorX() {
 // -------------------------------------------------------------
 
 function canvasToDataURLAsync(canvas, type = 'image/png', quality) {
+  if (!canvas || canvas.width <= 0 || canvas.height <= 0) {
+    return Promise.resolve('');
+  }
   return new Promise((resolve) => {
+    let settled = false;
+    const fallbackUrl = () => {
+      try {
+        return canvas.toDataURL(type, quality);
+      } catch (e) {
+        return '';
+      }
+    };
+    const done = (val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(val);
+    };
+    const timer = setTimeout(() => done(fallbackUrl()), 10000);
     try {
       canvas.toBlob((blob) => {
+        if (settled) return;
         if (!blob) {
-          resolve(canvas.toDataURL(type, quality));
+          done(fallbackUrl());
           return;
         }
         const reader = new FileReader();
-        reader.onloadend = () => {
-          resolve(reader.result);
-        };
-        reader.onerror = () => {
-          resolve(canvas.toDataURL(type, quality));
-        };
+        reader.onloadend = () => done(reader.result || '');
+        reader.onerror = () => done(fallbackUrl());
         reader.readAsDataURL(blob);
       }, type, quality);
     } catch (e) {
-      resolve(canvas.toDataURL(type, quality));
+      done(fallbackUrl());
     }
   });
 }
@@ -406,7 +423,15 @@ async function deserializeHistoryState(serializedArray) {
         const ctx = cv.getContext('2d');
         const img = new Image();
         await new Promise(resolve => {
-          img.onload = img.onerror = resolve;
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve();
+          };
+          const timer = setTimeout(() => { img.src = ''; finish(); }, 10000);
+          img.onload = img.onerror = finish;
           img.src = chunkItem.dataUrl;
         });
         if (img.width > 0) {
@@ -431,7 +456,15 @@ async function deserializeHistoryState(serializedArray) {
       if (act.selection.canvasDataUrl) {
         const img = new Image();
         await new Promise(resolve => {
-          img.onload = img.onerror = resolve;
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve();
+          };
+          const timer = setTimeout(() => { img.src = ''; finish(); }, 10000);
+          img.onload = img.onerror = finish;
           img.src = act.selection.canvasDataUrl;
         });
         if (img.width > 0) {

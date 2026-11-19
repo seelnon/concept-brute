@@ -8,6 +8,7 @@ export class PerfMonitor {
     this.enabled = true;
     this.paintOnly = true; // Focus on painting & user actions
     this.autoOpenOnDrop = false;
+    this._prewarmSuppressed = false;
 
     // Strict 59 FPS threshold: 1000 / 59 = ~16.949ms
     // If a frame takes >= 16.95ms, it has dropped below 60fps!
@@ -106,6 +107,13 @@ export class PerfMonitor {
     }
   }
 
+  setPrewarmSuppression(flag) {
+    this._prewarmSuppressed = !!flag;
+    if (!this._prewarmSuppressed) {
+      this.resetTiming();
+    }
+  }
+
   isSavingActive() {
     return !!(
       this.app && 
@@ -117,6 +125,7 @@ export class PerfMonitor {
 
   isMonitoringEligible(now) {
     if (!this.enabled) return false;
+    if (this._prewarmSuppressed || (this.app && this.app._isPrewarming)) return false;
     if (this.isSavingActive()) return false; // Strictly skip checks during saving
     if (document.hidden) return false; // Ignore browser background tab throttling
     if (typeof document.hasFocus === 'function' && !document.hasFocus()) return false; // Ignore blurred window

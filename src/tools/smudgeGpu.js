@@ -239,6 +239,7 @@ export class GpuSmudgeSolver {
     this.gpuRenderer = gpuRenderer;
     this.gl = gpuRenderer.gl;
     this.ready = false;
+    this._pipelinesWarmed = false;
 
     this.bufRes = 64;
     this.active = false;
@@ -435,7 +436,153 @@ export class GpuSmudgeSolver {
       u_tex: gl.getUniformLocation(this.progUnpremult, 'u_tex')
     };
 
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.ready = true;
+  }
+
+  prewarmPipelines(engine = null, tipMaskFloat32 = null, tipVersion = null) {
+    const gl = this.gl;
+    if (!this.ready || !gl || gl.isContextLost() || !this.gpuRenderer?.vao) return;
+
+    if (!this._commitCanvas) {
+      this._commitCanvas = document.createElement('canvas');
+      this._commitCanvas.width = TILE_SIZE;
+      this._commitCanvas.height = TILE_SIZE;
+      this._commitCtx = this._commitCanvas.getContext('2d');
+      this._readBuf = new Uint8Array(TILE_SIZE * TILE_SIZE * 4);
+    }
+
+    if (tipMaskFloat32) {
+      this.uploadTipMask(tipMaskFloat32, tipVersion);
+    }
+
+    if (this._pipelinesWarmed) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.activeTexture(gl.TEXTURE0);
+      return;
+    }
+
+    gl.disable(gl.BLEND);
+    gl.enable(gl.SCISSOR_TEST);
+    gl.bindVertexArray(this.gpuRenderer.vao);
+
+    gl.scissor(0, 0, 4, 4);
+    gl.viewport(0, 0, WORK_SIZE, WORK_SIZE);
+    gl.clearColor(0, 0, 0, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.workSimA.fbo);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.workOrig.fbo);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.workCovA.fbo);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    gl.viewport(0, 0, this.bufRes, this.bufRes);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.bufA.fbo);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    // 1. progRectMap: workSimA -> workSimB
+    gl.viewport(0, 0, WORK_SIZE, WORK_SIZE);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.workSimB.fbo);
+    gl.useProgram(this.progRectMap);
+    gl.uniform4f(this.rectLocs.u_srcRect, 0, 0, TILE_SIZE, TILE_SIZE);
+    gl.uniform4f(this.rectLocs.u_dstRect, 0, 0, WORK_SIZE, WORK_SIZE);
+    gl.uniform4f(this.rectLocs.u_uvSubRect, 0, 0, 1, 1);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.workSimA.tex);
+    gl.uniform1i(this.rectLocs.u_tex, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 2. progBlit: bufA -> bufB
+    gl.viewport(0, 0, this.bufRes, this.bufRes);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.bufB.fbo);
+    gl.useProgram(this.progBlit);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.bufA.tex);
+    gl.uniform1i(this.blitLocs.u_tex, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 3. progPickup: workSimA + bufA + tipTex -> bufB
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.bufB.fbo);
+    gl.useProgram(this.progPickup);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.workSimA.tex);
+    gl.uniform1i(this.pickupLocs.u_sim, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.bufA.tex);
+    gl.uniform1i(this.pickupLocs.u_prevBuf, 1);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.tipTex);
+    gl.uniform1i(this.pickupLocs.u_tip, 2);
+    gl.uniform2f(this.pickupLocs.u_workOrigin, 0, 0);
+    gl.uniform2f(this.pickupLocs.u_workSize, WORK_SIZE, WORK_SIZE);
+    gl.uniform4f(this.pickupLocs.u_uvClamp, 0.001, 0.001, 0.999, 0.999);
+    gl.uniform2f(this.pickupLocs.u_stampPos, 2, 2);
+    gl.uniform1f(this.pickupLocs.u_radius, 12.0);
+    gl.uniform1f(this.pickupLocs.u_cosFwd, 1.0);
+    gl.uniform1f(this.pickupLocs.u_sinFwd, 0.0);
+    gl.uniform1f(this.pickupLocs.u_pickupBase, 0.5);
+    gl.uniform1i(this.pickupLocs.u_isFirstPickup, 1);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 4. progDeposit (MRT): workSimA + workCovA + bufB + tipTex -> mrtWorkB
+    gl.viewport(0, 0, WORK_SIZE, WORK_SIZE);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.mrtWorkB);
+    gl.useProgram(this.progDeposit);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.workSimA.tex);
+    gl.uniform1i(this.depositLocs.u_sim, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.workCovA.tex);
+    gl.uniform1i(this.depositLocs.u_cov, 1);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.bufB.tex);
+    gl.uniform1i(this.depositLocs.u_buf, 2);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.tipTex);
+    gl.uniform1i(this.depositLocs.u_tip, 3);
+    gl.uniform2f(this.depositLocs.u_workOrigin, 0, 0);
+    gl.uniform2f(this.depositLocs.u_stampPos, 2, 2);
+    gl.uniform1f(this.depositLocs.u_radius, 12.0);
+    gl.uniform1f(this.depositLocs.u_cosInv, 1.0);
+    gl.uniform1f(this.depositLocs.u_sinInv, 0.0);
+    gl.uniform1f(this.depositLocs.u_depositBase, 0.5);
+    gl.uniform1f(this.depositLocs.u_effOpacity, 1.0);
+    gl.uniform1i(this.depositLocs.u_alphaLock, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 5. progComposite: workOrig + workSimB + workCovB -> workOut
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.workOut.fbo);
+    gl.useProgram(this.progComposite);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.workOrig.tex);
+    gl.uniform1i(this.compLocs.u_orig, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.workSimB.tex);
+    gl.uniform1i(this.compLocs.u_sim, 1);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.workCovB.tex);
+    gl.uniform1i(this.compLocs.u_cov, 2);
+    gl.uniform1i(this.compLocs.u_alphaLock, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 6. progUnpremult: tileCommitPre -> tileCommitStraight
+    gl.viewport(0, 0, TILE_SIZE, TILE_SIZE);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.tileCommitStraight.fbo);
+    gl.useProgram(this.progUnpremult);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.tileCommitPre.tex);
+    gl.uniform1i(this.unpremultLocs.u_tex, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.bindVertexArray(null);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+    gl.activeTexture(gl.TEXTURE0);
+
+    this._pipelinesWarmed = true;
   }
 
   _allocTileGpu() {
@@ -508,6 +655,7 @@ export class GpuSmudgeSolver {
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.bufRes, this.bufRes, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
   }
 
   _ensureChunkBackup(engine, chunk, cx, cy, wasEmptyOverride = undefined) {
@@ -622,6 +770,7 @@ export class GpuSmudgeSolver {
         if (t) tiles.push(t);
       }
     }
+    if (tiles.length === 0) return tiles;
 
     gl.disable(gl.BLEND);
     gl.enable(gl.SCISSOR_TEST);
@@ -662,6 +811,9 @@ export class GpuSmudgeSolver {
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     }
 
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.enable(gl.BLEND);
     return tiles;
   }
 
@@ -922,7 +1074,7 @@ export class GpuSmudgeSolver {
   }
 
   beginStroke(engine, worldPos, tipMaskFloat32, tipVersion = null) {
-    if (!this.ready) return false;
+    if (!this.ready || !this.gl || this.gl.isContextLost()) return false;
     this._releaseAllTiles();
     this.touchedChunks.clear();
     this.uploadTipMask(tipMaskFloat32, tipVersion);
@@ -942,7 +1094,8 @@ export class GpuSmudgeSolver {
     const boxW = Math.min(WORK_SIZE, Math.max(8, pad * 2));
     const boxH = Math.min(WORK_SIZE, Math.max(8, pad * 2));
 
-    this._assembleWorkBox(engine, workX, workY, boxW, boxH);
+    const initTiles = this._assembleWorkBox(engine, workX, workY, boxW, boxH);
+    if (initTiles.length === 0) return true;
 
     const gl = this.gl;
     const angle = engine.rotation || 0.0;
@@ -984,7 +1137,7 @@ export class GpuSmudgeSolver {
   }
 
   stepStamps(engine, stamps, depositBase, pickupBase, effOpacity) {
-    if (!this.ready || !this.active || !stamps || stamps.length === 0) return;
+    if (!this.ready || !this.active || !this.gl || this.gl.isContextLost() || !stamps || stamps.length === 0) return;
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (let i = 0; i < stamps.length; i++) {
@@ -1197,5 +1350,6 @@ export class GpuSmudgeSolver {
     this._readBuf = null;
     this.ready = false;
     this.active = false;
+    this._pipelinesWarmed = false;
   }
 }

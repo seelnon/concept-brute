@@ -22,9 +22,11 @@ import { TimelapseRecorder } from './recording.js';
 import { initFluidPaint, activateFluidPaint, deactivateFluidPaint, syncFluidSettingsFromTip, warmFluidSolver } from './tools/fluidPaint.js';
 import { initAirPaint, activateAirPaint, deactivateAirPaint, syncAirSettingsFromTip, warmAirSolver } from './tools/airPaint.js';
 import { ensureSmudgeBuffers, warmSmudgeSolver } from './tools/smudge.js';
+import { warmLiquifySolver } from './tools/liquify.js';
 import { acquireBackupCanvas, releaseBackupCanvas } from './engine/backupPool.js';
 import { wasmCore } from './wasm/wasmBridge.js';
 import { PerfMonitor } from './perfMonitor.js';
+import { runPhantomToolsPrewarm } from './tools/prewarm.js';
 
 class App {
   constructor() {
@@ -250,6 +252,20 @@ class App {
             }
         }
 
+        if (this.engine && !this.engine._isLoadingProject && !this._isSwitchingProject && !this._isPrewarming) {
+            if (tool === TOOLS.SMUDGE || tool === TOOLS.FLUID || tool === TOOLS.AIR) {
+                if (this._tipWarmupTimer) clearTimeout(this._tipWarmupTimer);
+                this._tipWarmupTimer = setTimeout(() => {
+                    this._tipWarmupTimer = null;
+                    if (this.activeTool === tool && this.engine && !this.engine.isDrawing) {
+                        try {
+                            this._warmToolSolver(tool);
+                        } catch (_) {}
+                    }
+                }, 0);
+            }
+        }
+
         if (this.engine) {
             this.engine._updateBrushCursor();
         }
@@ -276,6 +292,8 @@ class App {
     this._queuedSwitchOptions = null;
     this._isSavingProject = false;
     this._activeSavePromise = null;
+    this._isPrewarming = false;
+    this._allToolsPrewarmed = false;
 
     this.windowPositions = {};
 
@@ -368,63 +386,83 @@ class App {
   async init() {
     console.log('[PERF] --- INITIALIZING APP START ---');
     const t0 = performance.now();
-    
-    // 1. PANELS & UI FIRST (Immediate render & interactive frames)
-    const tUiStart = performance.now();
-    this._status('INITIALIZING UI...');
-    this._setupUI();
-    this._setupHotkeys();
-    console.log(`[PERF] _setupUI() & _setupHotkeys() took ${(performance.now() - tUiStart).toFixed(2)}ms`);
-
-    const tWindowPositionsStart = performance.now();
-    await this._loadWindowPositions();
-    this._restoreWindowPositions();
-    console.log(`[PERF] _loadWindowPositions() & _restoreWindowPositions() took ${(performance.now() - tWindowPositionsStart).toFixed(2)}ms`);
-
-    // Force layout paint so the windows/palette render to the screen immediately for the user
-    await new Promise(resolve => setTimeout(resolve, 10));
-
-    // 2. STORAGE & PROJECTS SECONDO (Lightweight database handshake)
-    const tStorageStart = performance.now();
-    try {
-        await this.storage.init();
-        console.log(`[PERF] storage.init() took ${(performance.now() - tStorageStart).toFixed(2)}ms`);
-        const tProjectSystemStart = performance.now();
-        await this.initProjectSystem();
-        console.log(`[PERF] initProjectSystem() took ${(performance.now() - tProjectSystemStart).toFixed(2)}ms`);
-    } catch (e) {
-        console.error("Storage init failed", e);
-        this._status('STORAGE ERROR');
+    if (this.engine) {
+        this.engine._isLoadingProject = true;
     }
 
-    const tTipManagerStart = performance.now();
-    await this.tipManager.ready;
-    console.log(`[PERF] tipManager.ready took ${(performance.now() - tTipManagerStart).toFixed(2)}ms`);
+    try {
+        // 1. PANELS & UI FIRST (Immediate render & interactive frames)
+        const tUiStart = performance.now();
+        this._status('INITIALIZING UI...');
+        this._setupUI();
+        this._setupHotkeys();
+        console.log(`[PERF] _setupUI() & _setupHotkeys() took ${(performance.now() - tUiStart).toFixed(2)}ms`);
 
-    // 3. LOAD NON-CANVAS SETTINGS (Fast settings properties restoration)
-    const tProjectSettingsStart = performance.now();
-    await this.loadProjectSettings();
-    console.log(`[PERF] loadProjectSettings() took ${(performance.now() - tProjectSettingsStart).toFixed(2)}ms`);
+        const tWindowPositionsStart = performance.now();
+        await this._loadWindowPositions();
+        this._restoreWindowPositions();
+        console.log(`[PERF] _loadWindowPositions() & _restoreWindowPositions() took ${(performance.now() - tWindowPositionsStart).toFixed(2)}ms`);
 
-    // Brief yield for snappy feedback
-    await new Promise(resolve => setTimeout(resolve, 10));
+        // Force layout paint so the windows/palette render to the screen immediately for the user
+        await new Promise(resolve => setTimeout(resolve, 10));
 
-    // 4. HEAVY ASSETS LAST (Image references and large canvas chunk matrices)
-    const tHeavyAssetsStart = performance.now();
-    await this.load();
-    console.log(`[PERF] load() (Heavy Assets) took ${(performance.now() - tHeavyAssetsStart).toFixed(2)}ms`);
-    
-    // Final viewport and layer sync
-    const tRefreshStart = performance.now();
-    this.engine.refresh();
-    console.log(`[PERF] engine.refresh() took ${(performance.now() - tRefreshStart).toFixed(2)}ms`);
-
-    // Query and restore the saved recording state for the active project
-    if (this.recorder && typeof this.recorder.onProjectSwitched === "function") {
+        // 2. STORAGE & PROJECTS SECONDO (Lightweight database handshake)
+        const tStorageStart = performance.now();
         try {
-            await this.recorder.onProjectSwitched();
-        } catch(err) {
-            console.error("Failed to restore initial recording state:", err);
+            await this.storage.init();
+            console.log(`[PERF] storage.init() took ${(performance.now() - tStorageStart).toFixed(2)}ms`);
+            const tProjectSystemStart = performance.now();
+            await this.initProjectSystem();
+            console.log(`[PERF] initProjectSystem() took ${(performance.now() - tProjectSystemStart).toFixed(2)}ms`);
+        } catch (e) {
+            console.error("Storage init failed", e);
+            this._status('STORAGE ERROR');
+        }
+
+        const tTipManagerStart = performance.now();
+        await this.tipManager.ready;
+        console.log(`[PERF] tipManager.ready took ${(performance.now() - tTipManagerStart).toFixed(2)}ms`);
+
+        // 3. LOAD NON-CANVAS SETTINGS (Fast settings properties restoration)
+        const tProjectSettingsStart = performance.now();
+        await this.loadProjectSettings();
+        console.log(`[PERF] loadProjectSettings() took ${(performance.now() - tProjectSettingsStart).toFixed(2)}ms`);
+
+        // Brief yield for snappy feedback
+        await new Promise(resolve => setTimeout(resolve, 10));
+
+        // 4. HEAVY ASSETS LAST (Image references and large canvas chunk matrices)
+        const tHeavyAssetsStart = performance.now();
+        await this.load();
+        console.log(`[PERF] load() (Heavy Assets) took ${(performance.now() - tHeavyAssetsStart).toFixed(2)}ms`);
+
+        // Final viewport and layer sync
+        const tRefreshStart = performance.now();
+        this.engine.refresh();
+        console.log(`[PERF] engine.refresh() took ${(performance.now() - tRefreshStart).toFixed(2)}ms`);
+
+        // Query and restore the saved recording state for the active project
+        if (this.recorder && typeof this.recorder.onProjectSwitched === "function") {
+            try {
+                await this.recorder.onProjectSwitched();
+            } catch(err) {
+                console.error("Failed to restore initial recording state:", err);
+            }
+        }
+    } finally {
+        if (this.engine) {
+            this.engine._isLoadingProject = false;
+            this.engine._resetInteractionState({ cancelActive: false });
+            this.engine.refresh();
+            if (this.engine.gpuRenderer) {
+                this.engine.gpuRenderer.requestRender();
+            }
+            try {
+                if (typeof window.focus === 'function') window.focus();
+                if ((!document.activeElement || document.activeElement === document.body) && typeof this.engine.container?.focus === 'function') {
+                    this.engine.container.focus({ preventScroll: true });
+                }
+            } catch (_) {}
         }
     }
 
@@ -459,70 +497,87 @@ class App {
     this._scheduleToolWarmup();
   }
 
+  _warmToolSolver(tool) {
+    if (!this.engine || !tool) return;
+    if (tool === TOOLS.LIQUIFY) {
+      if (!warmLiquifySolver(this.engine) && wasmCore && wasmCore.ready) {
+        wasmCore.liquifyPrewarm();
+      }
+    } else if (tool === TOOLS.SMUDGE) {
+      warmSmudgeSolver(this.engine);
+    } else if (tool === TOOLS.FLUID) {
+      warmFluidSolver(this.engine);
+    } else if (tool === TOOLS.AIR) {
+      warmAirSolver(this.engine);
+    }
+  }
+
+  async prewarmAllTools(force = false) {
+    if (!this.engine || this._isPrewarming) return false;
+    if (this._allToolsPrewarmed && !force) return true;
+
+    const statusEl = document.getElementById('perf-prewarm-status');
+    const btnNow = document.getElementById('btn-perf-prewarm-now');
+    if (btnNow) btnNow.disabled = true;
+    if (statusEl) statusEl.innerText = 'PREWARMING TOOLS...';
+
+    const ok = await runPhantomToolsPrewarm(this, {
+      onProgress: (step, total, label) => {
+        if (statusEl) statusEl.innerText = `PREWARMING ${step}/${total}: ${label}`;
+      }
+    });
+
+    if (btnNow) btnNow.disabled = false;
+    if (ok) {
+      this._allToolsPrewarmed = true;
+      if (statusEl) statusEl.innerText = 'ALL 8 TOOLS WARMED (READY)';
+      this._status('ALL TOOLS PREWARMED');
+    } else if (statusEl) {
+      statusEl.innerText = 'PREWARM INTERRUPTED';
+    }
+    return ok;
+  }
+
   _scheduleToolWarmup() {
     if (this._warmupScheduled) return;
     this._warmupScheduled = true;
 
-    const tasks = [
-      () => {
-        if (this.engine && this.engine.brush && this.engine.brush.tip) {
+    const runLightweightWarmup = () => {
+      if (!this.engine || this.engine.isDrawing || this._isSwitchingProject) return;
+      try {
+        if (this.engine.brush && this.engine.brush.tip) {
           const bSize = Math.round(this.engine.brush.size || 20);
           const cacheSize = this.engine._getCacheSize(bSize);
           const airbrush = this.engine.brush.airbrush || 0;
           const color = this.engine.brush.color || '#000000';
           this.engine._updateTipCache(cacheSize, airbrush, color);
         }
-        if (this.engine) {
-          const bw = this.engine.isStatic ? Math.min(2560, this.engine.staticWidth || 1024) : (this.engine.chunkSize || 1024);
-          const bh = this.engine.isStatic ? Math.min(2560, this.engine.staticHeight || 1024) : (this.engine.chunkSize || 1024);
-          const c = acquireBackupCanvas(this.engine, bw, bh, false);
-          releaseBackupCanvas(this.engine, c);
-        }
-      },
-      () => {
-        if (this.engine) warmSmudgeSolver(this.engine);
-      },
-      () => {
-        if (this.engine) warmFluidSolver(this.engine);
-      },
-      () => {
-        if (this.engine) warmAirSolver(this.engine);
-      },
-      () => {
-        if (wasmCore && wasmCore.ready) {
-          wasmCore.liquifyPrewarm();
-        }
-      }
-    ];
+        const bw = this.engine.isStatic ? Math.min(2560, this.engine.staticWidth || 1024) : (this.engine.chunkSize || 1024);
+        const bh = this.engine.isStatic ? Math.min(2560, this.engine.staticHeight || 1024) : (this.engine.chunkSize || 1024);
+        const c = acquireBackupCanvas(this.engine, bw, bh, false);
+        releaseBackupCanvas(this.engine, c);
 
-    let idx = 0;
-    const scheduleNext = (delayMs) => {
-      if (idx >= tasks.length) return;
-      setTimeout(() => {
-        const runStep = () => {
-          if (!this.engine || this.engine.isDrawing || this._isSwitchingProject) {
-            scheduleNext(450);
-            return;
-          }
-          const fn = tasks[idx++];
-          try {
-            fn();
-          } catch (e) {
-            console.warn('Warmup step skipped:', e);
-          }
-          if (idx < tasks.length) {
-            scheduleNext(220);
-          }
-        };
-        if (typeof window.requestIdleCallback === 'function') {
-          window.requestIdleCallback(runStep, { timeout: 1000 });
-        } else {
-          runStep();
+        // Optional user setting: phantom 1-stroke prewarm across all 8 tools on isolated 128x128 scratch engine
+        if (localStorage.getItem('perf_prewarm_tools') === 'true') {
+          this.prewarmAllTools(false);
+          return;
         }
-      }, delayMs);
+
+        // Default: warm only the currently active heavy simulation tool on load;
+        // other simulation solvers warm lazily on first selection to prevent multi-second startup hitches & VRAM spikes.
+        this._warmToolSolver(this.activeTool);
+      } catch (e) {
+        console.warn('Startup warmup skipped:', e);
+      }
     };
 
-    scheduleNext(350);
+    setTimeout(() => {
+      if (typeof window.requestIdleCallback === 'function') {
+        window.requestIdleCallback(runLightweightWarmup, { timeout: 600 });
+      } else {
+        runLightweightWarmup();
+      }
+    }, 180);
   }
 
   _clearSaveTimer() {
@@ -2011,11 +2066,7 @@ class App {
         if (this.engine.isDrawing) {
             try { this.engine._endStroke(); } catch (e) { this.engine.isDrawing = false; }
         }
-        this.engine.activePointers.clear();
-        this.engine.isMouseDown = false;
-        this.engine.isPanning = false;
-        this.engine.isGesture = false;
-        this.engine._updateCursor();
+        this.engine._resetInteractionState({ cancelActive: false });
     }
 
     // Deselect reference image when switching to anything that isn't generic move, only if one was selected
@@ -2053,11 +2104,29 @@ class App {
     const settings = this.brushSettings[tool];
     this.engine.brush.type = tool;
 
-    // Instant tool pre-warming (zero-lag initialization, keep tools hot)
-    if (tool === TOOLS.LIQUIFY) {
-        wasmCore.liquifyPrewarm();
-    } else if (tool === TOOLS.SMUDGE || tool === TOOLS.FLUID) {
+    // Lightweight CPU buffer prep immediately; heavy GPU solver compile runs right after UI paint
+    if (tool === TOOLS.SMUDGE || tool === TOOLS.FLUID) {
         ensureSmudgeBuffers(this.engine);
+    }
+    if (this._toolWarmupTimer) {
+        clearTimeout(this._toolWarmupTimer);
+        this._toolWarmupTimer = null;
+    }
+    if (
+        this.engine &&
+        !this.engine._isLoadingProject &&
+        (tool === TOOLS.LIQUIFY || tool === TOOLS.SMUDGE || tool === TOOLS.FLUID || tool === TOOLS.AIR)
+    ) {
+        this._toolWarmupTimer = setTimeout(() => {
+            this._toolWarmupTimer = null;
+            if (this.activeTool === tool && this.engine && !this.engine.isDrawing && !this._isSwitchingProject) {
+                try {
+                    this._warmToolSolver(tool);
+                } catch (e) {
+                    console.warn('Tool solver warmup skipped:', e);
+                }
+            }
+        }, 0);
     }
 
     // Restore this tool's specific active tip in the panel
@@ -2117,6 +2186,9 @@ class App {
         activateAirPaint(this);
     }
 
+    if (this.engine && this.engine._updateBrushCursor) {
+        this.engine._updateBrushCursor();
+    }
     if (tool) this._status(tool);
   }
 

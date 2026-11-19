@@ -1545,7 +1545,7 @@ function buildTipInfo(engine, dirX, dirY, params, pointAngle = null, isDab = fal
 
 function getGpuSolver(engine) {
   const gr = engine && engine.gpuRenderer;
-  if (!gr || !gr.supported || !gr.gl) return null;
+  if (!gr || !gr.supported || gr._contextLost || !gr.gl || gr.gl.isContextLost()) return null;
   if (!gr.airSolver) {
     gr.airSolver = new GpuWatercolorSolver(gr);
   }
@@ -1554,7 +1554,27 @@ function getGpuSolver(engine) {
 
 export function warmAirSolver(engine) {
   if (!engine) return null;
-  return getGpuSolver(engine);
+  syncAirSettingsFromEngine(engine);
+  const hasTip = prepareAirTipMaps(engine);
+  const solver = getGpuSolver(engine);
+  if (solver && solver.prewarmPipelines) {
+    solver.prewarmPipelines(engine, hasTip ? _airTipRgbaBytes : null, TIP_RES, _preparedAirTipVersionCounter);
+  }
+  return solver;
+}
+
+export function clearAirWetCacheForProject(engine, projId) {
+  if (!projId) return;
+  const prefix = `${projId}|`;
+  for (const key of _paperWetTiles.keys()) {
+    if (key.startsWith(prefix)) {
+      _paperWetTiles.delete(key);
+    }
+  }
+  const solver = engine?.gpuRenderer?.airSolver;
+  if (solver && typeof solver.clearWetCacheForProject === 'function') {
+    solver.clearWetCacheForProject(projId);
+  }
 }
 
 function runGpuSmoothedBezier(engine, solver, ab, a, ctrl, b, radius, opacity, baseColor, flowFactor, params, timeSec, pointAngle = null, isDab = false) {
