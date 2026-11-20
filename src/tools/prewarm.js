@@ -20,7 +20,8 @@ import {
   paintLiquifyStroke,
   endLiquifyStroke,
   cancelLiquifyStroke,
-  flushLiquifyGpuCommits
+  flushLiquifyGpuCommits,
+  invalidateLiquifySession
 } from './liquify.js';
 import {
   warmFluidSolver,
@@ -266,8 +267,9 @@ function cleanupScratchResources(realEngine, scratchEngine, scratchChunk) {
   try { cancelWireframeStroke(scratchEngine); } catch (_) {}
   try { cancelSmudgeStroke(scratchEngine); } catch (_) {}
   try { cancelFluidAfterEffect(scratchEngine); } catch (_) {}
-  try { clearAirParticles(scratchEngine); } catch (_) {}
+  try { cancelAirParticles(scratchEngine); } catch (_) {}
   try { cancelLiquifyStroke(scratchEngine); } catch (_) {}
+  try { invalidateLiquifySession(realEngine); } catch (_) {}
   try {
     if (wasmCore && wasmCore.ready && typeof wasmCore.liquifyEndAllSessions === 'function') {
       wasmCore.liquifyEndAllSessions();
@@ -452,6 +454,7 @@ export async function runPhantomToolsPrewarm(app, { onProgress, shouldAbort } = 
         paintLiquifyStroke(scratchEngine, lqP0, lqP1, 48, 0.5);
         endLiquifyStroke(scratchEngine);
         flushLiquifyGpuCommits(scratchEngine);
+        invalidateLiquifySession(realEngine);
       }
     },
     {

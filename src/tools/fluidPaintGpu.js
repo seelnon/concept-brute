@@ -12,6 +12,7 @@
  */
 
 import { backupChunkLayer } from '../engine/backupPool.js';
+import { GLSL_RYB_MIX } from '../colorUtils.js';
 
 const TILE_SIZE = 256;
 const WORK_SIZE = 1024;
@@ -71,6 +72,9 @@ uniform float u_pickupRatio;
 uniform float u_retentionRatio;
 uniform vec3 u_stepColor;
 uniform int u_isFirst;
+uniform int u_physicalMix;
+
+${GLSL_RYB_MIX}
 
 out vec4 outCarried;
 
@@ -91,7 +95,12 @@ void main() {
         if (u_prevDistTotal - st.b >= u_coverWindow * 0.65) {
           vec4 p = texture(u_paint, wUv);
           if (p.a > 0.06) {
-            pickPR += p.rgb;
+            if (u_physicalMix == 1) {
+              vec3 straightCol = clamp(p.rgb / p.a, 0.0, 1.0);
+              pickPR += rgbToRyb01(straightCol) * p.a;
+            } else {
+              pickPR += p.rgb;
+            }
             pickW += p.a;
           }
         }
@@ -101,11 +110,15 @@ void main() {
     float mixPickup = u_pickupRatio * (1.0 - u_retentionRatio * 0.72) * 0.42;
     if (pickW > 0.05 && mixPickup > 0.004) {
       float sampleRate = min(0.65, mixPickup);
-      carried = mix(carried, clamp(pickPR / pickW, 0.0, 1.0), sampleRate);
+      vec3 pickedCol = clamp(pickPR / pickW, 0.0, 1.0);
+      if (u_physicalMix == 1) {
+        pickedCol = rybToRgb01(pickedCol);
+      }
+      carried = mixPaintCol(carried, pickedCol, sampleRate, u_physicalMix);
     }
 
     float replenishRate = 0.08 + u_retentionRatio * 0.55;
-    carried = mix(carried, u_stepColor, replenishRate);
+    carried = mixPaintCol(carried, u_stepColor, replenishRate, u_physicalMix);
   } else {
     carried = u_stepColor;
   }
@@ -160,6 +173,9 @@ uniform float u_strokeOpacity;
 uniform float u_recolorRateBase;
 uniform int u_nSteps;
 uniform int u_alphaLock;
+uniform int u_physicalMix;
+
+${GLSL_RYB_MIX}
 
 layout(location = 0) out vec4 outPaint;
 layout(location = 1) out vec4 outState;
@@ -259,9 +275,9 @@ void main() {
   if (m > 0.005) {
     vec2 uv1 = clamp(v_uv - vel * w * u_texel, u_uvClamp.xy, u_uvClamp.zw);
     vec2 uv2 = clamp(v_uv - sDir * (u_lagDistBase * w) * u_texel, u_uvClamp.xy, u_uvClamp.zw);
-    vec4 advP = texture(u_paint, uv1) * 0.64 + texture(u_paint, uv2) * 0.36;
+    vec4 advP = mixPremulPaint(texture(u_paint, uv1), texture(u_paint, uv2), 0.36, u_physicalMix);
     float advH = texture(u_state, uv1).r * 0.64 + texture(u_state, uv2).r * 0.36;
-    wetP = mix(srcP, advP, m);
+    wetP = mixPremulPaint(srcP, advP, m, u_physicalMix);
     wetH = mix(srcS.r, advH, m);
   }
 
@@ -308,7 +324,7 @@ void main() {
         if (srcP.a > 0.004) {
           float colorFeed = max(stepA, strandCoverage * u_recolorRateBase * (0.35 + 0.65 * maxTipBump) * trailFade);
           float blendAmt = min(1.0, colorFeed / max(0.05, outA));
-          wetCol = mix(wetCol, fCol, blendAmt);
+          wetCol = mixPaintCol(wetCol, fCol, blendAmt, u_physicalMix);
           wetA = srcP.a;
         } else {
           wetA = 0.0;
@@ -319,7 +335,7 @@ void main() {
       } else {
         float colorFeed = max(stepA, strandCoverage * u_recolorRateBase * (0.35 + 0.65 * maxTipBump) * trailFade);
         float blendAmt = min(1.0, colorFeed / max(0.05, outA));
-        wetCol = mix(wetCol, fCol, blendAmt);
+        wetCol = mixPaintCol(wetCol, fCol, blendAmt, u_physicalMix);
         wetA = outA;
       }
 
@@ -364,6 +380,9 @@ uniform vec4 u_segPos[24];
 uniform vec4 u_segCol[24];
 uniform vec4 u_segMeta[24];
 uniform int u_alphaLock;
+uniform int u_physicalMix;
+
+${GLSL_RYB_MIX}
 
 layout(location = 0) out vec4 outPaint;
 layout(location = 1) out vec4 outState;
@@ -400,7 +419,8 @@ void main() {
       a = sa;
     } else {
       float outA = sa + a * (1.0 - sa);
-      col = (sc.rgb * sa + col * a * (1.0 - sa)) / max(0.001, outA);
+      float mixW = sa / max(0.001, outA);
+      col = mixPaintCol(col, sc.rgb, mixW, u_physicalMix);
       a = outA;
     }
 
@@ -679,7 +699,7 @@ export class GpuFluidSolver {
     this.pickupLocs = this._cacheLocs(this.progPickup, [
       'u_prevCarried', 'u_paint', 'u_state', 'u_workOrigin', 'u_workSize', 'u_uvClamp',
       'u_to', 'u_radius', 'u_prevDistTotal', 'u_coverWindow', 'u_pickupRatio', 'u_retentionRatio',
-      'u_stepColor', 'u_isFirst'
+      'u_stepColor', 'u_isFirst', 'u_physicalMix'
     ]);
     this.injectLocs = this._cacheLocs(this.progInject, [
       'u_paint', 'u_state', 'u_tip', 'u_carried', 'u_simOrigin', 'u_texel', 'u_uvClamp',
@@ -688,10 +708,11 @@ export class GpuFluidSolver {
       'u_dragAmp', 'u_swirlAmp', 'u_curlAmp', 'u_lagDistBase', 'u_advMixBase', 'u_trailFeatherInv',
       'u_brFreq', 'u_bristleContrast', 'u_fluidity', 'u_vortex', 'u_turb', 'u_depthScale',
       'u_paintSupply', 'u_supplyThreshold', 'u_strokeOpacity', 'u_recolorRateBase',
-      'u_nSteps', 'u_alphaLock'
+      'u_nSteps', 'u_alphaLock', 'u_physicalMix'
     ]);
     this.streamerLocs = this._cacheLocs(this.progStreamer, [
-      'u_paint', 'u_state', 'u_simOrigin', 'u_segCount', 'u_segPos', 'u_segCol', 'u_segMeta', 'u_alphaLock'
+      'u_paint', 'u_state', 'u_simOrigin', 'u_segCount', 'u_segPos', 'u_segCol', 'u_segMeta',
+      'u_alphaLock', 'u_physicalMix'
     ]);
     this.lightLocs = this._cacheLocs(this.progLight, [
       'u_paint', 'u_state', 'u_texel', 'u_uvClamp', 'u_doShade',
@@ -784,6 +805,7 @@ export class GpuFluidSolver {
     gl.uniform1f(this.pickupLocs.u_retentionRatio, 0.5);
     gl.uniform3f(this.pickupLocs.u_stepColor, 0, 0, 0);
     gl.uniform1i(this.pickupLocs.u_isFirst, 1);
+    gl.uniform1i(this.pickupLocs.u_physicalMix, 0);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 
     // 3. progInject (MRT): workPaintA + workStateA + tipTex + carriedB -> mrtWorkB
@@ -837,6 +859,7 @@ export class GpuFluidSolver {
     gl.uniform1f(this.injectLocs.u_recolorRateBase, 0.5);
     gl.uniform1i(this.injectLocs.u_nSteps, 1);
     gl.uniform1i(this.injectLocs.u_alphaLock, 0);
+    gl.uniform1i(this.injectLocs.u_physicalMix, 0);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 
     // 4. progStreamer (MRT): workPaintB + workStateB -> mrtWorkA
@@ -857,6 +880,7 @@ export class GpuFluidSolver {
     gl.uniform4fv(this.streamerLocs.u_segCol, this.segColArr);
     gl.uniform4fv(this.streamerLocs.u_segMeta, this.segMetaArr);
     gl.uniform1i(this.streamerLocs.u_alphaLock, 0);
+    gl.uniform1i(this.streamerLocs.u_physicalMix, 0);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 
     // 5. progLight: workPaintA + workStateA -> workLit
@@ -1309,6 +1333,7 @@ export class GpuFluidSolver {
     const maxV = Math.max(minV, (boxH - 0.5) * texel);
     const layerSet = engine.layerSettings ? engine.layerSettings[engine.activeLayer] : null;
     const alphaLock = layerSet && layerSet.alphaLock ? 1 : 0;
+    const physicalMix = (engine.physicalColorMix !== false) ? 1 : 0;
 
     gl.disable(gl.BLEND);
     gl.bindVertexArray(this.gpuRenderer.vao);
@@ -1343,6 +1368,7 @@ export class GpuFluidSolver {
       gl.uniform1f(this.pickupLocs.u_retentionRatio, params.retentionRatio ?? 0.5);
       gl.uniform3f(this.pickupLocs.u_stepColor, params.paintR / 255.0, params.paintG / 255.0, params.paintB / 255.0);
       gl.uniform1i(this.pickupLocs.u_isFirst, this.hasCarried ? 0 : 1);
+      gl.uniform1i(this.pickupLocs.u_physicalMix, physicalMix);
 
       gl.drawArrays(gl.TRIANGLES, 0, 6);
       this._swapCarried();
@@ -1413,6 +1439,7 @@ export class GpuFluidSolver {
       gl.uniform1f(this.injectLocs.u_recolorRateBase, params.recolorRateBase);
       gl.uniform1i(this.injectLocs.u_nSteps, nSteps);
       gl.uniform1i(this.injectLocs.u_alphaLock, alphaLock);
+      gl.uniform1i(this.injectLocs.u_physicalMix, physicalMix);
 
       gl.drawArrays(gl.TRIANGLES, 0, 6);
       this._swapWork();
@@ -1456,6 +1483,7 @@ export class GpuFluidSolver {
       gl.uniform4fv(this.streamerLocs.u_segCol, colArr);
       gl.uniform4fv(this.streamerLocs.u_segMeta, metaArr);
       gl.uniform1i(this.streamerLocs.u_alphaLock, alphaLock);
+      gl.uniform1i(this.streamerLocs.u_physicalMix, physicalMix);
 
       gl.drawArrays(gl.TRIANGLES, 0, 6);
       this._swapWork();

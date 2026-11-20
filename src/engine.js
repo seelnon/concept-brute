@@ -14,6 +14,7 @@ import {
   clearGizmoHoverUI
 } from './tools/selection.js';
 import { paintSmudgeOnChunks } from './tools/smudge.js';
+import { airSettings } from './tools/airPaint.js';
 import { isMobileDevice } from './colorUtils.js';
 import {
   backupChunkLayer,
@@ -284,6 +285,10 @@ export class Engine {
       liquify.whenLiquifyCommitsDone(this, cb);
   }
 
+  invalidateLiquifySession() {
+      liquify.invalidateLiquifySession(this);
+  }
+
   _resetInteractionState(options = {}) {
       const cancelActive = options.cancelActive !== false;
       if (cancelActive && this.isDrawing) {
@@ -320,6 +325,7 @@ export class Engine {
 
   resetEngineState() {
       this.flushPendingGpuCommits();
+      this.invalidateLiquifySession();
       if (this.liquifyStroke) {
           if (this.liquifyStroke.lazyRafId) {
               cancelAnimationFrame(this.liquifyStroke.lazyRafId);
@@ -459,7 +465,7 @@ export class Engine {
   _initEvents() {
     const isUiElement = (el) => {
         if (!(el instanceof Element)) return false;
-        return Boolean(el.closest('.ui-panel, .tool-btn, .brutal-btn, .dots-btn, #top-bar, #top-bar-ref, #selection-mode-toolbar, .brutal-range, button, input, select, textarea, #recording-selection-box, .rec-handle, #modal-new-project, #modal-export, #modal-ref-editor'));
+        return Boolean(el.closest('.ui-panel, .tool-btn, .brutal-btn, .dots-btn, #top-bar, #top-bar-ref, #selection-mode-toolbar, .brutal-range, button, input, select, textarea, #recording-selection-box, .rec-handle, #modal-new-project, #modal-export, #modal-ref-editor, #modal-color-studio'));
     };
 
     const countTouchPointers = () => {
@@ -2197,6 +2203,7 @@ export class Engine {
 
       const data = this._getSelectionData(true);
       if (data) {
+          this.invalidateLiquifySession();
           this.clipboard = data.canvas;
           this._pushHistory({ 
               type: 'stroke', 
@@ -2261,6 +2268,7 @@ export class Engine {
       
       const data = this._getSelectionData(true);
       if (!data) return;
+      this.invalidateLiquifySession();
 
       this.transformMode = 'move';
       this.transformHistory = [];
@@ -2296,6 +2304,7 @@ export class Engine {
       
       const data = this._getSelectionData(true);
       if (data) {
+          this.invalidateLiquifySession();
           this._pushHistory({ 
               type: 'stroke', 
               chunks: data.affectedChunks 
@@ -2407,6 +2416,169 @@ export class Engine {
 
   _cancelStroke() {
      return _cancelStroke.call(this);
+  }
+
+  _getTipContourPaths(tip) {
+    if (!tip || tip.width <= 0 || tip.height <= 0) return null;
+    const tipVer = tip._tipVersion || 0;
+    if (tip._contourCache && tip._contourCache.ver === tipVer) {
+        return tip._contourCache.paths;
+    }
+
+    const GRID = 80;
+    const P = GRID + 2;
+    const THR = 40;
+
+    if (!this._contourSampleCanvas) {
+        this._contourSampleCanvas = document.createElement('canvas');
+        this._contourSampleCanvas.width = GRID;
+        this._contourSampleCanvas.height = GRID;
+        this._contourSampleCtx = this._contourSampleCanvas.getContext('2d', { willReadFrequently: true });
+    }
+    const sctx = this._contourSampleCtx;
+    sctx.clearRect(0, 0, GRID, GRID);
+    sctx.drawImage(tip, 0, 0, GRID, GRID);
+    const imgData = sctx.getImageData(0, 0, GRID, GRID).data;
+
+    const alpha = new Uint8Array(P * P);
+    for (let y = 0; y < GRID; y++) {
+        const dstRow = (y + 1) * P + 1;
+        const srcRow = y * GRID;
+        for (let x = 0; x < GRID; x++) {
+            alpha[dstRow + x] = imgData[(srcRow + x) * 4 + 3];
+        }
+    }
+
+    const segments = [];
+    const adj = new Map();
+    const ptMap = new Map();
+
+    const interp = (v0, v1) => {
+        const d = v1 - v0;
+        if (d > -0.001 && d < 0.001) return 0.5;
+        const t = (THR - v0) / d;
+        return t < 0 ? 0 : (t > 1 ? 1 : t);
+    };
+    const toNorm = (v) => {
+        const n = (v - 0.5) / GRID;
+        return n < 0 ? 0 : (n > 1 ? 1 : n);
+    };
+
+    const getEdgePt = (cx, cy, edgeId, a, b, c, d) => {
+        let key, gx, gy;
+        if (edgeId === 0) {
+            key = `H:${cx},${cy}`;
+            if (!ptMap.has(key)) { gx = cx + interp(a, b); gy = cy; ptMap.set(key, { x: toNorm(gx), y: toNorm(gy) }); }
+        } else if (edgeId === 1) {
+            key = `V:${cx + 1},${cy}`;
+            if (!ptMap.has(key)) { gx = cx + 1; gy = cy + interp(b, c); ptMap.set(key, { x: toNorm(gx), y: toNorm(gy) }); }
+        } else if (edgeId === 2) {
+            key = `H:${cx},${cy + 1}`;
+            if (!ptMap.has(key)) { gx = cx + interp(d, c); gy = cy + 1; ptMap.set(key, { x: toNorm(gx), y: toNorm(gy) }); }
+        } else {
+            key = `V:${cx},${cy}`;
+            if (!ptMap.has(key)) { gx = cx; gy = cy + interp(a, d); ptMap.set(key, { x: toNorm(gx), y: toNorm(gy) }); }
+        }
+        return key;
+    };
+
+    const addSeg = (k1, k2) => {
+        const idx = segments.length;
+        segments.push([k1, k2]);
+        let a1 = adj.get(k1);
+        if (!a1) { a1 = []; adj.set(k1, a1); }
+        a1.push(idx);
+        let a2 = adj.get(k2);
+        if (!a2) { a2 = []; adj.set(k2, a2); }
+        a2.push(idx);
+    };
+
+    for (let cy = 0; cy <= GRID; cy++) {
+        const r0 = cy * P;
+        const r1 = (cy + 1) * P;
+        for (let cx = 0; cx <= GRID; cx++) {
+            const a = alpha[r0 + cx];
+            const b = alpha[r0 + cx + 1];
+            const c = alpha[r1 + cx + 1];
+            const d = alpha[r1 + cx];
+            const mask = (a >= THR ? 8 : 0) | (b >= THR ? 4 : 0) | (c >= THR ? 2 : 0) | (d >= THR ? 1 : 0);
+            if (mask === 0 || mask === 15) continue;
+
+            let pairs;
+            if (mask === 1 || mask === 14) pairs = [[3, 2]];
+            else if (mask === 2 || mask === 13) pairs = [[2, 1]];
+            else if (mask === 3 || mask === 12) pairs = [[3, 1]];
+            else if (mask === 4 || mask === 11) pairs = [[0, 1]];
+            else if (mask === 6 || mask === 9) pairs = [[0, 2]];
+            else if (mask === 7 || mask === 8) pairs = [[3, 0]];
+            else if (mask === 5) {
+                pairs = ((a + b + c + d) * 0.25 >= THR) ? [[3, 0], [2, 1]] : [[3, 2], [0, 1]];
+            } else {
+                pairs = ((a + b + c + d) * 0.25 >= THR) ? [[0, 1], [3, 2]] : [[3, 0], [2, 1]];
+            }
+
+            for (let i = 0; i < pairs.length; i++) {
+                const k1 = getEdgePt(cx, cy, pairs[i][0], a, b, c, d);
+                const k2 = getEdgePt(cx, cy, pairs[i][1], a, b, c, d);
+                if (k1 !== k2) addSeg(k1, k2);
+            }
+        }
+    }
+
+    const used = new Uint8Array(segments.length);
+    const paths = [];
+    const MIN_STEP_SQ = 0.004 * 0.004;
+
+    for (let i = 0; i < segments.length; i++) {
+        if (used[i]) continue;
+        used[i] = 1;
+        const startKey = segments[i][0];
+        let currKey = segments[i][1];
+        const pts = [ptMap.get(startKey)];
+        const pSecond = ptMap.get(currKey);
+        if (pSecond) pts.push(pSecond);
+
+        let closed = false;
+        let guard = segments.length + 2;
+        while (guard-- > 0) {
+            if (currKey === startKey) {
+                closed = true;
+                break;
+            }
+            const list = adj.get(currKey);
+            if (!list) break;
+            let nextSeg = -1;
+            for (let j = 0; j < list.length; j++) {
+                if (!used[list[j]]) {
+                    nextSeg = list[j];
+                    break;
+                }
+            }
+            if (nextSeg === -1) break;
+            used[nextSeg] = 1;
+            const s = segments[nextSeg];
+            currKey = (s[0] === currKey) ? s[1] : s[0];
+            if (currKey === startKey) {
+                closed = true;
+                break;
+            }
+            const nextPt = ptMap.get(currKey);
+            if (nextPt) {
+                const last = pts[pts.length - 1];
+                const dx = nextPt.x - last.x;
+                const dy = nextPt.y - last.y;
+                if (dx * dx + dy * dy >= MIN_STEP_SQ) {
+                    pts.push(nextPt);
+                }
+            }
+        }
+        if (pts.length >= 2) {
+            paths.push({ pts, closed });
+        }
+    }
+
+    tip._contourCache = { ver: tipVer, paths };
+    return paths;
   }
 
   _ensureCursorNodes() {
@@ -2605,9 +2777,19 @@ export class Engine {
         br = '50%';
         bgColor = 'transparent';
     } else if (this.brush.type === TOOLS.AIR) {
-        br = '50%';
-        bgColor = 'transparent';
-        border = '1.5px dashed #333333';
+        if (this.brush.tip) {
+            h = s;
+            br = '0px';
+            bgColor = 'transparent';
+            border = 'none';
+            showTip = true;
+            const resBucket = Math.max(64, Math.min(384, Math.ceil(s / 32) * 32));
+            tipColor = `__air_dashed__:${resBucket}`;
+        } else {
+            br = '50%';
+            bgColor = 'transparent';
+            border = '1.5px dashed #333333';
+        }
     } else if (this.brush.type === TOOLS.BRUSH || this.brush.type === TOOLS.FLUID) {
         if (this.brush.tip) {
             h = s;
@@ -2721,23 +2903,77 @@ export class Engine {
             ap.tipColor = tipColor;
             const tc = this._cursorTipCanvas;
             const tctx = this._cursorTipCtx;
-            const tw = Math.max(1, tip.width || 128);
-            const th = Math.max(1, tip.height || 128);
-            if (tc.width !== tw || tc.height !== th) {
-                tc.width = tw;
-                tc.height = th;
+            if (typeof tipColor === 'string' && tipColor.startsWith('__air_dashed__:')) {
+                const targetRes = Math.max(64, parseInt(tipColor.split(':')[1], 10) || 128);
+                if (tc.width !== targetRes || tc.height !== targetRes) {
+                    tc.width = targetRes;
+                    tc.height = targetRes;
+                }
+                tctx.clearRect(0, 0, targetRes, targetRes);
+                const paths = this._getTipContourPaths(tip);
+                if (paths && paths.length > 0) {
+                    const pxRatio = targetRes / Math.max(8, s);
+                    const dash = Math.max(2.0, 5.5 * pxRatio);
+                    const gap = Math.max(1.5, 4.0 * pxRatio);
+                    tctx.save();
+                    tctx.lineCap = 'round';
+                    tctx.lineJoin = 'round';
+                    tctx.setLineDash([dash, gap]);
+                    tctx.beginPath();
+                    for (let pIdx = 0; pIdx < paths.length; pIdx++) {
+                        const poly = paths[pIdx];
+                        const pts = poly.pts;
+                        if (!pts || pts.length < 2) continue;
+                        tctx.moveTo(pts[0].x * targetRes, pts[0].y * targetRes);
+                        for (let k = 1; k < pts.length; k++) {
+                            tctx.lineTo(pts[k].x * targetRes, pts[k].y * targetRes);
+                        }
+                        if (poly.closed) tctx.closePath();
+                    }
+                    tctx.strokeStyle = 'rgba(0, 0, 0, 0.72)';
+                    tctx.lineWidth = Math.max(1.8, 2.6 * pxRatio);
+                    tctx.stroke();
+                    tctx.strokeStyle = 'rgba(255, 255, 255, 0.96)';
+                    tctx.lineWidth = Math.max(1.0, 1.3 * pxRatio);
+                    tctx.stroke();
+                    tctx.restore();
+                } else {
+                    const r = targetRes * 0.48;
+                    const pxRatio = targetRes / Math.max(8, s);
+                    tctx.save();
+                    tctx.setLineDash([Math.max(2.0, 5.5 * pxRatio), Math.max(1.5, 4.0 * pxRatio)]);
+                    tctx.beginPath();
+                    tctx.arc(targetRes * 0.5, targetRes * 0.5, r, 0, Math.PI * 2);
+                    tctx.strokeStyle = 'rgba(0, 0, 0, 0.72)';
+                    tctx.lineWidth = Math.max(1.8, 2.6 * pxRatio);
+                    tctx.stroke();
+                    tctx.strokeStyle = 'rgba(255, 255, 255, 0.96)';
+                    tctx.lineWidth = Math.max(1.0, 1.3 * pxRatio);
+                    tctx.stroke();
+                    tctx.restore();
+                }
+            } else {
+                const tw = Math.max(1, tip.width || 128);
+                const th = Math.max(1, tip.height || 128);
+                if (tc.width !== tw || tc.height !== th) {
+                    tc.width = tw;
+                    tc.height = th;
+                }
+                tctx.clearRect(0, 0, tw, th);
+                tctx.globalCompositeOperation = 'source-over';
+                tctx.drawImage(tip, 0, 0, tw, th);
+                tctx.globalCompositeOperation = 'source-in';
+                tctx.fillStyle = tipColor;
+                tctx.fillRect(0, 0, tw, th);
+                tctx.globalCompositeOperation = 'source-over';
             }
-            tctx.clearRect(0, 0, tw, th);
-            tctx.globalCompositeOperation = 'source-over';
-            tctx.drawImage(tip, 0, 0, tw, th);
-            tctx.globalCompositeOperation = 'source-in';
-            tctx.fillStyle = tipColor;
-            tctx.fillRect(0, 0, tw, th);
-            tctx.globalCompositeOperation = 'source-over';
         }
     }
 
-    let transform = `translate3d(${mX - w * 0.5}px, ${mY - h * 0.5}px, 0) rotate(${this.rotation}rad)`;
+    const airAngleOffset = (this.brush.type === TOOLS.AIR && this.brush.tip && !airSettings.followStroke)
+        ? ((airSettings.tipAngle || 0) * Math.PI / 180)
+        : 0;
+    let transform = `translate3d(${mX - w * 0.5}px, ${mY - h * 0.5}px, 0) rotate(${this.rotation + airAngleOffset}rad)`;
     if (this.isMirrored) {
         transform += ' scaleX(-1)';
     }
@@ -4162,6 +4398,7 @@ export class Engine {
 
   undo() {
     this.flushPendingGpuCommits();
+    this.invalidateLiquifySession();
     if (this.history.length === 0) return;
     
     const action = this.history.pop();
@@ -4208,6 +4445,7 @@ export class Engine {
 
   redo() {
     this.flushPendingGpuCommits();
+    this.invalidateLiquifySession();
     if (this.redoStack.length === 0) return;
     
     const action = this.redoStack.pop();
@@ -4248,6 +4486,7 @@ export class Engine {
 
   clearLayer(index) {
       this.flushPendingGpuCommits();
+      this.invalidateLiquifySession();
       const snap = new Map();
       this.chunks.forEach((chunk, id) => {
           snap.set(id, captureLayerSnapshot(this, chunk, index));
@@ -4264,6 +4503,7 @@ export class Engine {
 
   clear() {
     this.flushPendingGpuCommits();
+    this.invalidateLiquifySession();
     this.chunks.forEach((chunk, id) => {
       chunk.ctxs.forEach((ctx, index) => {
           ctx.clearRect(0, 0, chunk.width, chunk.height);

@@ -1,7 +1,37 @@
 import { TOOLS } from '../constants.js';
-import { hexToRgb, rgbToHsl, hslToRgb } from '../colorUtils.js';
+import { hexToRgb, rgbToHsl, hslToRgb, mixRgb255Ryb } from '../colorUtils.js';
 import { GpuWatercolorSolver } from './airWatercolorGpu.js';
 import { backupChunkLayer } from '../engine/backupPool.js';
+
+const _airMixTmp = new Float32Array(4);
+
+function mixPremul01Ryb(prA, pgA, pbA, aA, prB, pgB, pbB, aB, t, outArr) {
+  const outA = aA + (aB - aA) * t;
+  if (outA <= 0.002) {
+    outArr[0] = 0; outArr[1] = 0; outArr[2] = 0; outArr[3] = 0;
+    return;
+  }
+  if (aA <= 0.002) {
+    outArr[0] = prB * t; outArr[1] = pgB * t; outArr[2] = pbB * t; outArr[3] = outA;
+    return;
+  }
+  if (aB <= 0.002) {
+    const invT = 1.0 - t;
+    outArr[0] = prA * invT; outArr[1] = pgA * invT; outArr[2] = pbA * invT; outArr[3] = outA;
+    return;
+  }
+  let wB = (aB * t) / outA;
+  if (wB < 0) wB = 0;
+  else if (wB > 1) wB = 1;
+  const sA = 255.0 / aA;
+  const sB = 255.0 / aB;
+  mixRgb255Ryb(prA * sA, pgA * sA, pbA * sA, prB * sB, pgB * sB, pbB * sB, wB, _airMixTmp, 0);
+  const scale = outA / 255.0;
+  outArr[0] = _airMixTmp[0] * scale;
+  outArr[1] = _airMixTmp[1] * scale;
+  outArr[2] = _airMixTmp[2] * scale;
+  outArr[3] = outA;
+}
 
 /**
  * Air Paint — Incompressible Navier-Stokes Watercolor Wash Engine
@@ -1249,17 +1279,43 @@ function runAirStep(engine, ab, from, to, radius, opacity, baseColor, pressure, 
       const nbW = (wL + wR + wT + wB) * 0.25;
 
       const advBlend = Math.min(0.45, streamRatio * 0.35 * wetMobility);
-      let outPR = _nsPR0[i] * (1.0 - advBlend) + advPR * advBlend;
-      let outPG = _nsPG0[i] * (1.0 - advBlend) + advPG * advBlend;
-      let outPB = _nsPB0[i] * (1.0 - advBlend) + advPB * advBlend;
-      let outA = _nsA0[i] * (1.0 - advBlend) + advA * advBlend;
+      const physMix = (engine.physicalColorMix !== false);
+      let outPR, outPG, outPB, outA;
+      if (physMix) {
+        mixPremul01Ryb(
+          _nsPR0[i] / 255.0, _nsPG0[i] / 255.0, _nsPB0[i] / 255.0, _nsA0[i],
+          advPR / 255.0, advPG / 255.0, advPB / 255.0, advA,
+          advBlend, _airMixTmp
+        );
+        outPR = _airMixTmp[0] * 255.0;
+        outPG = _airMixTmp[1] * 255.0;
+        outPB = _airMixTmp[2] * 255.0;
+        outA = _airMixTmp[3];
+      } else {
+        outPR = _nsPR0[i] * (1.0 - advBlend) + advPR * advBlend;
+        outPG = _nsPG0[i] * (1.0 - advBlend) + advPG * advBlend;
+        outPB = _nsPB0[i] * (1.0 - advBlend) + advPB * advBlend;
+        outA = _nsA0[i] * (1.0 - advBlend) + advA * advBlend;
+      }
       let outW = _nsW0[i] * (1.0 - advBlend) + advW * advBlend;
 
       if (diffRate > 0.002) {
-        outPR = outPR * (1.0 - diffRate) + nbPR * diffRate;
-        outPG = outPG * (1.0 - diffRate) + nbPG * diffRate;
-        outPB = outPB * (1.0 - diffRate) + nbPB * diffRate;
-        outA = outA * (1.0 - diffRate) + nbA * diffRate;
+        if (physMix) {
+          mixPremul01Ryb(
+            outPR / 255.0, outPG / 255.0, outPB / 255.0, outA,
+            nbPR / 255.0, nbPG / 255.0, nbPB / 255.0, nbA,
+            diffRate, _airMixTmp
+          );
+          outPR = _airMixTmp[0] * 255.0;
+          outPG = _airMixTmp[1] * 255.0;
+          outPB = _airMixTmp[2] * 255.0;
+          outA = _airMixTmp[3];
+        } else {
+          outPR = outPR * (1.0 - diffRate) + nbPR * diffRate;
+          outPG = outPG * (1.0 - diffRate) + nbPG * diffRate;
+          outPB = outPB * (1.0 - diffRate) + nbPB * diffRate;
+          outA = outA * (1.0 - diffRate) + nbA * diffRate;
+        }
         outW = outW * (1.0 - diffRate * 0.85) + nbW * (diffRate * 0.85);
       }
 
@@ -1354,6 +1410,7 @@ function runAirStep(engine, ab, from, to, radius, opacity, baseColor, pressure, 
 
           if (stepA > 0.002) {
             const curA = _nsA[i];
+            const physMix = (engine.physicalColorMix !== false);
             let paintR = baseColor.r;
             let paintG = baseColor.g;
             let paintB = baseColor.b;
@@ -1364,12 +1421,23 @@ function runAirStep(engine, ab, from, to, radius, opacity, baseColor, pressure, 
               const dstR = _nsPR[i] * invC;
               const dstG = _nsPG[i] * invC;
               const dstB = _nsPB[i] * invC;
-              const multR = (dstR * baseColor.r) / 255.0;
-              const multG = (dstG * baseColor.g) / 255.0;
-              const multB = (dstB * baseColor.b) / 255.0;
-              paintR = baseColor.r * (1.0 - opticalMultWeight) + multR * opticalMultWeight;
-              paintG = baseColor.g * (1.0 - opticalMultWeight) + multG * opticalMultWeight;
-              paintB = baseColor.b * (1.0 - opticalMultWeight) + multB * opticalMultWeight;
+              if (physMix) {
+                mixRgb255Ryb(dstR, dstG, dstB, baseColor.r, baseColor.g, baseColor.b, 0.55, _airMixTmp, 0);
+                const pmR = _airMixTmp[0] * 0.94;
+                const pmG = _airMixTmp[1] * 0.94;
+                const pmB = _airMixTmp[2] * 0.94;
+                mixRgb255Ryb(baseColor.r, baseColor.g, baseColor.b, pmR, pmG, pmB, opticalMultWeight, _airMixTmp, 0);
+                paintR = _airMixTmp[0];
+                paintG = _airMixTmp[1];
+                paintB = _airMixTmp[2];
+              } else {
+                const multR = (dstR * baseColor.r) / 255.0;
+                const multG = (dstG * baseColor.g) / 255.0;
+                const multB = (dstB * baseColor.b) / 255.0;
+                paintR = baseColor.r * (1.0 - opticalMultWeight) + multR * opticalMultWeight;
+                paintG = baseColor.g * (1.0 - opticalMultWeight) + multG * opticalMultWeight;
+                paintB = baseColor.b * (1.0 - opticalMultWeight) + multB * opticalMultWeight;
+              }
             }
 
             // Slight mineral darkening inside paper valleys for cold-press granulation
@@ -1381,13 +1449,36 @@ function runAirStep(engine, ab, from, to, radius, opacity, baseColor, pressure, 
             }
 
             const oneMinusStep = 1.0 - stepA;
-            let outA = curA * oneMinusStep + stepA;
-            if (outA < targetA) outA = targetA;
+            if (physMix) {
+              mixPremul01Ryb(
+                _nsPR[i] / 255.0, _nsPG[i] / 255.0, _nsPB[i] / 255.0, curA,
+                paintR / 255.0, paintG / 255.0, paintB / 255.0, 1.0,
+                stepA, _airMixTmp
+              );
+              let outA = _airMixTmp[3];
+              let outPR = _airMixTmp[0] * 255.0;
+              let outPG = _airMixTmp[1] * 255.0;
+              let outPB = _airMixTmp[2] * 255.0;
+              if (outA < targetA) {
+                const scaleUp = outA > 0.001 ? (targetA / outA) : 1.0;
+                outPR *= scaleUp;
+                outPG *= scaleUp;
+                outPB *= scaleUp;
+                outA = targetA;
+              }
+              _nsPR[i] = outPR;
+              _nsPG[i] = outPG;
+              _nsPB[i] = outPB;
+              _nsA[i] = Math.min(1.0, outA);
+            } else {
+              let outA = curA * oneMinusStep + stepA;
+              if (outA < targetA) outA = targetA;
 
-            _nsPR[i] = _nsPR[i] * oneMinusStep + paintR * stepA;
-            _nsPG[i] = _nsPG[i] * oneMinusStep + paintG * stepA;
-            _nsPB[i] = _nsPB[i] * oneMinusStep + paintB * stepA;
-            _nsA[i] = Math.min(1.0, outA);
+              _nsPR[i] = _nsPR[i] * oneMinusStep + paintR * stepA;
+              _nsPG[i] = _nsPG[i] * oneMinusStep + paintG * stepA;
+              _nsPB[i] = _nsPB[i] * oneMinusStep + paintB * stepA;
+              _nsA[i] = Math.min(1.0, outA);
+            }
 
             _nsDist[i] = localDist;
             if (targetA > _nsNewCov[i]) _nsNewCov[i] = targetA;

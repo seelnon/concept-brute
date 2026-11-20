@@ -17,11 +17,10 @@ const TILE_SIZE = 256;
 const COMMIT_TILE = 512;
 const PBO_RING_SIZE = 4;
 const ASYNC_FRAME_BUDGET_MS = 2.2;
-const DISP_RES = 128; // 2 world pixels per displacement texel (LINEAR filtered)
+const DEFAULT_DISP_RES = 256;
 const WORK_WORLD = 2048;
-const WORK_TEX = 1024;
 const MAX_DISP_POOL = 96;
-const MAX_ORIG_POOL = 16;
+const MAX_ORIG_POOL = 48;
 
 const QUAD_UNIT_VS = `#version 300 es
 precision highp float;
@@ -113,7 +112,7 @@ void main() {
 `;
 
 // Backward-warps pristine chunk origTex directly into destination chunk.gpuTextures[layer]
-const WARP_FS = `#version 300 es
+const WARP_HEADER_FS = `#version 300 es
 precision highp float;
 in vec2 v_uv;
 
@@ -126,7 +125,9 @@ uniform float u_dispWorldSize;
 uniform vec4 u_dispClamp;
 
 out vec4 outColor;
+`;
 
+const WARP_FAST_FS = `${WARP_HEADER_FS}
 void main() {
   vec2 worldPos = u_dstWorldRect.xy + v_uv * u_dstWorldRect.zw;
   vec2 dispUv = clamp((worldPos - u_dispOrigin) / u_dispWorldSize, u_dispClamp.xy, u_dispClamp.zw);
@@ -143,6 +144,145 @@ void main() {
   vec2 srcSize = u_srcWorldBounds.zw - u_srcWorldBounds.xy;
   vec2 srcUv = (srcPos - u_srcWorldBounds.xy) / srcSize;
   outColor = texture(u_srcOrig, srcUv);
+}
+`;
+
+// Mode 2 (CRISP): 9-tap GPU bilinear-factored Catmull-Rom Bicubic + zero-disp fast path
+const WARP_CRISP_FS = `${WARP_HEADER_FS}
+void main() {
+  vec2 worldPos = u_dstWorldRect.xy + v_uv * u_dstWorldRect.zw;
+  vec2 dispUv = clamp((worldPos - u_dispOrigin) / u_dispWorldSize, u_dispClamp.xy, u_dispClamp.zw);
+  vec2 disp = texture(u_workDisp, dispUv).xy;
+
+  vec2 srcPos = worldPos - disp;
+  if (
+    srcPos.x < u_srcWorldBounds.x || srcPos.x >= u_srcWorldBounds.z ||
+    srcPos.y < u_srcWorldBounds.y || srcPos.y >= u_srcWorldBounds.w
+  ) {
+    discard;
+  }
+
+  vec2 srcSize = u_srcWorldBounds.zw - u_srcWorldBounds.xy;
+  vec2 srcUv = (srcPos - u_srcWorldBounds.xy) / srcSize;
+
+  if (abs(disp.x) < 0.0005 && abs(disp.y) < 0.0005) {
+    outColor = texture(u_srcOrig, srcUv);
+    return;
+  }
+
+  vec2 texSize = vec2(textureSize(u_srcOrig, 0));
+  vec2 invTexSize = 1.0 / texSize;
+  vec2 tc = srcUv * texSize - 0.5;
+  vec2 i = floor(tc);
+  vec2 f = tc - i;
+  vec2 f2 = f * f;
+  vec2 f3 = f2 * f;
+
+  vec2 w0 = -0.5 * f + f2 - 0.5 * f3;
+  vec2 w1 = 1.0 - 2.5 * f2 + 1.5 * f3;
+  vec2 w2 = 0.5 * f + 2.0 * f2 - 1.5 * f3;
+  vec2 w3 = -0.5 * f2 + 0.5 * f3;
+
+  vec2 w12 = w1 + w2;
+  vec2 off12 = w2 / max(vec2(1e-5), w12);
+
+  vec2 uv0 = (i - 0.5) * invTexSize;
+  vec2 uv12 = (i + 0.5 + off12) * invTexSize;
+  vec2 uv3 = (i + 2.5) * invTexSize;
+
+  vec4 col = vec4(0.0);
+  col += texture(u_srcOrig, vec2(uv0.x,  uv0.y))  * (w0.x  * w0.y);
+  col += texture(u_srcOrig, vec2(uv12.x, uv0.y))  * (w12.x * w0.y);
+  col += texture(u_srcOrig, vec2(uv3.x,  uv0.y))  * (w3.x  * w0.y);
+
+  col += texture(u_srcOrig, vec2(uv0.x,  uv12.y)) * (w0.x  * w12.y);
+  col += texture(u_srcOrig, vec2(uv12.x, uv12.y)) * (w12.x * w12.y);
+  col += texture(u_srcOrig, vec2(uv3.x,  uv12.y)) * (w3.x  * w12.y);
+
+  col += texture(u_srcOrig, vec2(uv0.x,  uv3.y))  * (w0.x  * w3.y);
+  col += texture(u_srcOrig, vec2(uv12.x, uv3.y))  * (w12.x * w3.y);
+  col += texture(u_srcOrig, vec2(uv3.x,  uv3.y))  * (w3.x  * w3.y);
+
+  col = clamp(col, vec4(0.0), vec4(1.0));
+  col.rgb = min(col.rgb, vec3(col.a));
+  outColor = col;
+}
+`;
+
+// Mode 3 (ULTRA): 36-tap 6x6 Lanczos-3 + inner 2x2 anti-ringing clamp
+const WARP_ULTRA_FS = `${WARP_HEADER_FS}
+float lanczos3(float x) {
+  float ax = abs(x);
+  if (ax >= 3.0) return 0.0;
+  if (ax < 1e-4) return 1.0;
+  float pix = 3.14159265359 * x;
+  return (sin(pix) / pix) * (sin(pix * 0.3333333333) / (pix * 0.3333333333));
+}
+
+void main() {
+  vec2 worldPos = u_dstWorldRect.xy + v_uv * u_dstWorldRect.zw;
+  vec2 dispUv = clamp((worldPos - u_dispOrigin) / u_dispWorldSize, u_dispClamp.xy, u_dispClamp.zw);
+  vec2 disp = texture(u_workDisp, dispUv).xy;
+
+  vec2 srcPos = worldPos - disp;
+  if (
+    srcPos.x < u_srcWorldBounds.x || srcPos.x >= u_srcWorldBounds.z ||
+    srcPos.y < u_srcWorldBounds.y || srcPos.y >= u_srcWorldBounds.w
+  ) {
+    discard;
+  }
+
+  vec2 srcSize = u_srcWorldBounds.zw - u_srcWorldBounds.xy;
+  vec2 srcUv = (srcPos - u_srcWorldBounds.xy) / srcSize;
+
+  if (abs(disp.x) < 0.0005 && abs(disp.y) < 0.0005) {
+    outColor = texture(u_srcOrig, srcUv);
+    return;
+  }
+
+  ivec2 iSize = textureSize(u_srcOrig, 0);
+  vec2 texSize = vec2(iSize);
+  vec2 tc = srcUv * texSize - 0.5;
+  vec2 iBase = floor(tc);
+  vec2 f = tc - iBase;
+  ivec2 i0 = ivec2(iBase);
+  ivec2 maxCoord = iSize - ivec2(1);
+
+  float wx[6];
+  float wy[6];
+  float sumWx = 0.0;
+  float sumWy = 0.0;
+  for (int k = 0; k < 6; k++) {
+    float ok = float(k - 2);
+    wx[k] = lanczos3(ok - f.x);
+    wy[k] = lanczos3(ok - f.y);
+    sumWx += wx[k];
+    sumWy += wy[k];
+  }
+  float invSum = 1.0 / max(1e-5, sumWx * sumWy);
+
+  vec4 acc = vec4(0.0);
+  vec4 innerMin = vec4(1.0);
+  vec4 innerMax = vec4(0.0);
+  for (int ky = 0; ky < 6; ky++) {
+    int sy = clamp(i0.y + (ky - 2), 0, maxCoord.y);
+    float wY = wy[ky];
+    for (int kx = 0; kx < 6; kx++) {
+      int sx = clamp(i0.x + (kx - 2), 0, maxCoord.x);
+      vec4 s = texelFetch(u_srcOrig, ivec2(sx, sy), 0);
+      if ((kx == 2 || kx == 3) && (ky == 2 || ky == 3)) {
+        innerMin = min(innerMin, s);
+        innerMax = max(innerMax, s);
+      }
+      acc += s * (wx[kx] * wY);
+    }
+  }
+
+  vec4 col = acc * invSum;
+  col = mix(col, clamp(col, innerMin, innerMax), 0.55);
+  col = clamp(col, vec4(0.0), vec4(1.0));
+  col.rgb = min(col.rgb, vec3(col.a));
+  outColor = col;
 }
 `;
 
@@ -169,12 +309,23 @@ export class GpuLiquifySolver {
     this.ready = false;
     this.active = false;
     this._pipelinesWarmed = false;
+    this._maxTexSize = 2048;
+    this._workTexSize = 1024;
+    this._activeDispRes = DEFAULT_DISP_RES;
 
-    this.activeDispTiles = new Map(); // "tx,ty" -> { tx, ty, wx, wy, tex, fbo }
-    this.dispPool = [];               // reusable 128x128 RGBA16F displacement tiles
+    this.activeDispTiles = new Map(); // "tx,ty" -> { tx, ty, wx, wy, tex, fbo, res }
+    this.dispPools = { 128: [], 256: [] }; // reusable RGBA16F displacement tiles keyed by resolution
     this.chunkOrigs = new Map();      // "cx,cy" -> { cx, cy, chunk, w, h, lx, ly, wasEmpty, origItem }
     this.origPool = [];               // reusable RGBA8 chunk snapshot textures
     this.touchedDestChunks = new Map(); // "cx,cy" -> { cx, cy, chunk, minX, minY, maxX, maxY, wasEmpty }
+
+    // Non-destructive session persistence state (Modes 2 & 3)
+    this._sessionActive = false;
+    this._sessionProjectId = null;
+    this._sessionLayer = -1;
+    this._sessionQuality = 2;
+    this._sessionDispRes = DEFAULT_DISP_RES;
+    this._activeModeCfg = null;
 
     this.boundMinDx = 0;
     this.boundMaxDx = 0;
@@ -195,6 +346,47 @@ export class GpuLiquifySolver {
     this._edgeImgDataMap = new Map();
 
     this._init();
+  }
+
+  _getModeConfig(engine = null) {
+    const qRaw = engine?.brush?.liquifyQuality ?? 2;
+    const quality = qRaw <= 1 ? 1 : (qRaw >= 3 ? 3 : 2);
+    const maxWorkTex = Math.min(2048, this._maxTexSize || 2048);
+    if (quality === 1) {
+      return {
+        quality: 1,
+        dispRes: 128,
+        workTex: Math.min(1024, maxWorkTex),
+        subStepFactor: 0.40,
+        minSubStep: 12.0,
+        sessionPersistent: false,
+        maxSessionOrigs: 16,
+        filter: 'fast'
+      };
+    }
+    const dispRes = maxWorkTex >= 2048 ? 256 : 128;
+    if (quality === 3) {
+      return {
+        quality: 3,
+        dispRes,
+        workTex: maxWorkTex,
+        subStepFactor: 0.16,
+        minSubStep: 4.0,
+        sessionPersistent: true,
+        maxSessionOrigs: 48,
+        filter: 'ultra'
+      };
+    }
+    return {
+      quality: 2,
+      dispRes,
+      workTex: maxWorkTex,
+      subStepFactor: 0.28,
+      minSubStep: 8.0,
+      sessionPersistent: true,
+      maxSessionOrigs: 24,
+      filter: 'crisp'
+    };
   }
 
   _createProgram(vsSrc, fsSrc) {
@@ -251,8 +443,13 @@ export class GpuLiquifySolver {
     gl.getExtension('EXT_color_buffer_float');
     gl.getExtension('EXT_color_buffer_half_float');
 
-    this.workDispA = this._createTexFbo(WORK_TEX, WORK_TEX, true);
-    this.workDispB = this._createTexFbo(WORK_TEX, WORK_TEX, true);
+    this._maxTexSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 2048;
+    const initWorkTex = Math.min(2048, this._maxTexSize);
+    this._workTexSize = initWorkTex;
+    this._activeDispRes = initWorkTex >= 2048 ? 256 : 128;
+
+    this.workDispA = this._createTexFbo(initWorkTex, initWorkTex, true);
+    this.workDispB = this._createTexFbo(initWorkTex, initWorkTex, true);
 
     if (!this.workDispA || !this.workDispB) {
       this._delTexFbo(this.workDispA);
@@ -267,11 +464,17 @@ export class GpuLiquifySolver {
     this.progRectMap = this._createProgram(RECT_MAP_VS, BLIT_FS);
     this.progBlit = this._createProgram(QUAD_UNIT_VS, BLIT_FS);
     this.progDisplace = this._createProgram(QUAD_UNIT_VS, DISPLACE_FS);
-    this.progWarp = this._createProgram(QUAD_UNIT_VS, WARP_FS);
+    this.progWarpFast = this._createProgram(QUAD_UNIT_VS, WARP_FAST_FS);
+    this.progWarpCrisp = this._createProgram(QUAD_UNIT_VS, WARP_CRISP_FS);
+    this.progWarpUltra = this._createProgram(QUAD_UNIT_VS, WARP_ULTRA_FS);
     this.progUnpremult = this._createProgram(RECT_MAP_VS, UNPREMULT_FS);
 
-    if (!this.progRectMap || !this.progBlit || !this.progDisplace || !this.progWarp || !this.progUnpremult) {
-      this.ready = false;
+    if (
+      !this.progRectMap || !this.progBlit || !this.progDisplace ||
+      !this.progWarpFast || !this.progWarpCrisp || !this.progWarpUltra ||
+      !this.progUnpremult
+    ) {
+      this.dispose();
       return;
     }
 
@@ -297,15 +500,18 @@ export class GpuLiquifySolver {
       u_stepMv: gl.getUniformLocation(this.progDisplace, 'u_stepMv[0]')
     };
 
-    this.warpLocs = {
-      u_srcOrig: gl.getUniformLocation(this.progWarp, 'u_srcOrig'),
-      u_workDisp: gl.getUniformLocation(this.progWarp, 'u_workDisp'),
-      u_dstWorldRect: gl.getUniformLocation(this.progWarp, 'u_dstWorldRect'),
-      u_srcWorldBounds: gl.getUniformLocation(this.progWarp, 'u_srcWorldBounds'),
-      u_dispOrigin: gl.getUniformLocation(this.progWarp, 'u_dispOrigin'),
-      u_dispWorldSize: gl.getUniformLocation(this.progWarp, 'u_dispWorldSize'),
-      u_dispClamp: gl.getUniformLocation(this.progWarp, 'u_dispClamp')
-    };
+    const getWarpLocs = (prog) => ({
+      u_srcOrig: gl.getUniformLocation(prog, 'u_srcOrig'),
+      u_workDisp: gl.getUniformLocation(prog, 'u_workDisp'),
+      u_dstWorldRect: gl.getUniformLocation(prog, 'u_dstWorldRect'),
+      u_srcWorldBounds: gl.getUniformLocation(prog, 'u_srcWorldBounds'),
+      u_dispOrigin: gl.getUniformLocation(prog, 'u_dispOrigin'),
+      u_dispWorldSize: gl.getUniformLocation(prog, 'u_dispWorldSize'),
+      u_dispClamp: gl.getUniformLocation(prog, 'u_dispClamp')
+    });
+    this.warpFastLocs = getWarpLocs(this.progWarpFast);
+    this.warpCrispLocs = getWarpLocs(this.progWarpCrisp);
+    this.warpUltraLocs = getWarpLocs(this.progWarpUltra);
 
     this.unpremultLocs = {
       u_srcRect: gl.getUniformLocation(this.progUnpremult, 'u_srcRect'),
@@ -329,16 +535,37 @@ export class GpuLiquifySolver {
       typeof gl.deleteSync === 'function'
     );
 
-    // Pre-warm 4 displacement tiles so initial stroke has 0 tile-allocation cost
+    // Pre-warm 4 displacement tiles for default resolution
+    const initPool = this.dispPools[this._activeDispRes];
     for (let i = 0; i < 4; i++) {
-      const dispTile = this._createTexFbo(DISP_RES, DISP_RES, true);
-      if (dispTile) this.dispPool.push(dispTile);
+      const dispTile = this._createTexFbo(this._activeDispRes, this._activeDispRes, true);
+      if (dispTile) initPool.push(dispTile);
     }
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this._stepFromArr = new Float32Array(16);
     this._stepMvArr = new Float32Array(16);
     this.ready = true;
+  }
+
+  _ensureWorkDispSize(targetWorkTex) {
+    if (!this.gl || this.gl.isContextLost()) return false;
+    if (this._workTexSize === targetWorkTex && this.workDispA && this.workDispB) return true;
+    const nextA = this._createTexFbo(targetWorkTex, targetWorkTex, true);
+    const nextB = this._createTexFbo(targetWorkTex, targetWorkTex, true);
+    if (!nextA || !nextB) {
+      this._delTexFbo(nextA);
+      this._delTexFbo(nextB);
+      this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
+      return false;
+    }
+    this._delTexFbo(this.workDispA);
+    this._delTexFbo(this.workDispB);
+    this.workDispA = nextA;
+    this.workDispB = nextB;
+    this._workTexSize = targetWorkTex;
+    this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
+    return true;
   }
 
   prewarmPipelines(engine = null) {
@@ -367,7 +594,20 @@ export class GpuLiquifySolver {
       }
     }
 
+    const cfg = this._getModeConfig(engine);
+    this._ensureWorkDispSize(cfg.workTex);
+
+    // Ensure at least 4 displacement tiles exist for active resolution
+    const pool = this.dispPools[cfg.dispRes] || (this.dispPools[cfg.dispRes] = []);
+    while (pool.length < 4 && this.activeDispTiles.size === 0) {
+      const dispTile = this._createTexFbo(cfg.dispRes, cfg.dispRes, true);
+      if (!dispTile) break;
+      pool.push(dispTile);
+    }
+
     if (this._pipelinesWarmed) return;
+
+    const workTex = this._workTexSize;
 
     // Trigger real 4x4 scissored draws across every Liquify shader program so ANGLE/driver
     // finishes native PSO compilation during idle warmup instead of first stroke start.
@@ -375,7 +615,7 @@ export class GpuLiquifySolver {
     gl.enable(gl.SCISSOR_TEST);
     gl.scissor(0, 0, 4, 4);
     gl.bindVertexArray(this.gpuRenderer.vao);
-    gl.viewport(0, 0, WORK_TEX, WORK_TEX);
+    gl.viewport(0, 0, workTex, workTex);
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.workDispA.fbo);
     gl.clearColor(0, 0, 0, 0);
@@ -419,26 +659,34 @@ export class GpuLiquifySolver {
     gl.uniform2fv(this.dispLocs.u_stepMv, this._stepMvArr);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 
-    // 4. progWarp: (origPool[0] or workDispA) + workDispB -> chunkBlitFbo(commitTile)
+    // 4. Warm all 3 warp shaders (Fast Bilinear, Crisp 9-tap Catmull-Rom, Ultra Lanczos-3)
     const dummyOrigTex = (this.origPool[0] && this.origPool[0].tex) ? this.origPool[0].tex : this.workDispA.tex;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.chunkBlitFbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.commitTile.tex, 0);
     gl.viewport(0, 0, COMMIT_TILE, COMMIT_TILE);
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.useProgram(this.progWarp);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, dummyOrigTex);
-    gl.uniform1i(this.warpLocs.u_srcOrig, 0);
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, this.workDispB.tex);
-    gl.uniform1i(this.warpLocs.u_workDisp, 1);
-    gl.uniform4f(this.warpLocs.u_dstWorldRect, 0, 0, COMMIT_TILE, COMMIT_TILE);
-    gl.uniform4f(this.warpLocs.u_srcWorldBounds, 0, 0, COMMIT_TILE, COMMIT_TILE);
-    gl.uniform2f(this.warpLocs.u_dispOrigin, 0, 0);
-    gl.uniform1f(this.warpLocs.u_dispWorldSize, WORK_WORLD);
-    gl.uniform4f(this.warpLocs.u_dispClamp, 0.001, 0.001, 0.999, 0.999);
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    const warpPasses = [
+      [this.progWarpFast, this.warpFastLocs],
+      [this.progWarpCrisp, this.warpCrispLocs],
+      [this.progWarpUltra, this.warpUltraLocs]
+    ];
+    for (let pIdx = 0; pIdx < warpPasses.length; pIdx++) {
+      const [prog, locs] = warpPasses[pIdx];
+      gl.useProgram(prog);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, dummyOrigTex);
+      gl.uniform1i(locs.u_srcOrig, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, this.workDispB.tex);
+      gl.uniform1i(locs.u_workDisp, 1);
+      gl.uniform4f(locs.u_dstWorldRect, 0, 0, COMMIT_TILE, COMMIT_TILE);
+      gl.uniform4f(locs.u_srcWorldBounds, 0, 0, COMMIT_TILE, COMMIT_TILE);
+      gl.uniform2f(locs.u_dispOrigin, 0, 0);
+      gl.uniform1f(locs.u_dispWorldSize, WORK_WORLD);
+      gl.uniform4f(locs.u_dispClamp, 0.001, 0.001, 0.999, 0.999);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, null, 0);
 
     // 5. progUnpremult: workDispA -> commitTile.fbo
@@ -472,15 +720,19 @@ export class GpuLiquifySolver {
     if (o.tex) this.gl.deleteTexture(o.tex);
   }
 
-  _acquireDispTile(tx, ty) {
+  _acquireDispTile(tx, ty, dispRes = DEFAULT_DISP_RES) {
     const key = `${tx},${ty}`;
     let t = this.activeDispTiles.get(key);
-    if (t) return { tile: t, isNew: false };
+    if (t && t.res === dispRes) return { tile: t, isNew: false };
+    if (t && t.res !== dispRes) {
+      this._releaseAllDispTiles();
+    }
 
     const gl = this.gl;
-    const item = this.dispPool.length > 0
-      ? this.dispPool.pop()
-      : this._createTexFbo(DISP_RES, DISP_RES, true);
+    const pool = this.dispPools[dispRes] || (this.dispPools[dispRes] = []);
+    const item = pool.length > 0
+      ? pool.pop()
+      : this._createTexFbo(dispRes, dispRes, true);
     if (!item) return { tile: null, isNew: false };
 
     t = {
@@ -489,6 +741,7 @@ export class GpuLiquifySolver {
       ty,
       wx: tx * TILE_SIZE,
       wy: ty * TILE_SIZE,
+      res: dispRes,
       tex: item.tex,
       fbo: item.fbo,
       minDx: 0,
@@ -499,7 +752,7 @@ export class GpuLiquifySolver {
 
     gl.disable(gl.SCISSOR_TEST);
     gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbo);
-    gl.viewport(0, 0, DISP_RES, DISP_RES);
+    gl.viewport(0, 0, dispRes, dispRes);
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -510,8 +763,10 @@ export class GpuLiquifySolver {
 
   _releaseAllDispTiles() {
     this.activeDispTiles.forEach((t) => {
-      if (this.dispPool.length < MAX_DISP_POOL) {
-        this.dispPool.push({ tex: t.tex, fbo: t.fbo, w: DISP_RES, h: DISP_RES });
+      const res = t.res || 128;
+      const pool = this.dispPools[res] || (this.dispPools[res] = []);
+      if (pool.length < MAX_DISP_POOL) {
+        pool.push({ tex: t.tex, fbo: t.fbo, w: res, h: res });
       } else {
         this._delTexFbo(t);
       }
@@ -653,13 +908,54 @@ export class GpuLiquifySolver {
     }
   }
 
+  invalidateSession() {
+    if (this.active) {
+      // Mid-stroke invalidation is handled via cancel()
+      this._sessionActive = false;
+      return;
+    }
+    this._releaseAllDispTiles();
+    this._releaseAllOrigs();
+    this._sessionActive = false;
+    this._sessionProjectId = null;
+    this._sessionLayer = -1;
+  }
+
   beginStroke(engine) {
     if (!this.ready || !this.gl || this.gl.isContextLost()) return false;
     if (this.hasPendingCommits()) {
       this.flushPendingCommits(engine);
     }
-    this._releaseAllDispTiles();
-    this._releaseAllOrigs();
+
+    const cfg = this._getModeConfig(engine);
+    this._ensureWorkDispSize(cfg.workTex);
+    this._activeDispRes = cfg.dispRes;
+    this._activeModeCfg = cfg;
+
+    const projId = engine?.currentProjectId || 'default';
+    const layer = engine?.activeLayer ?? -1;
+    const canReuseSession = !!(
+      cfg.sessionPersistent &&
+      !engine?.activeSelectionPath &&
+      this._sessionActive &&
+      this._sessionProjectId === projId &&
+      this._sessionLayer === layer &&
+      this._sessionQuality === cfg.quality &&
+      this._sessionDispRes === cfg.dispRes &&
+      this.chunkOrigs.size > 0 &&
+      this.chunkOrigs.size <= cfg.maxSessionOrigs
+    );
+
+    if (!canReuseSession) {
+      this._releaseAllDispTiles();
+      this._releaseAllOrigs();
+      this._sessionActive = !!cfg.sessionPersistent && !engine?.activeSelectionPath;
+      this._sessionProjectId = projId;
+      this._sessionLayer = layer;
+      this._sessionQuality = cfg.quality;
+      this._sessionDispRes = cfg.dispRes;
+    }
+
     this.touchedDestChunks.clear();
     this.boundMinDx = 0;
     this.boundMaxDx = 0;
@@ -672,23 +968,26 @@ export class GpuLiquifySolver {
   _runBatch(engine, steps, minX, minY, maxX, maxY, R, falloff) {
     const gl = this.gl;
     const layer = engine.activeLayer;
+    const cfg = this._activeModeCfg || this._getModeConfig(engine);
+    const dispRes = cfg.dispRes;
+    const workTex = this._workTexSize;
 
-    // Align work origin and extents to 2 world pixels (= 1 displacement texel)
+    // Align work origin and extents to texelWorld world pixels
     // so tile <-> workDisp transfers are exact 1:1 texel copies with zero bilinear drift.
-    const texelWorld = TILE_SIZE / DISP_RES; // 2
+    const texelWorld = TILE_SIZE / dispRes;
     const workX = Math.floor((Math.floor(minX) - 4) / texelWorld) * texelWorld;
     const workY = Math.floor((Math.floor(minY) - 4) / texelWorld) * texelWorld;
     const rawW = Math.ceil(maxX) + 4 - workX;
     const rawH = Math.ceil(maxY) + 4 - workY;
-    const boxTexW = Math.min(WORK_TEX, Math.max(4, Math.ceil(rawW / texelWorld)));
-    const boxTexH = Math.min(WORK_TEX, Math.max(4, Math.ceil(rawH / texelWorld)));
+    const boxTexW = Math.min(workTex, Math.max(4, Math.ceil(rawW / texelWorld)));
+    const boxTexH = Math.min(workTex, Math.max(4, Math.ceil(rawH / texelWorld)));
     const boxW = boxTexW * texelWorld;
     const boxH = boxTexH * texelWorld;
 
     gl.disable(gl.BLEND);
     gl.bindVertexArray(this.gpuRenderer.vao);
 
-    // Pre-acquire ALL overlapping 128x128 displacement tiles BEFORE binding workDispA.fbo!
+    // Pre-acquire ALL overlapping displacement tiles BEFORE binding workDispA.fbo!
     // (_acquireDispTile switches FBO, viewport, and scissor when zero-clearing a newly created tile.)
     const minTX = Math.floor(workX / TILE_SIZE);
     const maxTX = Math.floor((workX + boxW - 1) / TILE_SIZE);
@@ -699,7 +998,7 @@ export class GpuLiquifySolver {
     const existingTiles = [];
     for (let tx = minTX; tx <= maxTX; tx++) {
       for (let ty = minTY; ty <= maxTY; ty++) {
-        const { tile, isNew } = this._acquireDispTile(tx, ty);
+        const { tile, isNew } = this._acquireDispTile(tx, ty, dispRes);
         if (!tile) continue;
         assembledTiles.push(tile);
         if (!isNew) {
@@ -709,9 +1008,9 @@ export class GpuLiquifySolver {
     }
     if (assembledTiles.length === 0) return;
 
-    // 1. Assemble existing 128x128 displacement tiles into workDispA
+    // 1. Assemble existing displacement tiles into workDispA
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.workDispA.fbo);
-    gl.viewport(0, 0, WORK_TEX, WORK_TEX);
+    gl.viewport(0, 0, workTex, workTex);
     gl.enable(gl.SCISSOR_TEST);
     gl.scissor(0, 0, boxTexW, boxTexH);
     gl.clearColor(0, 0, 0, 0);
@@ -734,7 +1033,7 @@ export class GpuLiquifySolver {
 
     // 2. Single-pass GPU displacement accumulation (workDispA -> workDispB)
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.workDispB.fbo);
-    gl.viewport(0, 0, WORK_TEX, WORK_TEX);
+    gl.viewport(0, 0, workTex, workTex);
     gl.enable(gl.SCISSOR_TEST);
     gl.scissor(0, 0, boxTexW, boxTexH);
     gl.useProgram(this.progDisplace);
@@ -804,15 +1103,15 @@ export class GpuLiquifySolver {
       const oy2 = Math.min(workY + boxH, t.wy + TILE_SIZE);
       if (ox2 <= ox || oy2 <= oy) continue;
 
-      const scaleD = DISP_RES / TILE_SIZE;
+      const scaleD = dispRes / TILE_SIZE;
       const sx = Math.max(0, Math.round((ox - t.wx) * scaleD));
       const sy = Math.max(0, Math.round((oy - t.wy) * scaleD));
-      const ex = Math.min(DISP_RES, Math.round((ox2 - t.wx) * scaleD));
-      const ey = Math.min(DISP_RES, Math.round((oy2 - t.wy) * scaleD));
+      const ex = Math.min(dispRes, Math.round((ox2 - t.wx) * scaleD));
+      const ey = Math.min(dispRes, Math.round((oy2 - t.wy) * scaleD));
       if (ex <= sx || ey <= sy) continue;
 
       gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbo);
-      gl.viewport(0, 0, DISP_RES, DISP_RES);
+      gl.viewport(0, 0, dispRes, dispRes);
       gl.enable(gl.SCISSOR_TEST);
       gl.scissor(sx, sy, ex - sx, ey - sy);
       gl.uniform4f(this.rectLocs.u_dstRect, t.wx, t.wy, TILE_SIZE, TILE_SIZE);
@@ -898,20 +1197,30 @@ export class GpuLiquifySolver {
     }
 
     if (dstTargets.length > 0) {
-      const texelD = 1.0 / WORK_TEX;
+      const texelD = 1.0 / workTex;
       const dispClampX0 = 0.5 * texelD;
       const dispClampY0 = 0.5 * texelD;
       const dispClampX1 = Math.max(dispClampX0, (boxTexW - 0.5) * texelD);
       const dispClampY1 = Math.max(dispClampY0, (boxTexH - 0.5) * texelD);
 
-      gl.useProgram(this.progWarp);
+      let warpProg = this.progWarpCrisp;
+      let warpLocs = this.warpCrispLocs;
+      if (cfg.filter === 'fast') {
+        warpProg = this.progWarpFast;
+        warpLocs = this.warpFastLocs;
+      } else if (cfg.filter === 'ultra') {
+        warpProg = this.progWarpUltra;
+        warpLocs = this.warpUltraLocs;
+      }
+
+      gl.useProgram(warpProg);
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, this.workDispB.tex);
-      gl.uniform1i(this.warpLocs.u_workDisp, 1);
-      gl.uniform1i(this.warpLocs.u_srcOrig, 0);
-      gl.uniform2f(this.warpLocs.u_dispOrigin, workX, workY);
-      gl.uniform1f(this.warpLocs.u_dispWorldSize, WORK_WORLD);
-      gl.uniform4f(this.warpLocs.u_dispClamp, dispClampX0, dispClampY0, dispClampX1, dispClampY1);
+      gl.uniform1i(warpLocs.u_workDisp, 1);
+      gl.uniform1i(warpLocs.u_srcOrig, 0);
+      gl.uniform2f(warpLocs.u_dispOrigin, workX, workY);
+      gl.uniform1f(warpLocs.u_dispWorldSize, WORK_WORLD);
+      gl.uniform4f(warpLocs.u_dispClamp, dispClampX0, dispClampY0, dispClampX1, dispClampY1);
 
       for (let i = 0; i < dstTargets.length; i++) {
         const dt = dstTargets[i];
@@ -947,14 +1256,14 @@ export class GpuLiquifySolver {
         gl.clearColor(0, 0, 0, 0);
         gl.clear(gl.COLOR_BUFFER_BIT);
 
-        gl.uniform4f(this.warpLocs.u_dstWorldRect, dlx, dly, dcw, dch);
+        gl.uniform4f(warpLocs.u_dstWorldRect, dlx, dly, dcw, dch);
         gl.activeTexture(gl.TEXTURE0);
 
         for (let s = 0; s < srcEntries.length; s++) {
           const se = srcEntries[s];
           gl.bindTexture(gl.TEXTURE_2D, se.origItem.tex);
           gl.uniform4f(
-            this.warpLocs.u_srcWorldBounds,
+            warpLocs.u_srcWorldBounds,
             se.lx,
             se.ly,
             se.lx + se.w,
@@ -995,8 +1304,9 @@ export class GpuLiquifySolver {
     const falloff = (engine.brush.falloff !== undefined) ? engine.brush.falloff : 0.50;
 
     // Limit each batch span so its [min..max] + R fits cleanly inside WORK_WORLD (2048)
+    const cfg = this._activeModeCfg || this._getModeConfig(engine);
     const maxSpan = Math.max(64.0, WORK_WORLD - (R * 2 + 48));
-    const maxSubStepDist = Math.max(8.0, R * 0.32);
+    const maxSubStepDist = Math.max(cfg.minSubStep, R * cfg.subStepFactor);
     const totalSubSteps = Math.max(1, Math.ceil(dist / maxSubStepDist));
 
     let idx = 0;
@@ -1364,7 +1674,7 @@ export class GpuLiquifySolver {
   onContextLost() {
     this._discardPendingCommits();
     this.activeDispTiles.clear();
-    this.dispPool = [];
+    this.dispPools = { 128: [], 256: [] };
     this.chunkOrigs.clear();
     this.origPool = [];
     this.touchedDestChunks.clear();
@@ -1376,8 +1686,13 @@ export class GpuLiquifySolver {
     this.progRectMap = null;
     this.progBlit = null;
     this.progDisplace = null;
-    this.progWarp = null;
+    this.progWarpFast = null;
+    this.progWarpCrisp = null;
+    this.progWarpUltra = null;
     this.progUnpremult = null;
+    this._sessionActive = false;
+    this._sessionProjectId = null;
+    this._sessionLayer = -1;
     this.ready = false;
     this.active = false;
     this._pipelinesWarmed = false;
@@ -1474,8 +1789,20 @@ export class GpuLiquifySolver {
     if (!this.ready || !this.active) return;
 
     this._commitToCanvas2D(engine, !!engine.activeSelectionPath);
-    this._releaseAllDispTiles();
-    this._releaseAllOrigs();
+    const cfg = this._activeModeCfg || this._getModeConfig(engine);
+    const keepSession = !!(
+      cfg.sessionPersistent &&
+      this._sessionActive &&
+      !engine.activeSelectionPath &&
+      this.chunkOrigs.size <= cfg.maxSessionOrigs
+    );
+
+    if (!keepSession) {
+      this._releaseAllDispTiles();
+      this._releaseAllOrigs();
+      this._sessionActive = false;
+    }
+
     this.touchedDestChunks.clear();
     this.active = false;
     this.gpuRenderer.requestRender();
@@ -1498,6 +1825,7 @@ export class GpuLiquifySolver {
     }
     this._releaseAllDispTiles();
     this._releaseAllOrigs();
+    this._sessionActive = false;
     this.touchedDestChunks.clear();
     this.active = false;
     if (this.gl && !this.gl.isContextLost()) {
@@ -1515,11 +1843,16 @@ export class GpuLiquifySolver {
     if (!gl) return;
     this._releaseAllDispTiles();
     this._releaseAllOrigs();
+    this._sessionActive = false;
     this.touchedDestChunks.clear();
 
     if (!gl.isContextLost()) {
-      for (const d of this.dispPool) {
-        this._delTexFbo(d);
+      for (const res of [128, 256]) {
+        const pool = this.dispPools[res];
+        if (pool) {
+          for (const d of pool) this._delTexFbo(d);
+          pool.length = 0;
+        }
       }
       for (const o of this.origPool) {
         this._delTexFbo(o);
@@ -1531,12 +1864,20 @@ export class GpuLiquifySolver {
       this._delTexFbo(this.workDispB);
       this._delTexFbo(this.commitTile);
       if (this.chunkBlitFbo) gl.deleteFramebuffer(this.chunkBlitFbo);
-      [this.progRectMap, this.progBlit, this.progDisplace, this.progWarp, this.progUnpremult].forEach((p) => {
+      [
+        this.progRectMap,
+        this.progBlit,
+        this.progDisplace,
+        this.progWarpFast,
+        this.progWarpCrisp,
+        this.progWarpUltra,
+        this.progUnpremult
+      ].forEach((p) => {
         if (p) gl.deleteProgram(p);
       });
     }
 
-    this.dispPool = [];
+    this.dispPools = { 128: [], 256: [] };
     this.origPool = [];
     this._pboRing = [];
     this._edgeImgDataMap.clear();

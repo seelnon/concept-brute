@@ -46,6 +46,9 @@ export function _startStroke(e) {
   if (this.flushPendingGpuCommits) {
       this.flushPendingGpuCommits();
   }
+  if (this.brush.type !== TOOLS.LIQUIFY && this.invalidateLiquifySession) {
+      this.invalidateLiquifySession();
+  }
 
   // No Color Pick for Wireframe
   if (this.brush.type === TOOLS.PICKER) {

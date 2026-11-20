@@ -11,6 +11,7 @@
  */
 
 import { backupChunkLayer } from '../engine/backupPool.js';
+import { GLSL_RYB_MIX } from '../colorUtils.js';
 
 const TILE_SIZE = 256;
 const WORK_SIZE = 1024;
@@ -69,6 +70,9 @@ uniform float u_cosFwd;
 uniform float u_sinFwd;
 uniform float u_pickupBase;
 uniform int u_isFirstPickup;
+uniform int u_physicalMix;
+
+${GLSL_RYB_MIX}
 
 out vec4 outBuf;
 
@@ -100,7 +104,7 @@ void main() {
   }
 
   float p = clamp(u_pickupBase * (0.25 + 0.75 * mask), 0.0, 1.0);
-  outBuf = mix(prevBuf, sampled, p);
+  outBuf = mixPremulPaint(prevBuf, sampled, p, u_physicalMix);
 }
 `;
 
@@ -121,6 +125,9 @@ uniform float u_sinInv;
 uniform float u_depositBase;
 uniform float u_effOpacity;
 uniform int u_alphaLock;
+uniform int u_physicalMix;
+
+${GLSL_RYB_MIX}
 
 layout(location = 0) out vec4 outSim;
 layout(location = 1) out vec4 outCov;
@@ -164,11 +171,11 @@ void main() {
     if (sim.a > 0.002 && carried.a > 0.002) {
       vec3 dCol = sim.rgb / sim.a;
       vec3 bCol = carried.rgb / carried.a;
-      vec3 mixCol = clamp(mix(dCol, bCol, w), 0.0, 1.0);
+      vec3 mixCol = clamp(mixPaintCol(dCol, bCol, w, u_physicalMix), 0.0, 1.0);
       nextSim = vec4(mixCol * sim.a, sim.a);
     }
   } else {
-    nextSim = mix(sim, carried, w);
+    nextSim = mixPremulPaint(sim, carried, w, u_physicalMix);
   }
 
   nextSim = clamp(nextSim, 0.0, 1.0);
@@ -189,6 +196,9 @@ uniform sampler2D u_orig;
 uniform sampler2D u_sim;
 uniform sampler2D u_cov;
 uniform int u_alphaLock;
+uniform int u_physicalMix;
+
+${GLSL_RYB_MIX}
 
 out vec4 outColor;
 
@@ -201,7 +211,7 @@ void main() {
   }
 
   vec4 sim = texture(u_sim, v_uv);
-  vec4 res = mix(orig, sim, c);
+  vec4 res = mixPremulPaint(orig, sim, c, u_physicalMix);
 
   if (u_alphaLock == 1) {
     if (orig.a <= 0.001) {
@@ -410,7 +420,8 @@ export class GpuSmudgeSolver {
       u_cosFwd: gl.getUniformLocation(this.progPickup, 'u_cosFwd'),
       u_sinFwd: gl.getUniformLocation(this.progPickup, 'u_sinFwd'),
       u_pickupBase: gl.getUniformLocation(this.progPickup, 'u_pickupBase'),
-      u_isFirstPickup: gl.getUniformLocation(this.progPickup, 'u_isFirstPickup')
+      u_isFirstPickup: gl.getUniformLocation(this.progPickup, 'u_isFirstPickup'),
+      u_physicalMix: gl.getUniformLocation(this.progPickup, 'u_physicalMix')
     };
     this.depositLocs = {
       u_sim: gl.getUniformLocation(this.progDeposit, 'u_sim'),
@@ -424,13 +435,15 @@ export class GpuSmudgeSolver {
       u_sinInv: gl.getUniformLocation(this.progDeposit, 'u_sinInv'),
       u_depositBase: gl.getUniformLocation(this.progDeposit, 'u_depositBase'),
       u_effOpacity: gl.getUniformLocation(this.progDeposit, 'u_effOpacity'),
-      u_alphaLock: gl.getUniformLocation(this.progDeposit, 'u_alphaLock')
+      u_alphaLock: gl.getUniformLocation(this.progDeposit, 'u_alphaLock'),
+      u_physicalMix: gl.getUniformLocation(this.progDeposit, 'u_physicalMix')
     };
     this.compLocs = {
       u_orig: gl.getUniformLocation(this.progComposite, 'u_orig'),
       u_sim: gl.getUniformLocation(this.progComposite, 'u_sim'),
       u_cov: gl.getUniformLocation(this.progComposite, 'u_cov'),
-      u_alphaLock: gl.getUniformLocation(this.progComposite, 'u_alphaLock')
+      u_alphaLock: gl.getUniformLocation(this.progComposite, 'u_alphaLock'),
+      u_physicalMix: gl.getUniformLocation(this.progComposite, 'u_physicalMix')
     };
     this.unpremultLocs = {
       u_tex: gl.getUniformLocation(this.progUnpremult, 'u_tex')
@@ -522,6 +535,7 @@ export class GpuSmudgeSolver {
     gl.uniform1f(this.pickupLocs.u_sinFwd, 0.0);
     gl.uniform1f(this.pickupLocs.u_pickupBase, 0.5);
     gl.uniform1i(this.pickupLocs.u_isFirstPickup, 1);
+    gl.uniform1i(this.pickupLocs.u_physicalMix, 0);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 
     // 4. progDeposit (MRT): workSimA + workCovA + bufB + tipTex -> mrtWorkB
@@ -548,6 +562,7 @@ export class GpuSmudgeSolver {
     gl.uniform1f(this.depositLocs.u_depositBase, 0.5);
     gl.uniform1f(this.depositLocs.u_effOpacity, 1.0);
     gl.uniform1i(this.depositLocs.u_alphaLock, 0);
+    gl.uniform1i(this.depositLocs.u_physicalMix, 0);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 
     // 5. progComposite: workOrig + workSimB + workCovB -> workOut
@@ -563,6 +578,7 @@ export class GpuSmudgeSolver {
     gl.bindTexture(gl.TEXTURE_2D, this.workCovB.tex);
     gl.uniform1i(this.compLocs.u_cov, 2);
     gl.uniform1i(this.compLocs.u_alphaLock, 0);
+    gl.uniform1i(this.compLocs.u_physicalMix, 0);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 
     // 6. progUnpremult: tileCommitPre -> tileCommitStraight
@@ -960,6 +976,7 @@ export class GpuSmudgeSolver {
     const gl = this.gl;
     const layerSet = engine.layerSettings ? engine.layerSettings[engine.activeLayer] : null;
     const alphaLock = layerSet && layerSet.alphaLock ? 1 : 0;
+    const physicalMix = (engine.physicalColorMix !== false) ? 1 : 0;
     const texel = 1.0 / WORK_SIZE;
     const uvClampMinX = 0.5 * texel;
     const uvClampMinY = 0.5 * texel;
@@ -1005,6 +1022,7 @@ export class GpuSmudgeSolver {
         gl.uniform1f(this.pickupLocs.u_sinFwd, sinFwd);
         gl.uniform1f(this.pickupLocs.u_pickupBase, pickupBase);
         gl.uniform1i(this.pickupLocs.u_isFirstPickup, isFirst ? 1 : 0);
+        gl.uniform1i(this.pickupLocs.u_physicalMix, physicalMix);
         gl.drawArrays(gl.TRIANGLES, 0, 6);
       }
 
@@ -1040,6 +1058,7 @@ export class GpuSmudgeSolver {
         gl.uniform1f(this.depositLocs.u_depositBase, depositBase);
         gl.uniform1f(this.depositLocs.u_effOpacity, effOpacity);
         gl.uniform1i(this.depositLocs.u_alphaLock, alphaLock);
+        gl.uniform1i(this.depositLocs.u_physicalMix, physicalMix);
         gl.drawArrays(gl.TRIANGLES, 0, 6);
 
         this._swapWork();
@@ -1067,6 +1086,7 @@ export class GpuSmudgeSolver {
     gl.bindTexture(gl.TEXTURE_2D, this._srcCov().tex);
     gl.uniform1i(this.compLocs.u_cov, 2);
     gl.uniform1i(this.compLocs.u_alphaLock, alphaLock);
+    gl.uniform1i(this.compLocs.u_physicalMix, physicalMix);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 
     // 4. Persist tiles + update chunk.gpuTextures[layer] on GPU

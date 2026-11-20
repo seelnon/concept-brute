@@ -12,6 +12,7 @@
  */
 
 import { backupChunkLayer } from '../engine/backupPool.js';
+import { GLSL_RYB_MIX } from '../colorUtils.js';
 
 const TILE_SIZE = 256;
 const WORK_SIZE = 1024;
@@ -168,11 +169,13 @@ uniform int u_isDab;
 uniform float u_rotCos;
 uniform float u_rotSin;
 uniform float u_tipPour;
+uniform int u_physicalMix;
 
 layout(location = 0) out vec4 outPigment;
 layout(location = 1) out vec4 outVel;
 
 ${WATERCOLOR_GLSL_COMMON}
+${GLSL_RYB_MIX}
 
 void main() {
   vec4 pig = texture(u_pigment, v_uv);
@@ -330,20 +333,26 @@ void main() {
       vec3 mixedCol = srcCol;
       if (pig.a > 0.015) {
         vec3 dstCol = pig.rgb / max(0.001, pig.a);
-        vec3 multCol = dstCol * srcCol;
         float optW = clamp(0.28 + 0.44 * u_wetness, 0.0, 1.0);
-        mixedCol = mix(srcCol, multCol, optW);
+        if (u_physicalMix == 1) {
+          vec3 pigMix = mixPaintCol(dstCol, srcCol, 0.55, 1) * 0.94;
+          mixedCol = mixPaintCol(srcCol, pigMix, optW, 1);
+        } else {
+          vec3 multCol = dstCol * srcCol;
+          mixedCol = mix(srcCol, multCol, optW);
+        }
       }
 
-      float outA = pig.a * (1.0 - stepA) + stepA;
-      vec3 outPR = pig.rgb * (1.0 - stepA) + mixedCol * stepA;
+      vec4 outPigMix = mixPremulPaint(pig, vec4(mixedCol, 1.0), stepA, u_physicalMix);
+      float outA = outPigMix.a;
+      vec3 outPR = outPigMix.rgb;
 
       if (u_alphaLock == 1) {
         outPR = (outA > 0.001) ? (outPR * (pig.a / outA)) : vec3(0.0);
         outA = pig.a;
       } else if (outA < targetA) {
         float scaleUp = (outA > 0.001) ? (targetA / outA) : 1.0;
-        outPR = mix(outPR * scaleUp, mixedCol * targetA, 0.25);
+        outPR = mixPremulPaint(vec4(outPR * scaleUp, targetA), vec4(mixedCol * targetA, targetA), 0.25, u_physicalMix).rgb;
         outA = targetA;
       }
 
@@ -487,11 +496,13 @@ uniform float u_maxVel;
 uniform float u_dt;
 uniform int u_isFloat;
 uniform int u_alphaLock;
+uniform int u_physicalMix;
 
 layout(location = 0) out vec4 outPigment;
 layout(location = 1) out vec4 outVel;
 
 ${WATERCOLOR_GLSL_COMMON}
+${GLSL_RYB_MIX}
 
 void main() {
   vec4 cV = texture(u_vel, v_uv);
@@ -547,7 +558,7 @@ void main() {
   float waterAdv = texture(u_vel, backUv).z;
 
   float streamMix = clamp(spd * 0.34 * advScale, 0.0, 0.42);
-  vec4 pigOut = mix(pigC, pigAdv, streamMix);
+  vec4 pigOut = mixPremulPaint(pigC, pigAdv, streamMix, u_physicalMix);
   float waterOut = mix(water, waterAdv, streamMix);
 
   vec4 pL_c = texture(u_pigment, uvL);
@@ -566,7 +577,7 @@ void main() {
   float grainDiff = 1.0 - u_granulation * 0.28 * (1.0 - tooth);
   float wickAmt = clamp(u_bloom * 0.22 * mob * channelOpen * grainDiff * u_dt * max(0.0, (bestW - water) * 2.5 + 0.25), 0.0, 0.26);
   if (wickAmt > 0.002 && bestPig.a > pigOut.a) {
-    pigOut = mix(pigOut, bestPig, wickAmt);
+    pigOut = mixPremulPaint(pigOut, bestPig, wickAmt, u_physicalMix);
     waterOut = mix(waterOut, bestW, wickAmt * 0.85);
   }
 
@@ -856,7 +867,7 @@ export class GpuWatercolorSolver {
       'u_pigment', 'u_vel', 'u_tip', 'u_simOrigin', 'u_from', 'u_to', 'u_dir', 'u_radius',
       'u_color', 'u_opacity', 'u_flow', 'u_wetness', 'u_streamFlow', 'u_bloom', 'u_edge',
       'u_granulation', 'u_time', 'u_segLen', 'u_maxVel', 'u_isFloat', 'u_alphaLock',
-      'u_hasTip', 'u_isDab', 'u_rotCos', 'u_rotSin', 'u_tipPour'
+      'u_hasTip', 'u_isDab', 'u_rotCos', 'u_rotSin', 'u_tipPour', 'u_physicalMix'
     ]);
     this.vortLocs = this._cacheLocs(this.progVort, ['u_vel', 'u_texel', 'u_uvClamp', 'u_maxVel', 'u_isFloat']);
     this.confDivLocs = this._cacheLocs(this.progConfDiv, [
@@ -868,7 +879,7 @@ export class GpuWatercolorSolver {
     this.flowEdgeLocs = this._cacheLocs(this.progFlowEdge, [
       'u_pigment', 'u_vel', 'u_press', 'u_texel', 'u_uvClamp', 'u_simOrigin',
       'u_wetness', 'u_streamFlow', 'u_bloom', 'u_edge', 'u_granulation',
-      'u_maxVel', 'u_dt', 'u_isFloat', 'u_alphaLock'
+      'u_maxVel', 'u_dt', 'u_isFloat', 'u_alphaLock', 'u_physicalMix'
     ]);
     this.drySharpenLocs = this._cacheLocs(this.progDrySharpen, [
       'u_pigment', 'u_vel', 'u_texel', 'u_uvClamp', 'u_edge', 'u_wetness'
@@ -983,6 +994,7 @@ export class GpuWatercolorSolver {
     gl.uniform1f(this.injectLocs.u_rotCos, 1.0);
     gl.uniform1f(this.injectLocs.u_rotSin, 0.0);
     gl.uniform1f(this.injectLocs.u_tipPour, 0.5);
+    gl.uniform1i(this.injectLocs.u_physicalMix, 0);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 
     // 5. progVort: workVelB -> workCurl
@@ -1052,6 +1064,7 @@ export class GpuWatercolorSolver {
     gl.uniform1f(this.flowEdgeLocs.u_dt, 1.0);
     gl.uniform1i(this.flowEdgeLocs.u_isFloat, this.isFloatVel ? 1 : 0);
     gl.uniform1i(this.flowEdgeLocs.u_alphaLock, 0);
+    gl.uniform1i(this.flowEdgeLocs.u_physicalMix, 0);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 
     // 9. progDrySharpen (MRT): workPigA + workVelA -> mrtWorkB
@@ -1666,6 +1679,7 @@ export class GpuWatercolorSolver {
     gl.uniform1f(this.injectLocs.u_rotCos, cosR);
     gl.uniform1f(this.injectLocs.u_rotSin, sinR);
     gl.uniform1f(this.injectLocs.u_tipPour, tipPour);
+    gl.uniform1i(this.injectLocs.u_physicalMix, (engine.physicalColorMix !== false) ? 1 : 0);
 
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     this._swapWork();
@@ -1806,6 +1820,7 @@ export class GpuWatercolorSolver {
       gl.uniform1f(this.flowEdgeLocs.u_dt, dt);
       gl.uniform1i(this.flowEdgeLocs.u_isFloat, this.isFloatVel ? 1 : 0);
       gl.uniform1i(this.flowEdgeLocs.u_alphaLock, alphaLock);
+      gl.uniform1i(this.flowEdgeLocs.u_physicalMix, (engine.physicalColorMix !== false) ? 1 : 0);
 
       gl.drawArrays(gl.TRIANGLES, 0, 6);
       this._swapWork();

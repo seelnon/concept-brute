@@ -755,12 +755,15 @@ export class GPURenderer {
     gl.uniform2f(this.quadLocs.u_boardHalfSize, engine.staticWidth * 0.5, engine.staticHeight * 0.5);
     gl.uniform1i(this.quadLocs.u_excludeActive, 0);
 
-    // 2. If Static Mode: Draw Drop Shadow, Brutalist 4px Border, and Paper Background
+    // 2. If Static Mode: Draw Drop Shadow, Brutalist Border, and Paper Background
     if (engine.isStatic) {
       const halfW = engine.staticWidth * 0.5;
       const halfH = engine.staticHeight * 0.5;
-      const borderW = 4.0 / zoom;
-      const shadowOffset = 16.0 / zoom;
+      const minBoardDim = Math.max(64.0, Math.min(engine.staticWidth, engine.staticHeight));
+      const maxWorldBorder = Math.max(4.0, minBoardDim * 0.004);
+      const maxWorldShadow = Math.max(12.0, minBoardDim * 0.012);
+      const borderW = Math.max(1.0 / zoom, Math.min(maxWorldBorder, 3.0 / zoom));
+      const shadowOffset = Math.min(maxWorldShadow, 14.0 / zoom);
 
       gl.uniform1i(this.quadLocs.u_mode, 0);
       gl.uniform1i(this.quadLocs.u_useSolidColor, 1);
@@ -771,14 +774,14 @@ export class GPURenderer {
       gl.uniform4f(this.quadLocs.u_solidColor, 0, 0, 0, 1);
       gl.uniform4f(
         this.quadLocs.u_rect,
-        -halfW + shadowOffset,
-        -halfH + shadowOffset,
-        engine.staticWidth + borderW,
-        engine.staticHeight + borderW
+        -halfW - borderW + shadowOffset,
+        -halfH - borderW + shadowOffset,
+        engine.staticWidth + borderW * 2.0,
+        engine.staticHeight + borderW * 2.0
       );
       gl.drawArrays(gl.TRIANGLES, 0, 6);
 
-      // 4px Black Outline
+      // Black Outline
       gl.uniform4f(
         this.quadLocs.u_rect,
         -halfW - borderW,

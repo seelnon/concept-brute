@@ -282,6 +282,35 @@ export class TipManager {
 
   _setupUI() {
     let drawing = false;
+    const editorContainer = document.getElementById('tip-editor-container');
+    const editorCrosshair = document.getElementById('tip-editor-crosshair');
+
+    const updateCrosshair = (e, clampInside = false) => {
+        if (!editorCrosshair) return;
+        const rect = this._editorRect || this.editorCanvas.getBoundingClientRect();
+        if (!rect || rect.width <= 0 || rect.height <= 0) return;
+        let lx = e.clientX - rect.left;
+        let ly = e.clientY - rect.top;
+        if (clampInside) {
+            lx = Math.max(0, Math.min(rect.width, lx));
+            ly = Math.max(0, Math.min(rect.height, ly));
+        } else if (lx < 0 || ly < 0 || lx > rect.width || ly > rect.height) {
+            hideCrosshair();
+            return;
+        }
+        if (editorCrosshair.style.display !== 'block') {
+            editorCrosshair.style.display = 'block';
+        }
+        editorCrosshair.style.transform = `translate3d(${lx - 8.5}px, ${ly - 8.5}px, 0)`;
+        if (editorContainer) editorContainer.classList.add('tip-crosshair-active');
+    };
+
+    const hideCrosshair = () => {
+        if (editorCrosshair && editorCrosshair.style.display !== 'none') {
+            editorCrosshair.style.display = 'none';
+        }
+        if (editorContainer) editorContainer.classList.remove('tip-crosshair-active');
+    };
 
     const startDraw = (e) => {
         if (e.button !== undefined && e.button !== 0 && e.pointerType === 'mouse') return;
@@ -291,10 +320,14 @@ export class TipManager {
         } catch (_) {}
         drawing = true;
         this._editorRect = this.editorCanvas.getBoundingClientRect();
+        updateCrosshair(e, true);
         this._drawEditor(e, true);
     };
     
     const moveDraw = (e) => {
+        if (e.pointerType !== 'touch' || drawing) {
+            updateCrosshair(e, drawing);
+        }
         if (!drawing) return;
         e.preventDefault();
         const events = (typeof e.getCoalescedEvents === 'function') ? e.getCoalescedEvents() : null;
@@ -317,15 +350,27 @@ export class TipManager {
                     this.editorCanvas.releasePointerCapture(e.pointerId);
                 }
             } catch (_) {}
-            this._updateFromEditor(); 
+            this._updateFromEditor();
+            if (!e || e.pointerType === 'touch') {
+                hideCrosshair();
+            } else {
+                updateCrosshair(e, false);
+            }
         } 
     };
 
+    this.editorCanvas.onpointerenter = (e) => {
+        this._editorRect = this.editorCanvas.getBoundingClientRect();
+        if (e.pointerType !== 'touch') updateCrosshair(e, drawing);
+    };
     this.editorCanvas.onpointerdown = startDraw;
     this.editorCanvas.onpointermove = moveDraw;
     this.editorCanvas.onpointerup = stopDraw;
     this.editorCanvas.onpointercancel = stopDraw;
     this.editorCanvas.onlostpointercapture = stopDraw;
+    this.editorCanvas.onpointerleave = () => {
+        if (!drawing) hideCrosshair();
+    };
     
     document.getElementById('btn-tip-clear').onclick = () => {
         this.editorCtx.clearRect(0,0,128,128);

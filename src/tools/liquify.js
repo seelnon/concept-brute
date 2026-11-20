@@ -31,6 +31,13 @@ export function flushLiquifyGpuCommits(engine) {
     }
 }
 
+export function invalidateLiquifySession(engine) {
+    const solver = engine && engine.gpuRenderer && engine.gpuRenderer.liquifySolver;
+    if (solver && solver.invalidateSession) {
+        solver.invalidateSession();
+    }
+}
+
 export function whenLiquifyCommitsDone(engine, cb) {
     const solver = engine && engine.gpuRenderer && engine.gpuRenderer.liquifySolver;
     if (solver && solver.whenCommitsDone) {
@@ -131,8 +138,9 @@ export function startLiquifyStroke(engine, worldPos) {
         return;
     }
 
-    // Fixed, high precision cell size of 8px (<0.01ms evaluation)
-    const cellSize = 8.0;
+    // Quality-scaled grid cell size for CPU WASM fallback (1: 10px fast, 2: 6px crisp, 3: 4px ultra)
+    const q = engine?.brush?.liquifyQuality ?? 2;
+    const cellSize = q <= 1 ? 10.0 : (q >= 3 ? 4.0 : 6.0);
 
     const sessionDim = 3072;
     let originX, originY, width, height;

@@ -1,7 +1,9 @@
 import { TOOLS } from '../constants.js';
-import { hexToRgb, rgbToHsl, hslToRgb } from '../colorUtils.js';
+import { hexToRgb, rgbToHsl, hslToRgb, rgb255ToRyb01, ryb01ToRgb255, mixRgb255Ryb } from '../colorUtils.js';
 import { GpuFluidSolver } from './fluidPaintGpu.js';
 import { backupChunkLayer } from '../engine/backupPool.js';
+
+const _rybPatchTmp = new Float32Array(6);
 
 /**
  * Physical Fluid & Tip-Guided Self-Feeding Paint Engine
@@ -1188,6 +1190,8 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
   ensureScratchBuffers(boxW, boxH);
   readPatchFromTiles(engine, fb, boxX, boxY, boxW, boxH);
 
+  const physMix = (engine.physicalColorMix !== false);
+
   // Step 3: Self-Feeding Wet Pigment Pickup (ignores same-pass paint so color doesn't drift across segments)
   const coverWindow = Math.max(24.0, radius * 2.40);
   if (!isTailFlush && pickupRatio > 0.005) {
@@ -1208,9 +1212,16 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
         const p4 = pIdx * 4;
         const a = _patchPixels[p4 + 3] / 255.0;
         if (a > 0.06) {
-          pickR += _patchPixels[p4] * a;
-          pickG += _patchPixels[p4 + 1] * a;
-          pickB += _patchPixels[p4 + 2] * a;
+          if (physMix) {
+            rgb255ToRyb01(_patchPixels[p4], _patchPixels[p4 + 1], _patchPixels[p4 + 2], _rybPatchTmp, 0);
+            pickR += _rybPatchTmp[0] * a;
+            pickG += _rybPatchTmp[1] * a;
+            pickB += _rybPatchTmp[2] * a;
+          } else {
+            pickR += _patchPixels[p4] * a;
+            pickG += _patchPixels[p4 + 1] * a;
+            pickB += _patchPixels[p4 + 2] * a;
+          }
           pickWeight += a;
         }
       }
@@ -1220,15 +1231,30 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
     if (pickWeight > 0.05 && mixPickup > 0.004) {
       const invW = 1.0 / pickWeight;
       const sampleRate = Math.min(0.65, mixPickup);
-      fb.carriedR = fb.carriedR * (1.0 - sampleRate) + (pickR * invW) * sampleRate;
-      fb.carriedG = fb.carriedG * (1.0 - sampleRate) + (pickG * invW) * sampleRate;
-      fb.carriedB = fb.carriedB * (1.0 - sampleRate) + (pickB * invW) * sampleRate;
+      if (physMix) {
+        ryb01ToRgb255(pickR * invW, pickG * invW, pickB * invW, _rybPatchTmp, 0);
+        mixRgb255Ryb(fb.carriedR, fb.carriedG, fb.carriedB, _rybPatchTmp[0], _rybPatchTmp[1], _rybPatchTmp[2], sampleRate, _rybPatchTmp, 0);
+        fb.carriedR = _rybPatchTmp[0];
+        fb.carriedG = _rybPatchTmp[1];
+        fb.carriedB = _rybPatchTmp[2];
+      } else {
+        fb.carriedR = fb.carriedR * (1.0 - sampleRate) + (pickR * invW) * sampleRate;
+        fb.carriedG = fb.carriedG * (1.0 - sampleRate) + (pickG * invW) * sampleRate;
+        fb.carriedB = fb.carriedB * (1.0 - sampleRate) + (pickB * invW) * sampleRate;
+      }
     }
 
     const replenishRate = 0.08 + retentionRatio * 0.55;
-    fb.carriedR = fb.carriedR * (1.0 - replenishRate) + stepColor.r * replenishRate;
-    fb.carriedG = fb.carriedG * (1.0 - replenishRate) + stepColor.g * replenishRate;
-    fb.carriedB = fb.carriedB * (1.0 - replenishRate) + stepColor.b * replenishRate;
+    if (physMix) {
+      mixRgb255Ryb(fb.carriedR, fb.carriedG, fb.carriedB, stepColor.r, stepColor.g, stepColor.b, replenishRate, _rybPatchTmp, 0);
+      fb.carriedR = _rybPatchTmp[0];
+      fb.carriedG = _rybPatchTmp[1];
+      fb.carriedB = _rybPatchTmp[2];
+    } else {
+      fb.carriedR = fb.carriedR * (1.0 - replenishRate) + stepColor.r * replenishRate;
+      fb.carriedG = fb.carriedG * (1.0 - replenishRate) + stepColor.g * replenishRate;
+      fb.carriedB = fb.carriedB * (1.0 - replenishRate) + stepColor.b * replenishRate;
+    }
   } else if (!isTailFlush) {
     fb.carriedR = stepColor.r;
     fb.carriedG = stepColor.g;
@@ -1489,9 +1515,26 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
           if (wetA > 0.4) {
             const ca = curA * (1.0 - m);
             const invWet = 1.0 / (ca + sumA * m);
-            wetR = (wetR * ca + sumPR * m) * invWet;
-            wetG = (wetG * ca + sumPG * m) * invWet;
-            wetB = (wetB * ca + sumPB * m) * invWet;
+            if (physMix && sumA > 0.1) {
+              const advR = sumPR / sumA;
+              const advG = sumPG / sumA;
+              const advB = sumPB / sumA;
+              if (curA <= 0.4) {
+                wetR = advR;
+                wetG = advG;
+                wetB = advB;
+              } else {
+                const advW = (sumA * m) * invWet;
+                mixRgb255Ryb(wetR, wetG, wetB, advR, advG, advB, advW, _rybPatchTmp, 0);
+                wetR = _rybPatchTmp[0];
+                wetG = _rybPatchTmp[1];
+                wetB = _rybPatchTmp[2];
+              }
+            } else {
+              wetR = (wetR * ca + sumPR * m) * invWet;
+              wetG = (wetG * ca + sumPG * m) * invWet;
+              wetB = (wetB * ca + sumPB * m) * invWet;
+            }
           }
         }
 
@@ -1547,9 +1590,16 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
             } else {
               const colorFeed = Math.max(stepA, strandCoverage * recolorRateBase * (0.35 + 0.65 * maxTipBump) * trailFade);
               const blendAmt = Math.min(1.0, colorFeed / Math.max(0.05, outA01));
-              wetR = wetR * (1.0 - blendAmt) + fR * blendAmt;
-              wetG = wetG * (1.0 - blendAmt) + fG * blendAmt;
-              wetB = wetB * (1.0 - blendAmt) + fB * blendAmt;
+              if (physMix) {
+                mixRgb255Ryb(wetR, wetG, wetB, fR, fG, fB, blendAmt, _rybPatchTmp, 0);
+                wetR = _rybPatchTmp[0];
+                wetG = _rybPatchTmp[1];
+                wetB = _rybPatchTmp[2];
+              } else {
+                wetR = wetR * (1.0 - blendAmt) + fR * blendAmt;
+                wetG = wetG * (1.0 - blendAmt) + fG * blendAmt;
+                wetB = wetB * (1.0 - blendAmt) + fB * blendAmt;
+              }
               wetA = outA01 * 255.0;
             }
 

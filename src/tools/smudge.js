@@ -1,10 +1,48 @@
-import { isMobileDevice } from '../colorUtils.js';
+import { isMobileDevice, mixRgb255Ryb } from '../colorUtils.js';
 import { GpuSmudgeSolver } from './smudgeGpu.js';
 import { backupChunkLayer } from '../engine/backupPool.js';
 
 const TILE_SIZE = 256;
 const SMUDGE_RES = 64;
 const SMUDGE_MAX = SMUDGE_RES - 1;
+const _smudgeMixTmp = new Float32Array(4);
+
+function mixPremul01Ryb(prA, pgA, pbA, aA, prB, pgB, pbB, aB, t, outArr, outOff) {
+  const outA = aA + (aB - aA) * t;
+  if (outA <= 0.002) {
+    outArr[outOff] = 0;
+    outArr[outOff + 1] = 0;
+    outArr[outOff + 2] = 0;
+    outArr[outOff + 3] = 0;
+    return;
+  }
+  if (aA <= 0.002) {
+    outArr[outOff] = prB * t;
+    outArr[outOff + 1] = pgB * t;
+    outArr[outOff + 2] = pbB * t;
+    outArr[outOff + 3] = outA;
+    return;
+  }
+  if (aB <= 0.002) {
+    const invT = 1.0 - t;
+    outArr[outOff] = prA * invT;
+    outArr[outOff + 1] = pgA * invT;
+    outArr[outOff + 2] = pbA * invT;
+    outArr[outOff + 3] = outA;
+    return;
+  }
+  let wB = (aB * t) / outA;
+  if (wB < 0) wB = 0;
+  else if (wB > 1) wB = 1;
+  const sA = 255.0 / aA;
+  const sB = 255.0 / aB;
+  mixRgb255Ryb(prA * sA, pgA * sA, pbA * sA, prB * sB, pgB * sB, pbB * sB, wB, _smudgeMixTmp, 0);
+  const scale = outA / 255.0;
+  outArr[outOff] = _smudgeMixTmp[0] * scale;
+  outArr[outOff + 1] = _smudgeMixTmp[1] * scale;
+  outArr[outOff + 2] = _smudgeMixTmp[2] * scale;
+  outArr[outOff + 3] = outA;
+}
 
 function getGpuSmudgeSolver(engine) {
   const gr = engine && engine.gpuRenderer;
@@ -306,10 +344,19 @@ function writePatch(engine, boxX, boxY, boxW, boxH, alphaLock) {
       const spb = _patchSim[si4 + 2];
       const sa = _patchSim[si4 + 3];
 
-      let outPR = opr * invC + spr * c;
-      let outPG = opg * invC + spg * c;
-      let outPB = opb * invC + spb * c;
-      let outA = oa * invC + sa * c;
+      let outPR, outPG, outPB, outA;
+      if (engine.physicalColorMix !== false) {
+        mixPremul01Ryb(opr, opg, opb, oa, spr, spg, spb, sa, c, _smudgeMixTmp, 0);
+        outPR = _smudgeMixTmp[0];
+        outPG = _smudgeMixTmp[1];
+        outPB = _smudgeMixTmp[2];
+        outA = _smudgeMixTmp[3];
+      } else {
+        outPR = opr * invC + spr * c;
+        outPG = opg * invC + spg * c;
+        outPB = opb * invC + spb * c;
+        outA = oa * invC + sa * c;
+      }
 
       if (alphaLock) {
         if (oa <= 0.001) {
@@ -570,20 +617,40 @@ export function paintSmudgeOnChunks(engine, stamps, affectedChunks, flow, opacit
           const si4 = si * 4;
           const w = depositBase * mask;
           const invW = 1.0 - w;
+          const physMix = (engine.physicalColorMix !== false);
 
           if (alphaLock) {
             const dstA = _patchSim[si4 + 3];
             if (dstA > 0.002 && bA > 0.002) {
-              const dr = _patchSim[si4] / dstA;
-              const dg = _patchSim[si4 + 1] / dstA;
-              const db = _patchSim[si4 + 2] / dstA;
-              const br = bPR / bA;
-              const bg = bPG / bA;
-              const bb = bPB / bA;
-              _patchSim[si4] = (dr * invW + br * w) * dstA;
-              _patchSim[si4 + 1] = (dg * invW + bg * w) * dstA;
-              _patchSim[si4 + 2] = (db * invW + bb * w) * dstA;
+              const sD = 255.0 / dstA;
+              const sB = 255.0 / bA;
+              if (physMix) {
+                mixRgb255Ryb(
+                  _patchSim[si4] * sD, _patchSim[si4 + 1] * sD, _patchSim[si4 + 2] * sD,
+                  bPR * sB, bPG * sB, bPB * sB,
+                  w, _smudgeMixTmp, 0
+                );
+                const scaleD = dstA / 255.0;
+                _patchSim[si4] = _smudgeMixTmp[0] * scaleD;
+                _patchSim[si4 + 1] = _smudgeMixTmp[1] * scaleD;
+                _patchSim[si4 + 2] = _smudgeMixTmp[2] * scaleD;
+              } else {
+                const dr = _patchSim[si4] / dstA;
+                const dg = _patchSim[si4 + 1] / dstA;
+                const db = _patchSim[si4 + 2] / dstA;
+                const br = bPR / bA;
+                const bg = bPG / bA;
+                const bb = bPB / bA;
+                _patchSim[si4] = (dr * invW + br * w) * dstA;
+                _patchSim[si4 + 1] = (dg * invW + bg * w) * dstA;
+                _patchSim[si4 + 2] = (db * invW + bb * w) * dstA;
+              }
             }
+          } else if (physMix) {
+            mixPremul01Ryb(
+              _patchSim[si4], _patchSim[si4 + 1], _patchSim[si4 + 2], _patchSim[si4 + 3],
+              bPR, bPG, bPB, bA, w, _patchSim, si4
+            );
           } else {
             _patchSim[si4] = _patchSim[si4] * invW + bPR * w;
             _patchSim[si4 + 1] = _patchSim[si4 + 1] * invW + bPG * w;
@@ -604,16 +671,25 @@ export function paintSmudgeOnChunks(engine, stamps, affectedChunks, flow, opacit
       buf.set(_tmpSample);
       engine.smudgeDirty = true;
     } else if (pickupBase > 0.001) {
+      const physMix = (engine.physicalColorMix !== false);
       for (let i = 0; i < SMUDGE_RES * SMUDGE_RES; i++) {
         const mask = _tipMask[i];
         if (mask <= 0.002) continue;
         const p = pickupBase * (0.25 + 0.75 * mask);
-        const invP = 1.0 - p;
         const i4 = i * 4;
-        buf[i4] = buf[i4] * invP + _tmpSample[i4] * p;
-        buf[i4 + 1] = buf[i4 + 1] * invP + _tmpSample[i4 + 1] * p;
-        buf[i4 + 2] = buf[i4 + 2] * invP + _tmpSample[i4 + 2] * p;
-        buf[i4 + 3] = buf[i4 + 3] * invP + _tmpSample[i4 + 3] * p;
+        if (physMix) {
+          mixPremul01Ryb(
+            buf[i4], buf[i4 + 1], buf[i4 + 2], buf[i4 + 3],
+            _tmpSample[i4], _tmpSample[i4 + 1], _tmpSample[i4 + 2], _tmpSample[i4 + 3],
+            p, buf, i4
+          );
+        } else {
+          const invP = 1.0 - p;
+          buf[i4] = buf[i4] * invP + _tmpSample[i4] * p;
+          buf[i4 + 1] = buf[i4 + 1] * invP + _tmpSample[i4 + 1] * p;
+          buf[i4 + 2] = buf[i4 + 2] * invP + _tmpSample[i4 + 2] * p;
+          buf[i4 + 3] = buf[i4 + 3] * invP + _tmpSample[i4 + 3] * p;
+        }
       }
     }
   }

@@ -1,5 +1,4 @@
 import { TOOLS, LAYERS_COUNT } from './constants.js';
-import { PaletteManager } from './paletteManager.js';
 import { syncFluidSettingsFromTip } from './tools/fluidPaint.js';
 import { syncAirSettingsFromTip } from './tools/airPaint.js';
 
@@ -250,6 +249,16 @@ export function setupUI(app) {
     document.getElementById('export-height').oninput = updateDim;
 
     document.getElementById('btn-export-final').onclick = () => app._performExport();
+
+    const btnResetUi = document.getElementById('btn-reset-ui');
+    if (btnResetUi) {
+        btnResetUi.onclick = () => {
+            if (typeof app.resetUILayout === 'function') {
+                app.resetUILayout();
+                app._status('UI RESET TO VIEW');
+            }
+        };
+    }
 
     let resetClicks = 0;
     document.getElementById('btn-clear-storage').onclick = async (e) => {
@@ -663,13 +672,6 @@ export function setupUI(app) {
     // Palette
     app._renderPalette();
 
-    document.getElementById('btn-reset-palette').onclick = () => {
-        app.palette = new PaletteManager();
-        app._renderPalette();
-        app.storage.saveSetting('palette', app.palette.baseColors);
-        app.setColor('#333333');
-    };
-
     // Layers
     const layerStack = document.getElementById('layer-stack');
     layerStack.innerHTML = '';
@@ -769,6 +771,24 @@ export function setupUI(app) {
           if (falloffVal) falloffVal.innerText = `${val}%`;
           app.updateActiveSetting('falloff', val / 100);
           if (app.engine) app.engine._updateBrushCursor();
+        };
+    }
+
+    const liqQualitySlider = document.getElementById('brush-liquify-quality');
+    const liqQualityVal = document.getElementById('liquify-quality-val');
+    if (liqQualitySlider) {
+        const modeNames = { 1: 'FAST', 2: 'CRISP', 3: 'ULTRA' };
+        const modeMsgs = {
+            1: 'LIQUIFY MODE: FAST (MAX FPS, SOFTER ON ZOOM/REPEATS)',
+            2: 'LIQUIFY MODE: CRISP (BICUBIC + 1:1 GRID + NO-BLUR SESSION)',
+            3: 'LIQUIFY MODE: ULTRA (LANCZOS-3 NON-DESTRUCTIVE, SLOWER AT HUGE SIZE)'
+        };
+        liqQualitySlider.oninput = (e) => {
+          const val = Math.max(1, Math.min(3, parseInt(e.target.value, 10) || 2));
+          if (liqQualityVal) liqQualityVal.innerText = modeNames[val] || 'CRISP';
+          app.updateActiveSetting('liquifyQuality', val);
+          app.engine?.invalidateLiquifySession?.();
+          app._status(modeMsgs[val]);
         };
     }
 
@@ -1201,6 +1221,9 @@ export function setupUI(app) {
             const ts = app.getCurrentTipSettings();
             if (ts) syncAirSettingsFromTip(ts);
         }
+        if (app.engine && app.engine._updateBrushCursor) {
+            app.engine._updateBrushCursor();
+        }
     };
 
     const bindAirSlider = (inputId, valId, settingKey, unit = '%') => {
@@ -1271,6 +1294,25 @@ export function setupUI(app) {
     bindAirSlider('adv-air-tip-angle', 'adv-air-tip-angle-val', 'airTipAngle', '°');
     bindAirSlider('adv-air-tip-hardness', 'adv-air-tip-hardness-val', 'airTipHardness', '%');
     bindAirSlider('adv-air-pressure-flow', 'adv-air-pressure-flow-val', 'airPressureFlow', '%');
+
+    const toggleCanvasPhysicalMix = (checked) => {
+        app.palette.config.canvasMixMode = checked ? 'physical' : 'digital';
+        app.palette.saveConfig();
+        app.storage?.saveSetting('palette', app.palette.getSerializedState());
+        app.syncCanvasMixMode?.();
+        app.paletteStudio?.renderStudioControls();
+        app._status(checked ? 'CANVAS PAINT MIX: PHYSICAL RYB (Y+B=G)' : 'CANVAS PAINT MIX: DIGITAL RGB');
+    };
+
+    const chkAirPhysicalMix = document.getElementById('chk-air-physical-mix');
+    if (chkAirPhysicalMix) {
+        chkAirPhysicalMix.onchange = (e) => toggleCanvasPhysicalMix(!!e.target.checked);
+    }
+
+    const chkFluidPhysicalMix = document.getElementById('chk-fluid-physical-mix');
+    if (chkFluidPhysicalMix) {
+        chkFluidPhysicalMix.onchange = (e) => toggleCanvasPhysicalMix(!!e.target.checked);
+    }
 
     // Advanced Fluid Paint Dynamics
     const bindAdvFluidSlider = (inputId, valId, settingKey, unit = '%') => {

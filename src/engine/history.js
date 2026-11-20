@@ -67,6 +67,7 @@ export function undo() {
 
   if (this.history.length === 0) return;
   if (this.flushPendingGpuCommits) this.flushPendingGpuCommits();
+  if (this.invalidateLiquifySession) this.invalidateLiquifySession();
   
   const action = this.history.pop();
   if (action && action.type === 'stroke' && this.app && this.app.recorder) {
@@ -139,6 +140,7 @@ export function redo() {
 
   if (this.redoStack.length === 0) return;
   if (this.flushPendingGpuCommits) this.flushPendingGpuCommits();
+  if (this.invalidateLiquifySession) this.invalidateLiquifySession();
   
   const action = this.redoStack.pop();
   if (action && action.type === 'stroke' && this.app && this.app.recorder) {

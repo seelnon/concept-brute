@@ -1,7 +1,7 @@
 import { Engine } from './engine.js';
 import { SketchStorage } from './storage.js';
 import { TOOLS, LAYERS_COUNT, SECTOR_SIZE } from './constants.js';
-import { PaletteManager } from './paletteManager.js';
+import { PaletteManager, PaletteStudio } from './paletteManager.js';
 import { TipManager } from './tipManager.js';
 import { ImgHandler } from './imgHandler.js';
 import { hexToRgb, rgbToHex, rgbToHsv, hsvToRgb, isCanvasEmpty } from './colorUtils.js';
@@ -56,9 +56,10 @@ class App {
         const indices = [0, 1, 5, 6, 10, 11];
         indices.forEach((extractedIdx, paletteIdx) => {
             if (colors[extractedIdx]) {
-                this.palette.setBaseColor(paletteIdx, colors[extractedIdx]);
+                this.palette.setBaseColor(paletteIdx, colors[extractedIdx], { skipSymmetry: true });
             }
         });
+        this.palette.saveConfig();
         this._renderPalette();
         if (colors.length > 0) {
             this.setColor(colors[0]);
@@ -66,11 +67,14 @@ class App {
         }
         this._status('PALETTE UPDATED (6 SELECTED)');
         this._updateRefImageList();
-        localStorage.setItem('canvas_palette', JSON.stringify(this.palette.baseColors));
+        this.storage?.saveSetting('palette', this.palette.getSerializedState());
+        this.paletteStudio?.renderStudioDynamicSections();
     };
     this.storage = new SketchStorage();
     this.engine.storage = this.storage;
     this.palette = new PaletteManager();
+    this.engine.physicalColorMix = (this.palette.config.canvasMixMode !== 'digital');
+    this.paletteStudio = new PaletteStudio(this);
     this.imgHandler = new ImgHandler(this.engine, () => {
         this._updateRefImageList();
         this._triggerAutoSave();
@@ -300,6 +304,12 @@ class App {
     this.init();
     this._initToggles();
     this._initCategories();
+
+    window.addEventListener('resize', () => {
+        if (typeof this.clampPanelsToView === 'function') {
+            this.clampPanelsToView();
+        }
+    });
 
     this.recorder = new TimelapseRecorder(this);
     this.recorder.initEventListeners();
@@ -604,10 +614,22 @@ class App {
     }
   }
 
+  syncCanvasMixMode() {
+    const isPhys = (this.palette?.config?.canvasMixMode !== 'digital');
+    if (this.engine) {
+      this.engine.physicalColorMix = isPhys;
+    }
+    const chkFluid = document.getElementById('chk-fluid-physical-mix');
+    if (chkFluid) chkFluid.checked = isPhys;
+    const chkAir = document.getElementById('chk-air-physical-mix');
+    if (chkAir) chkAir.checked = isPhys;
+  }
+
   _setupUI() {
     setupUI(this);
     initFluidPaint(this);
     initAirPaint(this);
+    this.syncCanvasMixMode();
   }
 
   _makeDraggable(el, handle) {
@@ -623,7 +645,7 @@ class App {
       e.preventDefault();
       e.stopPropagation();
       
-      if (el.id === 'modal-ref-editor' || el.id === 'modal-new-project' || el.id === 'modal-export') {
+      if (el.id === 'modal-ref-editor' || el.id === 'modal-color-studio' || el.id === 'modal-new-project' || el.id === 'modal-export') {
         const rect = el.getBoundingClientRect();
         el.style.transform = 'none';
         el.style.left = rect.left + 'px';
@@ -666,7 +688,7 @@ class App {
         }
       } catch (_) {}
       
-      if (el.id !== 'modal-ref-editor' && el.id !== 'modal-new-project' && el.id !== 'modal-export') {
+      if (el.id !== 'modal-ref-editor' && el.id !== 'modal-color-studio' && el.id !== 'modal-new-project' && el.id !== 'modal-export') {
         self.windowPositions[el.id] = {
             top: el.offsetTop,
             left: el.offsetLeft
@@ -751,7 +773,11 @@ class App {
         if (enableEl) enableEl.checked = enabledVal;
 
         const savedPalette = settings['palette'];
-        if (savedPalette) this.palette.baseColors = savedPalette;
+        if (savedPalette) {
+            this.palette.applySerializedState(savedPalette, { save: false });
+        }
+        this.syncCanvasMixMode();
+        this.paletteStudio?.applyDockedPanelLayout();
 
         // Reset default background/grid settings so they don't leak from previous project if not present
         this.engine.canvasBg = '#ffffff';
@@ -1018,31 +1044,141 @@ class App {
   }
 
   _restoreWindowPositions() {
-      const vw = window.innerWidth;
-      const vh = window.innerHeight;
-
       Object.keys(this.windowPositions).forEach(id => {
-          if (id === 'modal-ref-editor' || id === 'modal-new-project' || id === 'modal-export') return;
+          if (id === 'modal-ref-editor' || id === 'modal-color-studio' || id === 'modal-new-project' || id === 'modal-export') return;
           const el = document.getElementById(id);
           if (!el) return;
 
-          let { top, left } = this.windowPositions[id];
-          
-          // Force layout if not visible to get dimensions, or fallback to defaults
-          const w = el.offsetWidth || (id === 'panel-brush-tips' ? 180 : 200);
-          const h = el.offsetHeight || 200;
+          const pos = this.windowPositions[id];
+          if (!pos || typeof pos.left !== 'number' || typeof pos.top !== 'number') return;
 
-          // Strictly clamp within viewport
-          if (left + w > vw) left = vw - w;
-          if (left < 0) left = 0;
-          if (top + h > vh) top = vh - h;
-          if (top < 0) top = 0;
-
-          el.style.top = `${top}px`;
-          el.style.left = `${left}px`;
+          el.style.top = `${pos.top}px`;
+          el.style.left = `${pos.left}px`;
           el.style.right = 'auto';
           el.style.bottom = 'auto';
       });
+      this.clampPanelsToView();
+  }
+
+  _getPanelDefaultDimensions(id, el) {
+      const defaults = {
+          'panel-color': [192, 290],
+          'panel-images': [144, 210],
+          'panel-brush-tips': [168, 420],
+          'panel-layers': [160, 260],
+          'panel-touch-shortcuts': [144, 240],
+          'panel-settings': [320, 500],
+          'panel-advanced-brush': [250, 420],
+          'panel-recording': [290, 480],
+          'panel-fluid': [180, 310],
+          'panel-air': [184, 340],
+          'panel-perf-monitor': [320, 440]
+      };
+      const fallback = defaults[id] || [220, 240];
+      const w = (el && el.offsetWidth > 0) ? el.offsetWidth : (parseInt(el?.style?.width, 10) || fallback[0]);
+      const h = (el && el.offsetHeight > 0) ? el.offsetHeight : (parseInt(el?.style?.height, 10) || fallback[1]);
+      return { w, h };
+  }
+
+  clampPanelsToView() {
+      const panelIds = [
+          'panel-color',
+          'panel-images',
+          'panel-brush-tips',
+          'panel-layers',
+          'panel-touch-shortcuts',
+          'panel-settings',
+          'panel-advanced-brush',
+          'panel-recording',
+          'panel-fluid',
+          'panel-air',
+          'panel-perf-monitor'
+      ];
+      const canvasContainer = document.getElementById('canvas-container');
+      const topBar = document.getElementById('top-bar');
+      const topBarH = (topBar && topBar.offsetHeight > 0) ? topBar.offsetHeight : 48;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const pad = 8;
+
+      panelIds.forEach(id => {
+          const el = document.getElementById(id);
+          if (!el) return;
+
+          const inCanvasContainer = !!(canvasContainer && canvasContainer.contains(el));
+          const maxW = inCanvasContainer ? (canvasContainer.clientWidth || vw) : vw;
+          const maxH = inCanvasContainer ? (canvasContainer.clientHeight || (vh - topBarH)) : vh;
+          const minX = pad;
+          const minY = inCanvasContainer ? pad : (topBarH + pad);
+          const { w, h } = this._getPanelDefaultDimensions(id, el);
+
+          let curLeft, curTop;
+          if (el.offsetWidth > 0 && el.offsetHeight > 0) {
+              curLeft = el.offsetLeft;
+              curTop = el.offsetTop;
+          } else {
+              curLeft = parseFloat(el.style.left);
+              curTop = parseFloat(el.style.top);
+              if (Number.isNaN(curLeft) || Number.isNaN(curTop)) return;
+          }
+
+          const maxLeft = Math.max(minX, maxW - w - pad);
+          const maxTop = Math.max(minY, maxH - h - pad);
+          const clampedLeft = Math.round(Math.max(minX, Math.min(maxLeft, curLeft)));
+          const clampedTop = Math.round(Math.max(minY, Math.min(maxTop, curTop)));
+
+          if (Math.abs(clampedLeft - curLeft) > 0.5 || Math.abs(clampedTop - curTop) > 0.5) {
+              el.style.left = `${clampedLeft}px`;
+              el.style.top = `${clampedTop}px`;
+              el.style.right = 'auto';
+              el.style.bottom = 'auto';
+              if (this.windowPositions[id]) {
+                  this.windowPositions[id] = { top: clampedTop, left: clampedLeft };
+              }
+          }
+      });
+  }
+
+  resetUILayout() {
+      this.windowPositions = {};
+      localStorage.removeItem('window_positions');
+
+      const cssDefaultPanels = [
+          'panel-color',
+          'panel-images',
+          'panel-brush-tips',
+          'panel-layers',
+          'panel-touch-shortcuts',
+          'panel-settings',
+          'panel-advanced-brush'
+      ];
+      cssDefaultPanels.forEach(id => {
+          const el = document.getElementById(id);
+          if (!el) return;
+          el.style.top = '';
+          el.style.left = '';
+          el.style.right = '';
+          el.style.bottom = '';
+          el.style.transform = '';
+      });
+
+      const inlineDefaults = {
+          'panel-recording': { left: '340px', top: '180px' },
+          'panel-fluid': { left: '20px', top: '120px' },
+          'panel-air': { left: '20px', top: '120px' },
+          'panel-perf-monitor': { left: '280px', top: '80px' }
+      };
+      Object.entries(inlineDefaults).forEach(([id, coords]) => {
+          const el = document.getElementById(id);
+          if (!el) return;
+          el.style.left = coords.left;
+          el.style.top = coords.top;
+          el.style.right = 'auto';
+          el.style.bottom = 'auto';
+      });
+
+      this.clampPanelsToView();
+      this._saveWindowPositions();
   }
 
   _updateZoomUI() {
@@ -1442,103 +1578,79 @@ class App {
 
   _renderPalette() {
     const paletteEl = document.getElementById('palette');
+    if (!paletteEl) return;
+    const cfg = this.palette.config || {};
+    const swHeight = Math.max(12, Math.min(44, Number(cfg.swatchHeight) || 24));
+    const swGap = Math.max(0, Math.min(10, Number(cfg.swatchGap) || 2));
+    const swRadius = cfg.swatchShape === 'rounded' ? '4px' : '0px';
+
+    paletteEl.style.gap = `${swGap}px`;
     const frag = document.createDocumentFragment();
     const rows = this.palette.generate();
 
     rows.forEach((row) => {
         const rowEl = document.createElement('div');
         rowEl.className = 'palette-row';
-        
+        rowEl.style.gap = `${swGap}px`;
+        rowEl.style.minHeight = `${swHeight}px`;
+
         row.forEach(item => {
             const swatch = document.createElement('div');
             swatch.className = `swatch ${item.type}`;
             if (item.active) swatch.classList.add('active-swatch');
+            if (item.locked) swatch.classList.add('locked-swatch');
             swatch.style.backgroundColor = item.color;
+            swatch.style.height = `${swHeight}px`;
+            swatch.style.borderRadius = swRadius;
             if (item.span) swatch.style.flex = item.span;
-            
+
             swatch.onclick = (e) => {
                 e.stopPropagation();
                 if (item.type === 'main') {
                     this.palette.activeIndex = item.index;
-                    // Only update the actual influence colors if we picked from the main row
                     this._updateHSVFromHex(item.color);
-                    this._applyHSV(); // This syncs and regenerates palette
+                    this.setColor(item.color);
+                    this._renderPalette();
+                    this.paletteStudio?.renderStudioDynamicSections();
+                } else if (e.shiftKey) {
+                    // Shift+Click promotes generated swatch into active main anchor
+                    this.palette.setBaseColor(this.palette.activeIndex, item.color);
+                    this.setColor(item.color);
+                    this._renderPalette();
+                    this.storage?.saveSetting('palette', this.palette.getSerializedState());
+                    this.paletteStudio?.renderStudioDynamicSections();
                 } else {
-                    // Just set the color for the brush, don't update row 1 or regenerate
                     this.setColor(item.color);
                 }
             };
-            
-            swatch.title = item.color;
+
+            swatch.title = item.type === 'main'
+                ? `${item.color} (Anchor ${item.index + 1}${item.locked ? ' · Locked' : ''})`
+                : `${item.color} (Click to use · Shift+Click to set active anchor)`;
             rowEl.appendChild(swatch);
         });
-        
+
         frag.appendChild(rowEl);
     });
-    
+
     paletteEl.innerHTML = '';
     paletteEl.appendChild(frag);
   }
 
   _initColorSelector() {
-    const svPicker = document.getElementById('sv-picker');
-    const svCursor = svPicker.querySelector('.sv-cursor');
-    const hueSlider = document.getElementById('hue-slider');
-
-    const updateFromSV = (e) => {
-        const rect = svPicker.getBoundingClientRect();
-        let x = e.clientX - rect.left;
-        let y = e.clientY - rect.top;
-        x = Math.max(0, Math.min(rect.width, x));
-        y = Math.max(0, Math.min(rect.height, y));
-        
-        this.hsv.s = (x / rect.width) * 100;
-        this.hsv.v = 100 - (y / rect.height) * 100;
-        
-        this._applyHSV();
-    };
-
-    svPicker.onpointerdown = (e) => {
-        try {
-            svPicker.setPointerCapture(e.pointerId);
-        } catch (_) {}
-        updateFromSV(e);
-        
-        const onPointerMove = (pe) => updateFromSV(pe);
-        const onPointerUp = (pe) => {
-            svPicker.removeEventListener('pointermove', onPointerMove);
-            svPicker.removeEventListener('pointerup', onPointerUp);
-            svPicker.removeEventListener('pointercancel', onPointerUp);
-            svPicker.removeEventListener('lostpointercapture', onPointerUp);
-            try {
-                if (pe && pe.pointerId !== undefined && svPicker.hasPointerCapture?.(pe.pointerId)) {
-                    svPicker.releasePointerCapture(pe.pointerId);
-                }
-            } catch (_) {}
-        };
-        
-        svPicker.addEventListener('pointermove', onPointerMove);
-        svPicker.addEventListener('pointerup', onPointerUp);
-        svPicker.addEventListener('pointercancel', onPointerUp);
-        svPicker.addEventListener('lostpointercapture', onPointerUp);
-    };
-
-    hueSlider.oninput = (e) => {
-        this.hsv.h = parseFloat(e.target.value);
-        this._applyHSV();
-    };
+    this.paletteStudio?.init();
   }
 
   _applyHSV() {
     const rgb = hsvToRgb(this.hsv.h, this.hsv.s, this.hsv.v);
     const hex = rgbToHex(rgb.r, rgb.g, rgb.b);
-    
-    // Update active base color
+
     this.palette.setBaseColor(this.palette.activeIndex, hex);
     this.setColor(hex);
     this._renderPalette();
     this._updateColorUI();
-    this.storage.saveSetting('palette', this.palette.baseColors);
+    this.storage.saveSetting('palette', this.palette.getSerializedState());
+    this.paletteStudio?.renderStudioDynamicSections();
   }
 
   _updateHSVFromHex(hex) {
@@ -1548,20 +1660,20 @@ class App {
   }
 
   _updateColorUI() {
+    if (this.paletteStudio && this.paletteStudio._initialized) {
+        this.paletteStudio.syncColorUI(this.engine?.brush?.color || this.palette.baseColors[this.palette.activeIndex]);
+        return;
+    }
     const svPicker = document.getElementById('sv-picker');
-    const svCursor = svPicker.querySelector('.sv-cursor');
+    const svCursor = svPicker?.querySelector('.sv-cursor');
     const hueSlider = document.getElementById('hue-slider');
+    if (!svPicker || !svCursor || !hueSlider) return;
 
-    // Update SV background to reflect hue
     const pureRgb = hsvToRgb(this.hsv.h, 100, 100);
     const pureHex = rgbToHex(pureRgb.r, pureRgb.g, pureRgb.b);
     svPicker.style.backgroundColor = pureHex;
-
-    // Position cursor
     svCursor.style.left = `${this.hsv.s}%`;
     svCursor.style.top = `${100 - this.hsv.v}%`;
-
-    // Update hue slider
     hueSlider.value = this.hsv.h;
   }
 
@@ -1588,6 +1700,10 @@ class App {
         const falloffCtrl = document.getElementById('control-falloff');
         if (falloffCtrl) {
             falloffCtrl.style.display = (tool === TOOLS.LIQUIFY) ? 'block' : 'none';
+        }
+        const liqQualityCtrl = document.getElementById('control-liquify-quality');
+        if (liqQualityCtrl) {
+            liqQualityCtrl.style.display = (tool === TOOLS.LIQUIFY) ? 'block' : 'none';
         }
 
         const fluidityCtrl = document.getElementById('control-fluidity');
@@ -1638,6 +1754,15 @@ class App {
             falloffEl.value = fValue * 100;
             const fValDisplay = document.getElementById('falloff-val');
             if (fValDisplay) fValDisplay.innerText = `${Math.round(fValue * 100)}%`;
+        }
+
+        const liqQualEl = document.getElementById('brush-liquify-quality');
+        if (liqQualEl) {
+            const qModeNames = { 1: 'FAST', 2: 'CRISP', 3: 'ULTRA' };
+            const qVal = Math.max(1, Math.min(3, parseInt(tipSettings.liquifyQuality ?? 2, 10) || 2));
+            liqQualEl.value = qVal;
+            const liqQualDisplay = document.getElementById('liquify-quality-val');
+            if (liqQualDisplay) liqQualDisplay.innerText = qModeNames[qVal] || 'CRISP';
         }
 
 
@@ -2067,6 +2192,9 @@ class App {
             try { this.engine._endStroke(); } catch (e) { this.engine.isDrawing = false; }
         }
         this.engine._resetInteractionState({ cancelActive: false });
+        if (tool !== TOOLS.LIQUIFY && this.engine.invalidateLiquifySession) {
+            this.engine.invalidateLiquifySession();
+        }
     }
 
     // Deselect reference image when switching to anything that isn't generic move, only if one was selected
@@ -2075,8 +2203,21 @@ class App {
         this.engine.refresh();
     }
 
+    const isCanvasPaintTool = (
+        tool === TOOLS.BRUSH ||
+        tool === TOOLS.ERASER ||
+        tool === TOOLS.WIREFRAME ||
+        tool === TOOLS.LASSO ||
+        tool === TOOLS.SMUDGE ||
+        tool === TOOLS.LIQUIFY ||
+        tool === TOOLS.FLUID ||
+        tool === TOOLS.AIR
+    );
     if (tool === TOOLS.REF_MOVE) {
         if (this.engine.activeLayer !== 0) this.setLayer(0);
+    } else if (isCanvasPaintTool && this.engine && this.engine.activeLayer === 0) {
+        const targetLayer = (this.lastPaintLayer >= 1 && this.lastPaintLayer < LAYERS_COUNT) ? this.lastPaintLayer : 2;
+        this.setLayer(targetLayer);
     }
 
     const sensitivityGroup = document.querySelector('.sensitivity-group');

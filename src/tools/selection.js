@@ -992,6 +992,7 @@ export function processLassoSelection(engine, e = null) {
 export function applySelection(engine) {
     if (!engine.floatingSelection) return;
     if (engine.flushPendingGpuCommits) engine.flushPendingGpuCommits();
+    if (engine.invalidateLiquifySession) engine.invalidateLiquifySession();
     
     const sel = engine.floatingSelection;
     const { canvas, x, y, rotation, opacity, mirrorX, mirrorY } = sel;
