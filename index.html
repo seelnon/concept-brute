@@ -92,6 +92,14 @@
                 <input type="range" id="brush-falloff" min="0" max="100" value="50" class="brutal-range main-range">
             </div>
 
+            <div class="slider-container" id="control-liquify-quality" style="display: none;" title="1 FAST: max FPS, blurs more on zoom/repeats | 2 CRISP: Bicubic + 1:1 grid + no-blur session | 3 ULTRA: Lanczos-3 non-destructive (can lag on huge brushes)">
+                <div class="slider-header">
+                    <label class="slider-label">QUALITY</label>
+                    <span id="liquify-quality-val" class="slider-value">CRISP</span>
+                </div>
+                <input type="range" id="brush-liquify-quality" min="1" max="3" step="1" value="2" class="brutal-range main-range">
+            </div>
+
             <div class="slider-container" id="control-fluidity" style="display: none;">
                 <div class="slider-header">
                     <label class="slider-label">FLUIDITY</label>
@@ -217,7 +225,7 @@
             <span class="panel-title">COLOR PALETTE</span>
             <div style="display: flex; align-items: center; gap: 6px;">
               <button id="btn-toggle-texture" class="shortcut-toggle-btn" title="Toggle Texture Reveal Mode" aria-label="Toggle Texture Reveal Mode"></button>
-              <div id="current-color-preview"></div>
+              <button id="current-color-preview" type="button" title="Color Square — Click to open Color Space &amp; Palette Studio" aria-label="Open Color Space &amp; Palette Studio"></button>
             </div>
           </div>
           
@@ -245,17 +253,31 @@
              <input type="range" id="slider-tex-size" min="4" max="64" value="16" class="brutal-range" style="width: 100%; height: 12px; cursor: pointer;">
           </div>
           
-          <div class="panel-content">
+          <div class="panel-content" id="panel-color-content">
              <!-- CUSTOM COLOR SELECTOR -->
              <div id="color-selector">
-                <div id="sv-picker">
-                   <div class="sv-cursor"></div>
+                <div id="color-picker-square-wrap">
+                    <div id="sv-picker">
+                       <div class="sv-cursor"></div>
+                    </div>
+                    <input type="range" id="hue-slider" min="0" max="360" value="0">
                 </div>
-                <input type="range" id="hue-slider" min="0" max="360" value="0">
+                <div id="color-picker-geo-wrap" class="hidden">
+                    <canvas id="color-geo-canvas" width="200" height="200"></canvas>
+                    <div id="color-wheel-val-wrap" class="hidden" style="margin-top: 4px;">
+                        <input type="range" id="color-wheel-val-slider" min="0" max="100" value="100">
+                    </div>
+                </div>
+             </div>
+             <!-- DYNAMIC CHECKBOX-SELECTED SLIDERS -->
+             <div id="palette-live-sliders" class="hidden"></div>
+             <!-- HEX + STUDIO TRIGGER -->
+             <div id="palette-hex-row">
+                <input type="text" id="palette-hex-input" maxlength="7" value="#B91C1C" spellcheck="false" title="Active Color Hex">
+                <button id="btn-open-color-studio" class="mini-btn" type="button" title="Open Color Space &amp; Palette Studio">LAB</button>
              </div>
              <!-- SWATCHES -->
              <div id="palette"></div>
-             <button id="btn-reset-palette" class="brutal-btn full-width">Reset</button>
           </div>
         </div>
 
@@ -284,6 +306,10 @@
              <!-- TIP PREVIEW / EDITOR -->
              <div id="tip-editor-container">
                 <canvas id="tip-editor-canvas" width="128" height="128"></canvas>
+                <div id="tip-editor-crosshair">
+                  <div class="cross-h"></div>
+                  <div class="cross-v"></div>
+                </div>
              </div>
              <div id="tip-editor-toolbar">
                 <button id="btn-tip-capture" class="mini-btn" title="Snap Brush Tip from Canvas">SNAP</button>
@@ -665,6 +691,13 @@
                           <span class="checkbox-custom"></span>
                        </div>
                     </div>
+                 </div>
+
+                 <div class="settings-divider"></div>
+                 <div class="settings-group">
+                    <label class="settings-label">WORKSPACE LAYOUT</label>
+                    <button id="btn-reset-ui" class="brutal-btn full-width" style="background: #ffffff; color: #000000;">RESET UI POSITIONS</button>
+                    <p style="font-size: 8px; margin-top: 6px; opacity: 0.7; line-height: 1.2;">Pushes all floating panels inside the active view and resets stuck window positions.</p>
                  </div>
 
                  <div class="settings-divider"></div>
@@ -1324,6 +1357,253 @@
         </div>
     </div>
 
+    <!-- COLOR SPACE & PALETTE STUDIO MODAL (UNDOCKED) -->
+    <div id="modal-color-studio" class="ui-panel hidden" style="width: 90vw; max-width: 980px; height: 88vh; max-height: 700px; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 10006; box-shadow: 12px 12px 0 0 #000; overflow: hidden; display: flex; flex-direction: column;">
+        <div id="handle-color-studio" class="panel-handle" style="display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: black; color: white;">
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <span class="panel-title" style="font-weight: 950; letter-spacing: 1px; font-size: 11px;">COLOR SPACE &amp; PALETTE STUDIO</span>
+                <span id="cs-wheel-readout" style="font-size: 9px; font-weight: 900; background: #222; border: 1px solid #555; padding: 2px 6px; letter-spacing: 0.4px;">RYB · 0° · #B91C1C</span>
+            </div>
+            <button id="btn-close-color-studio" class="mini-btn" style="background: white; border: 1px solid black; font-weight: 950; font-size: 10px; padding: 2px 6px; cursor: pointer;">X</button>
+        </div>
+
+        <div class="panel-content" style="display: flex; flex: 1; height: calc(100% - 30px); min-height: 0; box-sizing: border-box; overflow: hidden; background: #1e1e1e; padding: 0;">
+
+            <!-- LEFT COLUMN: INTERACTIVE WHEEL + 6 ANCHOR CARDS + LIVE PREVIEW + PRESETS -->
+            <div id="cs-workspace-col" style="flex: 1; display: flex; flex-direction: column; padding: 12px; min-width: 0; overflow-y: auto; gap: 10px; background: #1c1c1c; color: #ffffff;">
+
+                <!-- WHEEL SPACE + SYMMETRY TOP STRIP -->
+                <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; border: 2px solid #000; background: #2a2a2a; padding: 6px 8px;">
+                    <div style="display: flex; align-items: center; gap: 4px;">
+                        <span style="font-size: 8px; font-weight: 900; color: #bbb; margin-right: 4px;">WHEEL:</span>
+                        <button class="mini-btn cs-seg-btn" data-wheel-space="ryb" title="Painterly RYB Wheel (Y+B=Green)">RYB</button>
+                        <button class="mini-btn cs-seg-btn" data-wheel-space="oklch" title="Perceptual Uniform OKLCH Wheel">OKLCH</button>
+                        <button class="mini-btn cs-seg-btn" data-wheel-space="hsl" title="Standard Digital RGB Wheel">RGB</button>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 6px; flex: 1; min-width: 180px; justify-content: flex-end;">
+                        <span style="font-size: 8px; font-weight: 900; color: #bbb;">SYMMETRY:</span>
+                        <select id="cs-symmetry-select" style="border: 2px solid #000; background: #fff; color: #000; font-family: inherit; font-size: 9px; font-weight: 900; padding: 3px 6px; flex: 1; max-width: 190px;"></select>
+                    </div>
+                </div>
+
+                <!-- WHEEL + ANCHORS ROW, AND DARK DUAL PREVIEW (UNDER CIRCLE) + PRESETS (RIGHT) -->
+                <div style="display: grid; grid-template-columns: 274px minmax(0, 1fr); gap: 10px; align-items: stretch;">
+
+                    <!-- TOP-LEFT: HARMONY WHEEL CIRCLE (DARK) -->
+                    <div style="position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; background: #141414; border: 2px solid #000; padding: 8px;">
+                        <canvas id="cs-harmony-wheel" width="290" height="290" style="width: 240px; height: 240px; cursor: crosshair; touch-action: none;"></canvas>
+                        <div style="font-size: 7.5px; color: #999; margin-top: 4px; font-weight: 900; letter-spacing: 0.4px; text-align: center;">DRAG ★1 TO ROTATE SYMMETRY · DRAG NODES 2–6 FREELY</div>
+                    </div>
+
+                    <!-- TOP-RIGHT: 6 MAIN ANCHORS + GLOBAL ANCHOR SHIFT -->
+                    <div style="min-width: 0; display: flex; flex-direction: column; gap: 8px;">
+                        <div style="font-size: 8px; font-weight: 900; color: #ccc; letter-spacing: 0.5px;">6 MAIN PALETTE ANCHORS (CLICK TO EDIT · LCK = FREEZE)</div>
+                        <div id="cs-anchor-cards" class="cs-anchor-cards"></div>
+
+                        <div style="font-size: 8px; font-weight: 900; color: #ccc; letter-spacing: 0.5px; margin-top: 2px;">GLOBAL ANCHOR SHIFT</div>
+                        <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px;">
+                            <button class="mini-btn" data-global-nudge="cool">COOL -</button>
+                            <button class="mini-btn" data-global-nudge="warm">WARM +</button>
+                            <button class="mini-btn" data-global-nudge="hue-minus">HUE -15°</button>
+                            <button class="mini-btn" data-global-nudge="hue-plus">HUE +15°</button>
+                            <button class="mini-btn" data-global-nudge="light-minus">DARK -</button>
+                            <button class="mini-btn" data-global-nudge="light-plus">LIGHT +</button>
+                            <button class="mini-btn" data-global-nudge="sat-minus">MUD -</button>
+                            <button class="mini-btn" data-global-nudge="sat-plus">PURE +</button>
+                        </div>
+                        <button class="brutal-btn full-width" data-global-nudge="random" style="height: 22px; font-size: 9px;">↻ GENERATE HARMONIOUS SEED</button>
+                    </div>
+
+                    <!-- BOTTOM-LEFT (DIRECTLY UNDER CIRCLE, DARK BG): DUAL LIVE PALETTE PREVIEWS -->
+                    <div id="cs-preview-box-dark" style="border: 2px solid #000; background: #141414; color: #fff; padding: 8px; display: flex; flex-direction: column; gap: 6px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <span style="font-size: 8px; font-weight: 900; color: #bbb; letter-spacing: 0.4px;">LIVE PALETTE MODES</span>
+                            <span style="font-size: 7px; color: #888; font-weight: 900;">CLICK MODE OR SWATCH</span>
+                        </div>
+                        <div id="cs-live-palette-preview" style="display: flex; flex-direction: column; gap: 8px;"></div>
+                    </div>
+
+                    <!-- BOTTOM-RIGHT (BESIDE LIVE PREVIEW): PALETTE PRESETS -->
+                    <div style="border: 2px solid #000; background: #262626; padding: 8px; display: flex; flex-direction: column; gap: 6px; min-width: 0;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; gap: 6px; flex-wrap: wrap;">
+                            <span style="font-size: 8px; font-weight: 900; color: #ccc;">PALETTE PRESETS</span>
+                            <div style="display: flex; gap: 4px; align-items: center;">
+                                <input type="text" id="cs-preset-name" placeholder="PRESET NAME..." maxlength="20" style="border: 2px solid #000; background: #fff; color: #000; font-size: 9px; font-weight: 900; padding: 2px 6px; width: 110px;">
+                                <button id="btn-cs-save-preset" class="mini-btn" style="background: #fff; height: 22px; padding: 0 8px;">+ SAVE</button>
+                            </div>
+                        </div>
+                        <div id="cs-presets-bar" style="display: flex; flex-wrap: wrap; gap: 4px; align-content: flex-start;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- RIGHT COLUMN: BRUTALIST SETTINGS TABS -->
+            <div id="cs-controls-col" style="width: 390px; border-left: 2px solid black; background: white; display: flex; flex-direction: column; overflow: hidden; box-sizing: border-box;">
+
+                <!-- TABS HEADER -->
+                <div style="display: flex; border-bottom: 2px solid black; background: black; gap: 1px;">
+                    <button class="brutal-btn cs-tab-btn active-tool" data-cs-tab="space" style="flex: 1; border: none; font-size: 9px; font-weight: 900; padding: 8px 4px; box-shadow: none;">SPACE / MIX</button>
+                    <button class="brutal-btn cs-tab-btn" data-cs-tab="picker" style="flex: 1; border: none; font-size: 9px; font-weight: 900; padding: 8px 4px; box-shadow: none;">PICKER &amp; SLIDERS</button>
+                    <button class="brutal-btn cs-tab-btn" data-cs-tab="builder" style="flex: 1; border: none; font-size: 9px; font-weight: 900; padding: 8px 4px; box-shadow: none;">BUILDER</button>
+                    <button class="brutal-btn cs-tab-btn" data-cs-tab="sliders" style="flex: 1; border: none; font-size: 9px; font-weight: 900; padding: 8px 4px; box-shadow: none;">SLIDERS LAB</button>
+                </div>
+
+                <!-- TAB PANES CONTAINER -->
+                <div style="flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px;">
+
+                    <!-- TAB 1: SPACE / MIX & SYMMETRY -->
+                    <div class="cs-tab-pane" data-cs-pane="space">
+                        <div class="cs-section-box">
+                            <div class="cs-section-title">CANVAS BRUSH PAINT MIXING</div>
+                            <div style="font-size: 8px; opacity: 0.72; margin-bottom: 6px; line-height: 1.35;">
+                                Choose how wet paint, smudge, and watercolor strokes mix directly on the canvas (Physical mixes Yellow + Blue pigment into real Green instead of grey).
+                            </div>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 4px;">
+                                <button class="brutal-btn cs-seg-btn" data-canvas-mix="digital" style="height: 26px; font-size: 8.5px;">DIGITAL RGB</button>
+                                <button class="brutal-btn cs-seg-btn" data-canvas-mix="physical" style="height: 26px; font-size: 8.5px;">PHYSICAL RYB (Y+B=G)</button>
+                            </div>
+                        </div>
+
+                        <div class="cs-section-box">
+                            <div class="cs-section-title">PALETTE GENERATION &amp; ROW MIX SPACE</div>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 8px;">
+                                <button class="brutal-btn cs-seg-btn" data-palette-mode="digital" style="height: 24px; font-size: 8px;">MODE 1: DIGITAL ROWS</button>
+                                <button class="brutal-btn cs-seg-btn" data-palette-mode="physical" style="height: 24px; font-size: 8px;">MODE 2: ARTIST 6-MIX</button>
+                            </div>
+                            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-bottom: 8px;">
+                                <button class="brutal-btn cs-seg-btn" data-mix-space="ryb" style="height: 24px; font-size: 8.5px;">RYB (Y+B=G)</button>
+                                <button class="brutal-btn cs-seg-btn" data-mix-space="oklab" style="height: 24px; font-size: 8.5px;">OKLAB</button>
+                                <button class="brutal-btn cs-seg-btn" data-mix-space="oklch" style="height: 24px; font-size: 8.5px;">OKLCH</button>
+                                <button class="brutal-btn cs-seg-btn" data-mix-space="cmyk" style="height: 24px; font-size: 8.5px;">CMYK</button>
+                                <button class="brutal-btn cs-seg-btn" data-mix-space="rgb" style="height: 24px; font-size: 8.5px;">RGB</button>
+                            </div>
+                            <div id="cs-mix-proof" class="cs-mix-proof"></div>
+                        </div>
+
+                        <div class="cs-section-box">
+                            <div class="cs-section-title">HARMONY &amp; SYMMETRY TUNING</div>
+                            <div class="settings-group" style="margin-bottom: 6px;">
+                                <div style="display: flex; justify-content: space-between; align-items: center;">
+                                    <label class="settings-label">ANGLE SPREAD</label>
+                                    <span id="cs-spread-val" style="font-size: 9px; font-weight: 900;">30°</span>
+                                </div>
+                                <input type="range" id="cs-spread-slider" min="5" max="90" step="1" value="30" class="brutal-range" style="width: 100%; height: 16px;">
+                            </div>
+                            <div class="settings-group" style="margin-bottom: 8px;">
+                                <div style="display: flex; justify-content: space-between; align-items: center;">
+                                    <label class="settings-label">TONAL CONTRAST</label>
+                                    <span id="cs-contrast-val" style="font-size: 9px; font-weight: 900;">16%</span>
+                                </div>
+                                <input type="range" id="cs-contrast-slider" min="0" max="45" step="1" value="16" class="brutal-range" style="width: 100%; height: 16px;">
+                            </div>
+                            <div class="settings-row" style="margin: 6px 0;">
+                                <label class="settings-label">AUTO-SYNC SYMMETRY FROM ★1</label>
+                                <div class="checkbox-wrapper">
+                                    <input type="checkbox" id="cs-auto-sync-chk" checked class="settings-input-check">
+                                    <span class="checkbox-custom"></span>
+                                </div>
+                            </div>
+                            <button id="btn-cs-apply-sym" class="brutal-btn full-width" style="height: 26px; background: #000; color: #fff;">GENERATE / APPLY SYMMETRY TO 6 ANCHORS</button>
+                        </div>
+
+                        <div class="cs-section-box">
+                            <div class="cs-section-title">QUICK PAINTERLY SLIDERS (ACTIVE COLOR)</div>
+                            <div id="studio-quick-sliders"></div>
+                        </div>
+                    </div>
+
+                    <!-- TAB 2: PICKER SHAPE & CHECKBOX SLIDERS -->
+                    <div class="cs-tab-pane hidden" data-cs-pane="picker">
+                        <div class="cs-section-box">
+                            <div class="cs-section-title">PICKER GEOMETRY (CHECKBOX SELECTOR)</div>
+                            <div id="cs-picker-shape-checks" class="cs-check-grid"></div>
+                        </div>
+
+                        <div class="cs-section-box">
+                            <div class="cs-section-title">DOCKED COLOR SLIDERS (LEFT-RIGHT BARS)</div>
+                            <div style="font-size: 8px; opacity: 0.7; margin-bottom: 6px;">Check any color model below to immediately mount its live gradient sliders in the Color Palette window.</div>
+                            <div id="cs-slider-pack-checks" class="cs-check-grid"></div>
+                        </div>
+
+                        <div class="cs-section-box">
+                            <div class="cs-section-title">PALETTE WINDOW &amp; SWATCH STYLE</div>
+                            <div class="settings-row" style="margin: 4px 0;">
+                                <label class="settings-label">SHOW PALETTE SWATCHES</label>
+                                <div class="checkbox-wrapper">
+                                    <input type="checkbox" id="cs-chk-show-swatches" checked class="settings-input-check">
+                                    <span class="checkbox-custom"></span>
+                                </div>
+                            </div>
+                            <div class="settings-row" style="margin: 4px 0;">
+                                <label class="settings-label">SHOW HEX INPUT + LAB BTN</label>
+                                <div class="checkbox-wrapper">
+                                    <input type="checkbox" id="cs-chk-show-hex" checked class="settings-input-check">
+                                    <span class="checkbox-custom"></span>
+                                </div>
+                            </div>
+                            <div class="settings-row" style="margin: 4px 0 8px 0;">
+                                <label class="settings-label">SOFT ROUNDED SWATCHES</label>
+                                <div class="checkbox-wrapper">
+                                    <input type="checkbox" id="cs-chk-rounded-swatches" class="settings-input-check">
+                                    <span class="checkbox-custom"></span>
+                                </div>
+                            </div>
+                            <div class="settings-group" style="margin-bottom: 6px;">
+                                <div style="display: flex; justify-content: space-between;">
+                                    <label class="settings-label">PALETTE WIDTH</label>
+                                    <span id="cs-panel-width-val" style="font-size: 9px; font-weight: 900;">204px</span>
+                                </div>
+                                <input type="range" id="cs-panel-width" min="176" max="340" step="4" value="204" class="brutal-range" style="width: 100%; height: 14px;">
+                            </div>
+                            <div class="settings-group" style="margin-bottom: 6px;">
+                                <div style="display: flex; justify-content: space-between;">
+                                    <label class="settings-label">SWATCH HEIGHT</label>
+                                    <span id="cs-swatch-height-val" style="font-size: 9px; font-weight: 900;">24px</span>
+                                </div>
+                                <input type="range" id="cs-swatch-height" min="14" max="40" step="2" value="24" class="brutal-range" style="width: 100%; height: 14px;">
+                            </div>
+                            <div class="settings-group" style="margin-bottom: 0;">
+                                <div style="display: flex; justify-content: space-between;">
+                                    <label class="settings-label">SWATCH GAP</label>
+                                    <span id="cs-swatch-gap-val" style="font-size: 9px; font-weight: 900;">2px</span>
+                                </div>
+                                <input type="range" id="cs-swatch-gap" min="0" max="8" step="1" value="2" class="brutal-range" style="width: 100%; height: 14px;">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- TAB 3: USER-CREATABLE PALETTE ROW BUILDER -->
+                    <div class="cs-tab-pane hidden" data-cs-pane="builder">
+                        <div class="cs-section-box">
+                            <div class="cs-section-title">ADD GENERATED ROW TO PALETTE</div>
+                            <div style="display: flex; gap: 4px; align-items: stretch;">
+                                <select id="cs-new-row-type" style="flex: 1; border: 2px solid #000; font-family: inherit; font-size: 9px; font-weight: 900; padding: 4px; background: #fff;"></select>
+                                <button id="btn-cs-add-row" class="brutal-btn" style="background: #000; color: #fff; padding: 0 10px;">+ ADD</button>
+                            </div>
+                        </div>
+
+                        <div class="cs-section-box">
+                            <div class="cs-section-title">ACTIVE PALETTE ROWS (REORDER / SHIFT / TOGGLE)</div>
+                            <div id="cs-row-builder-list" style="display: flex; flex-direction: column; gap: 6px;"></div>
+                        </div>
+
+                        <button id="btn-cs-reset-defaults" class="brutal-btn full-width" style="background: #fee2e2; color: #991b1b; padding: 8px;">RESET COLOR STUDIO TO DEFAULTS</button>
+                    </div>
+
+                    <!-- TAB 4: ALL COLOR SPACE SLIDERS LAB -->
+                    <div class="cs-tab-pane hidden" data-cs-pane="sliders">
+                        <div class="cs-section-box">
+                            <div class="cs-section-title">MULTI-SPACE SLIDER LAB (ALL COLOR SPACES)</div>
+                            <div style="font-size: 8px; opacity: 0.7; margin-bottom: 8px;">Left-right live gradient sliders across Painterly Temp/Tone, RYB (Y+B=Green), OKLCH, OKLab, CMYK, HSV, HSL, and RGB.</div>
+                            <div id="studio-live-sliders"></div>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div id="capture-reticle">
       <div style="position:absolute; top: -4px; left: -4px; width: 8px; height: 8px; background: #3b82f6;"></div>
     </div>
@@ -1406,6 +1686,12 @@
             <input type="checkbox" id="chk-surface-shading" checked style="width: 14px; height: 14px; cursor: pointer; accent-color: black;">
           </div>
 
+          <!-- PHYSICAL PIGMENT MIXING CHECKBOX -->
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 4px; border: 1px solid black; padding: 6px; background: white;">
+            <label for="chk-fluid-physical-mix" style="font-size: 8px; font-weight: bold; cursor: pointer; user-select: none;">PHYSICAL PIGMENT (Y+B=G)</label>
+            <input type="checkbox" id="chk-fluid-physical-mix" checked style="width: 14px; height: 14px; cursor: pointer; accent-color: black;">
+          </div>
+
           <!-- PER-BRUSH-TIP PRESET CONTROLS -->
           <div style="display: flex; flex-direction: column; gap: 4px; border-top: 2px solid black; padding-top: 6px; margin-top: 2px;">
             <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -1483,6 +1769,12 @@
               <span id="air-tip-pour-val" class="slider-value" style="font-size: 8px; font-weight: bold;">100%</span>
             </div>
             <input type="range" id="slider-air-tip-pour" min="0" max="100" value="100" class="brutal-range">
+          </div>
+
+          <!-- PHYSICAL PIGMENT MIXING CHECKBOX -->
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 4px; border: 1px solid black; padding: 6px; background: white;">
+            <label for="chk-air-physical-mix" style="font-size: 8px; font-weight: bold; cursor: pointer; user-select: none;">PHYSICAL PIGMENT (Y+B=G)</label>
+            <input type="checkbox" id="chk-air-physical-mix" checked style="width: 14px; height: 14px; cursor: pointer; accent-color: black;">
           </div>
 
           <!-- PER-BRUSH-TIP PRESET CONTROLS -->
