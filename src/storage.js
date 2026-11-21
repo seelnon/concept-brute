@@ -374,6 +374,27 @@ export class SketchStorage {
     });
   }
 
+  async deleteSetting(id, explicitProjectId = null) {
+    await this.ensureReady();
+    const key = this._getSettingKey(id, explicitProjectId);
+
+    if (this.isFallback || !this.db) {
+      delete this.fallbackStore.settings[key];
+      try { localStorage.removeItem(key); } catch (e) {}
+      return;
+    }
+
+    return new Promise((resolve, reject) => {
+      const transaction = this.db.transaction(['settings'], 'readwrite');
+      const store = transaction.objectStore('settings');
+      store.delete(key);
+
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = (event) => reject(event.target?.error || new Error('Delete setting failed'));
+      transaction.onabort = (event) => reject(event.target?.error || new Error('Delete setting aborted'));
+    });
+  }
+
   async loadSettingsBatch(keys, explicitProjectId = null) {
     await this.ensureReady();
     if (this.isFallback || !this.db) {

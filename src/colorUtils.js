@@ -473,6 +473,49 @@ export function hsvHueToOklchHue(hsvHue) {
     return h % 360;
 }
 
+// Subtractive CMYK Wheel (0°=Magenta, 60°=Red, 120°=Yellow, 180°=Green, 240°=Cyan, 300°=Blue)
+// Bijective 1:1 with CMYK(c,m,y,k): S = max ink saturation (0..100), V = 100 - K
+export function rgbToCmykWheelHsv(r, g, b) {
+    const { c, m, y, k } = rgbToCmyk(r, g, b);
+    const maxInk = Math.max(c, m, y);
+    const s = clamp(maxInk, 0, 100);
+    const v = clamp(100 - k, 0, 100);
+    if (maxInk <= 1e-4) {
+        return { h: 0, s: 0, v };
+    }
+    const cn = c / maxInk;
+    const mn = m / maxInk;
+    const yn = y / maxInk;
+    let h = 0;
+    if (cn <= mn && cn <= yn) {
+        // C is 0: active M and Y (0°..120°)
+        h = yn >= mn ? 60 + 60 * (1 - mn) : 60 * yn;
+    } else if (mn <= cn && mn <= yn) {
+        // M is 0: active Y and C (120°..240°)
+        h = cn >= yn ? 180 + 60 * (1 - yn) : 120 + 60 * cn;
+    } else {
+        // Y is 0: active C and M (240°..360°)
+        h = mn >= cn ? 300 + 60 * (1 - cn) : 240 + 60 * mn;
+    }
+    return { h: ((h % 360) + 360) % 360, s, v };
+}
+
+export function cmykWheelHsvToRgb(h, s, v) {
+    const a = ((h % 360) + 360) % 360;
+    const sat = clamp(s, 0, 100);
+    const k = clamp(100 - clamp(v, 0, 100), 0, 100);
+    const sector = Math.floor(a / 60) % 6;
+    const f = (a / 60) - Math.floor(a / 60);
+    let c = 0, m = 0, y = 0;
+    if (sector === 0) { c = 0; m = 1; y = f; }
+    else if (sector === 1) { c = 0; m = 1 - f; y = 1; }
+    else if (sector === 2) { c = f; m = 0; y = 1; }
+    else if (sector === 3) { c = 1; m = 0; y = 1 - f; }
+    else if (sector === 4) { c = 1; m = f; y = 0; }
+    else { c = 1 - f; m = 1; y = 0; }
+    return cmykToRgb(c * sat, m * sat, y * sat, k);
+}
+
 // Seam-free pure perceptual OKLCH disc sampling for Harmony Wheel
 export function oklchWheelColor(deg, radius01, lightness = 70, studioWhiteCenter = false) {
     const r = clamp(radius01, 0, 1);
@@ -483,10 +526,23 @@ export function oklchWheelColor(deg, radius01, lightness = 70, studioWhiteCenter
     return oklchToRgb(L, r * maxRimChroma, deg);
 }
 
+// Perceptual OKLab (a, b) opponent disc sampling around neutral grey center
+export function oklabWheelColor(deg, radius01, lightness = 68, studioNeutralCenter = false) {
+    const r = clamp(radius01, 0, 1);
+    const maxRimChroma = 0.34;
+    const L = studioNeutralCenter ? 68 : clamp(lightness, 0, 100);
+    const rad = (((deg % 360) + 360) % 360) * (Math.PI / 180);
+    const c = r * maxRimChroma;
+    return oklabToRgb(L, c * Math.cos(rad), c * Math.sin(rad), true);
+}
+
 // Convert Wheel Degree (0..360) in chosen wheelSpace -> vivid or sat/val RGB
 export function wheelAngleToRgb(deg, wheelSpace = 'ryb', sat = 100, val = 100) {
     const a = ((deg % 360) + 360) % 360;
-    if (wheelSpace === 'oklch') {
+    if (wheelSpace === 'cmyk') {
+        return cmykWheelHsvToRgb(a, sat, val);
+    }
+    if (wheelSpace === 'oklch' || wheelSpace === 'oklab') {
         const hsvH = oklchHueToHsvHue(a);
         return hsvToRgb(hsvH, sat, val);
     }
@@ -495,8 +551,11 @@ export function wheelAngleToRgb(deg, wheelSpace = 'ryb', sat = 100, val = 100) {
 }
 
 export function rgbToWheelHsv(r, g, b, wheelSpace = 'ryb') {
+    if (wheelSpace === 'cmyk') {
+        return rgbToCmykWheelHsv(r, g, b);
+    }
     const hsv = rgbToHsv(r, g, b);
-    if (wheelSpace === 'oklch') {
+    if (wheelSpace === 'oklch' || wheelSpace === 'oklab') {
         const lch = rgbToOklch(r, g, b);
         const h = lch.C > 0.004 ? lch.H : hsvHueToOklchHue(hsv.h);
         return { h, s: hsv.s, v: hsv.v };
@@ -506,7 +565,10 @@ export function rgbToWheelHsv(r, g, b, wheelSpace = 'ryb') {
 }
 
 export function wheelHsvToRgb(h, s, v, wheelSpace = 'ryb') {
-    if (wheelSpace === 'oklch') {
+    if (wheelSpace === 'cmyk') {
+        return cmykWheelHsvToRgb(h, s, v);
+    }
+    if (wheelSpace === 'oklch' || wheelSpace === 'oklab') {
         const hsvH = oklchHueToHsvHue(h);
         return hsvToRgb(hsvH, s, v);
     }
@@ -606,6 +668,15 @@ export function shiftColorSpace(hex, hDelta = 0, sDelta = 0, lDelta = 0, space =
         const nextS = clamp(hsl.s + sDelta, 0, 100);
         const nextL = clamp(hsl.l + lDelta, 0, 100);
         const out = hslToRgb(nextRgbH, nextS, nextL);
+        return rgbToHex(out.r, out.g, out.b);
+    }
+
+    if (space === 'cmyk') {
+        const w = rgbToCmykWheelHsv(rgb.r, rgb.g, rgb.b);
+        const nextH = ((w.h + hDelta) % 360 + 360) % 360;
+        const nextS = clamp(w.s + sDelta, 0, 100);
+        const nextV = clamp(w.v + lDelta, 0, 100);
+        const out = cmykWheelHsvToRgb(nextH, nextS, nextV);
         return rgbToHex(out.r, out.g, out.b);
     }
 

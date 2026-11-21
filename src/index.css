@@ -1370,28 +1370,106 @@ button:focus, input:focus, select:focus, .tool-btn:focus, .brutal-btn:focus, .mi
     background: #fff;
 }
 
-.cs-preset-btn {
-    padding: 3px 7px;
-    font-size: 8px;
+.cs-presets-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 5px;
+    align-content: start;
+}
+
+.cs-preset-card {
+    border: 2px solid #000;
+    background: #ffffff;
+    color: #000000;
+    padding: 0;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 2px 2px 0 0 #000;
+    transition: transform 0.06s;
+    min-width: 0;
+    font-family: inherit;
+    text-align: left;
+    overflow: hidden;
+}
+
+.cs-preset-card:hover {
+    transform: translate(-1px, -1px);
+    background: #f3f3f3;
+}
+
+.cs-preset-card:active {
+    transform: translate(1px, 1px);
+    box-shadow: 1px 1px 0 0 #000;
+}
+
+.cs-preset-swatches {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    width: 100%;
     height: 22px;
+    border-bottom: 2px solid #000;
 }
 
-.cs-preset-dots {
-    display: inline-flex;
-    border: 1px solid #000;
-}
-
-.cs-preset-dots i {
+.cs-preset-swatches i {
     display: block;
-    width: 6px;
-    height: 10px;
+    width: 100%;
+    height: 100%;
+}
+
+.cs-preset-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 3px;
+    padding: 4px 5px;
+    min-width: 0;
+}
+
+.cs-preset-name {
+    font-size: 7.5px;
+    font-weight: 900;
+    letter-spacing: 0.25px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.1;
+}
+
+.cs-preset-del {
+    color: #dc2626;
+    font-size: 9px;
+    font-weight: 900;
+    line-height: 1;
+    flex-shrink: 0;
+    padding: 0 2px;
+}
+
+.cs-preset-del:hover {
+    background: #000;
+    color: #fff;
 }
 
 .mini-btn.cs-seg-btn.active-tool,
 .brutal-btn.cs-seg-btn.active-tool {
     background: #000 !important;
     color: #fff !important;
+}
+
+.cs-lock-btn {
+    background: #1a1a1a !important;
+    color: #d4d4d4 !important;
+    border: 2px solid #000 !important;
+    padding: 3px 7px !important;
+    font-size: 8.5px !important;
+    font-weight: 900 !important;
+    white-space: nowrap;
+}
+
+.cs-lock-btn.locked {
+    background: #facc15 !important;
+    color: #000000 !important;
+    outline: 1px solid #000;
 }
 
 /* LAYERS */

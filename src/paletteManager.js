@@ -29,7 +29,8 @@ import {
     getContrastTextColor,
     oklchHueToHsvHue,
     hsvHueToOklchHue,
-    oklchWheelColor
+    oklchWheelColor,
+    oklabWheelColor
 } from './colorUtils.js';
 
 export const SYMMETRY_MODES = [
@@ -138,7 +139,8 @@ export function createDefaultPaletteConfig() {
         symmetry: 'custom',     // SYMMETRY_MODES id
         spread: 30,             // degrees 5..90
         harmonyContrast: 16,    // 0..45 lightness/chroma delta
-        autoSyncSymmetry: true,
+        autoSyncSymmetry: false,
+        groupLock: false,       // true => moving ANY node rotates/shifts all non-frozen nodes preserving ratios
         locks: [false, false, false, false, false, false],
         showSwatches: true,
         showHex: true,
@@ -173,8 +175,12 @@ export class PaletteManager {
         this.config = createDefaultPaletteConfig();
         this.customPresets = [];
         this.activeIndex = 0;
+        this._groupCoords = null;
 
         this._loadFromStorage();
+        if (this.config.groupLock) {
+            this.captureGroupBaseline();
+        }
     }
 
     _loadFromStorage() {
@@ -252,6 +258,7 @@ export class PaletteManager {
             };
             this.config = merged;
         }
+        this._groupCoords = this.config.groupLock ? this.captureGroupBaseline() : null;
         if (save) this.saveConfig();
     }
 
@@ -260,33 +267,172 @@ export class PaletteManager {
         this.baseColors = ['#B91C1C', '#1E40AF', '#84CC16', '#EAB308', '#F97316', '#4338CA'];
         this.config = fresh;
         this.activeIndex = 0;
+        this._groupCoords = null;
         this.saveConfig();
     }
 
-    setBaseColor(index, color, { skipSymmetry = false } = {}) {
-        const idx = clamp(Math.round(index), 0, 5);
-        const hex = normalizeHex(color, '#333333');
-        this.baseColors[idx] = hex;
+    _extractSpaceCoord(hex, space = null, override = null) {
+        const ws = space || this.config.wheelSpace || 'ryb';
+        const rgb = hexToRgb(hex);
+        if (ws === 'oklch' || ws === 'oklab') {
+            if (override && override.L !== undefined && override.C !== undefined && override.H !== undefined) {
+                return {
+                    space: ws,
+                    L: clamp(Number(override.L), 0, 100),
+                    C: clamp(Number(override.C), 0, 0.37),
+                    H: (((Number(override.H) || 0) % 360) + 360) % 360
+                };
+            }
+            const lch = rgbToOklch(rgb.r, rgb.g, rgb.b);
+            return { space: ws, L: lch.L, C: clamp(lch.C, 0, 0.37), H: lch.H };
+        }
+        if (override && override.h !== undefined && override.s !== undefined && override.v !== undefined) {
+            return {
+                space: ws,
+                H: (((Number(override.h) || 0) % 360) + 360) % 360,
+                S: clamp(Number(override.s), 0, 100),
+                V: clamp(Number(override.v), 0, 100)
+            };
+        }
+        const wh = rgbToWheelHsv(rgb.r, rgb.g, rgb.b, ws);
+        return { space: ws, H: wh.h, S: wh.s, V: wh.v };
+    }
 
-        if (
-            !skipSymmetry &&
-            this.config.symmetry !== 'custom' &&
-            this.config.autoSyncSymmetry &&
-            idx === 0
-        ) {
-            this.applySymmetry(0);
+    _coordToHex(coord, space = null) {
+        const ws = space || coord?.space || this.config.wheelSpace || 'ryb';
+        if (ws === 'oklch' || ws === 'oklab') {
+            const rgb = oklchToRgb(clamp(coord.L, 0, 100), clamp(coord.C, 0, 0.37), coord.H);
+            return rgbToHex(rgb.r, rgb.g, rgb.b);
+        }
+        const rgb = wheelHsvToRgb(coord.H, clamp(coord.S, 0, 100), clamp(coord.V, 0, 100), ws);
+        return rgbToHex(rgb.r, rgb.g, rgb.b);
+    }
+
+    captureGroupBaseline(idxOverride = null, coordOverride = null) {
+        const ws = this.config.wheelSpace || 'ryb';
+        const isOk = (ws === 'oklch' || ws === 'oklab');
+        const arr = new Array(6);
+        for (let i = 0; i < 6; i++) {
+            const prev = (this._groupCoords && this._groupCoords.length === 6 && this._groupCoords[i]?.space === ws)
+                ? this._groupCoords[i]
+                : null;
+            if (idxOverride === i && coordOverride) {
+                arr[i] = this._extractSpaceCoord(this.baseColors[i], ws, coordOverride);
+            } else if (prev) {
+                // Keep preserved hue on achromatic colors if hex matches
+                const fresh = this._extractSpaceCoord(this.baseColors[i], ws, null);
+                if (isOk && fresh.C <= 0.004) fresh.H = prev.H;
+                if (!isOk && (fresh.S <= 1 || fresh.V <= 1)) fresh.H = prev.H;
+                arr[i] = fresh;
+            } else {
+                arr[i] = this._extractSpaceCoord(this.baseColors[i], ws, null);
+            }
+        }
+        this._groupCoords = arr;
+        return arr.map(c => ({ ...c }));
+    }
+
+    setGroupLock(enabled) {
+        this.config.groupLock = !!enabled;
+        this.config.autoSyncSymmetry = false;
+        if (this.config.groupLock) {
+            this.captureGroupBaseline();
+        } else {
+            this._groupCoords = null;
         }
         this.saveConfig();
+    }
+
+    setBaseColor(index, color, { skipGroup = false, skipSave = false, coordOverride = null, dragBaseline = null } = {}) {
+        const idx = clamp(Math.round(index), 0, 5);
+        const hex = normalizeHex(color, '#333333');
+        const ws = this.config.wheelSpace || 'ryb';
+
+        if (this.config.groupLock && !skipGroup) {
+            const baseline = (dragBaseline && dragBaseline.length === 6 && dragBaseline[0]?.space === ws)
+                ? dragBaseline
+                : ((this._groupCoords && this._groupCoords.length === 6 && this._groupCoords[0]?.space === ws)
+                    ? this._groupCoords
+                    : this.captureGroupBaseline());
+
+            const isOk = (ws === 'oklch' || ws === 'oklab');
+            const refCoord = baseline[idx] || this._extractSpaceCoord(this.baseColors[idx] || hex, ws, null);
+            const nextCoord = this._extractSpaceCoord(hex, ws, coordOverride);
+            if (isOk && nextCoord.C <= 0.003 && !coordOverride) nextCoord.H = refCoord.H;
+            if (!isOk && (nextCoord.S <= 1 || nextCoord.V <= 1) && !coordOverride) nextCoord.H = refCoord.H;
+
+            let dH = nextCoord.H - refCoord.H;
+            if (dH > 180) dH -= 360;
+            if (dH < -180) dH += 360;
+
+            const wrapH = (deg) => ((deg % 360) + 360) % 360;
+            const nextGroup = new Array(6);
+
+            if (isOk) {
+                const dL = nextCoord.L - refCoord.L;
+                const dC = nextCoord.C - refCoord.C;
+                this.baseColors[idx] = hex;
+                nextGroup[idx] = { ...nextCoord };
+                for (let i = 0; i < 6; i++) {
+                    if (i === idx) continue;
+                    const src = baseline[i] || this._extractSpaceCoord(this.baseColors[i], ws, null);
+                    if (this.config.locks[i]) {
+                        nextGroup[i] = { ...src };
+                        continue;
+                    }
+                    const moved = {
+                        space: ws,
+                        H: wrapH(src.H + dH),
+                        L: clamp(src.L + dL, 0, 100),
+                        C: clamp(src.C + dC, 0, 0.37)
+                    };
+                    nextGroup[i] = moved;
+                    this.baseColors[i] = this._coordToHex(moved, ws);
+                }
+            } else {
+                const dS = nextCoord.S - refCoord.S;
+                const dV = nextCoord.V - refCoord.V;
+                this.baseColors[idx] = hex;
+                nextGroup[idx] = { ...nextCoord };
+                for (let i = 0; i < 6; i++) {
+                    if (i === idx) continue;
+                    const src = baseline[i] || this._extractSpaceCoord(this.baseColors[i], ws, null);
+                    if (this.config.locks[i]) {
+                        nextGroup[i] = { ...src };
+                        continue;
+                    }
+                    const moved = {
+                        space: ws,
+                        H: wrapH(src.H + dH),
+                        S: clamp(src.S + dS, 0, 100),
+                        V: clamp(src.V + dV, 0, 100)
+                    };
+                    nextGroup[i] = moved;
+                    this.baseColors[i] = this._coordToHex(moved, ws);
+                }
+            }
+            this._groupCoords = nextGroup;
+        } else {
+            this.baseColors[idx] = hex;
+            if (this._groupCoords && this._groupCoords.length === 6) {
+                this._groupCoords[idx] = this._extractSpaceCoord(hex, ws, coordOverride);
+            }
+        }
+
+        if (!skipSave) this.saveConfig();
     }
 
     toggleLock(index) {
         const idx = clamp(Math.round(index), 0, 5);
         this.config.locks[idx] = !this.config.locks[idx];
+        if (this.config.groupLock) {
+            this.captureGroupBaseline();
+        }
         this.saveConfig();
     }
 
-    // Generate 6 harmonious anchor colors around anchor 0 (★ master) in wheelSpace
-    applySymmetry(masterIdx = 0) {
+    // Generate 6 harmonious anchor colors around anchor 0 in wheelSpace
+    applySymmetry(masterIdx = 0, { skipSave = false } = {}) {
         const mode = this.config.symmetry;
         if (!mode || mode === 'custom') return;
 
@@ -376,7 +522,10 @@ export class PaletteManager {
             const outRgb = wheelHsvToRgb(spec.h, spec.s, spec.v, wheelSpace);
             this.baseColors[i] = rgbToHex(outRgb.r, outRgb.g, outRgb.b);
         }
-        this.saveConfig();
+        if (this.config.groupLock) {
+            this.captureGroupBaseline();
+        }
+        if (!skipSave) this.saveConfig();
     }
 
     adjustAllAnchors({ hueDelta = 0, satDelta = 0, lightDelta = 0, tempDelta = 0 }) {
@@ -392,6 +541,85 @@ export class PaletteManager {
             }
             this.baseColors[i] = hex;
         }
+        if (this.config.groupLock) {
+            this.captureGroupBaseline();
+        }
+        this.saveConfig();
+    }
+
+    adjustAngleSpread(direction = 1) {
+        const dir = direction >= 0 ? 1 : -1;
+        const ws = this.config.wheelSpace || 'ryb';
+        const coords = this.baseColors.map(hex => this._extractSpaceCoord(hex, ws, null));
+        const baseH = coords[0].H;
+        const factor = dir > 0 ? 1.2 : 0.82;
+
+        for (let i = 1; i < 6; i++) {
+            if (this.config.locks[i]) continue;
+            const diff = ((coords[i].H - baseH + 540) % 360) - 180;
+            let nextDiff;
+            if (Math.abs(diff) < 3) {
+                if (dir > 0) {
+                    nextDiff = (i % 2 === 1 ? 1 : -1) * Math.ceil(i / 2) * 10;
+                } else {
+                    nextDiff = diff * 0.78;
+                }
+            } else if (Math.abs(Math.abs(diff) - 180) <= 3) {
+                if (dir > 0) {
+                    nextDiff = diff + (i % 2 === 0 ? 12 : -12);
+                } else {
+                    nextDiff = diff > 0 ? 168 : -168;
+                }
+            } else {
+                nextDiff = clamp(diff * factor, -176, 176);
+            }
+            coords[i].H = ((baseH + nextDiff) % 360 + 360) % 360;
+            this.baseColors[i] = this._coordToHex(coords[i], ws);
+        }
+
+        this.config.spread = clamp((this.config.spread || 30) + dir * 6, 5, 90);
+        if (this.config.groupLock) {
+            this.captureGroupBaseline();
+        }
+        this.saveConfig();
+    }
+
+    adjustTonalContrast(direction = 1) {
+        const dir = direction >= 0 ? 1 : -1;
+        const labs = this.baseColors.map(hex => {
+            const rgb = hexToRgb(hex);
+            return rgbToOklch(rgb.r, rgb.g, rgb.b);
+        });
+        let sumL = 0;
+        let minL = 100;
+        let maxL = 0;
+        for (let i = 0; i < 6; i++) {
+            sumL += labs[i].L;
+            if (labs[i].L < minL) minL = labs[i].L;
+            if (labs[i].L > maxL) maxL = labs[i].L;
+        }
+        const avgL = sumL / 6;
+        const spanL = maxL - minL;
+        const factor = dir > 0 ? 1.25 : 0.76;
+
+        for (let i = 0; i < 6; i++) {
+            if (this.config.locks[i]) continue;
+            const c = labs[i];
+            let nextL;
+            if (dir > 0 && spanL < 8) {
+                const step = (i % 2 === 0 ? 1 : -1) * (5 + (i % 3) * 2);
+                nextL = clamp(c.L + step, 4, 97);
+            } else {
+                nextL = clamp(avgL + (c.L - avgL) * factor, 4, 97);
+            }
+            const outRgb = oklchToRgb(nextL, c.C, c.H);
+            this.baseColors[i] = rgbToHex(outRgb.r, outRgb.g, outRgb.b);
+        }
+
+        this.config.harmonyContrast = clamp((this.config.harmonyContrast || 16) + dir * 4, 0, 45);
+        if (this.config.groupLock) {
+            this.captureGroupBaseline();
+        }
         this.saveConfig();
     }
 
@@ -402,7 +630,10 @@ export class PaletteManager {
         if (preset.mixSpace) this.config.mixSpace = preset.mixSpace;
         if (preset.symmetry) this.config.symmetry = preset.symmetry;
         if (preset.config && typeof preset.config === 'object') {
-            this.applySerializedState({ baseColors: this.baseColors, config: preset.config });
+            this.applySerializedState({ baseColors: this.baseColors, config: preset.config }, { save: false });
+        }
+        if (this.config.groupLock) {
+            this.captureGroupBaseline();
         }
         this.saveConfig();
     }
@@ -457,7 +688,8 @@ export class PaletteManager {
         const rows = [];
         const c = this.baseColors;
         const mixSpace = this.config.mixSpace || 'ryb';
-        const shiftSpace = this.config.wheelSpace === 'oklch' ? 'oklch' : (this.config.wheelSpace === 'ryb' ? 'ryb' : 'hsl');
+        const ws = this.config.wheelSpace || 'ryb';
+        const shiftSpace = (ws === 'oklch' || ws === 'oklab' || ws === 'cmyk' || ws === 'ryb') ? ws : 'hsl';
         const activeHex = c[this.activeIndex] || c[0];
 
         const activeRows = (this.config.rows || []).filter(r => r.enabled);
@@ -828,17 +1060,20 @@ export class PaletteStudio {
     constructor(app) {
         this.app = app;
         this.activeTab = 'space';
-        this._ringCacheKey = '';
-        this._ringCacheCanvas = null;
-        this._wheelCacheKey = '';
-        this._wheelCacheCanvas = null;
+        this._ringBitmapCache = new Map();
+        this._wheelBitmapCache = new Map();
         this._oklch2dRaster = null;
-        this._oklch2dRasterL = -999;
+        this._oklch2dRasterKey = '';
         this._oklch2dMaxC = null;
         this._oklchTarget = null;
         this._ringAngleState = null;
         this._dockDragMode = null; // 'ring' | 'tri' | 'sq' | 'wheel'
         this._studioWheelDragIdx = -1;
+        this._studioWheelDragStartL = null;
+        this._studioWheelDragStartV = null;
+        this._dragGroupBaseline = null;
+        this._liveDragRafId = null;
+        this._pendingDeferredSave = false;
         this._sliderLock = false;
         this._activeSliderDrag = null;
         this._initialized = false;
@@ -861,6 +1096,45 @@ export class PaletteStudio {
         return Math.min(3, Math.max(2, window.devicePixelRatio || 2));
     }
 
+    _beginDragGroupBaseline() {
+        const p = this.app.palette;
+        if (p.config.groupLock) {
+            this._dragGroupBaseline = p.captureGroupBaseline();
+        } else {
+            this._dragGroupBaseline = null;
+        }
+        return this._dragGroupBaseline;
+    }
+
+    _flushDeferredSave() {
+        this._dragGroupBaseline = null;
+        if (!this._pendingDeferredSave) return;
+        this._pendingDeferredSave = false;
+        this.app.palette.saveConfig();
+        this.app.storage?.saveSetting('palette', this.app.palette.getSerializedState());
+        this.app.storage?.saveSetting('lastColor', this.getActiveHex());
+    }
+
+    _scheduleDragUISync() {
+        if (this._liveDragRafId) return;
+        this._liveDragRafId = requestAnimationFrame(() => {
+            this._liveDragRafId = null;
+            this.app._renderPalette();
+            const clean = this.getActiveHex();
+            this._updateSliderContainerValues(document.getElementById('palette-live-sliders'), clean);
+            if (this.isOpen()) {
+                this._updateSliderContainerValues(document.getElementById('studio-quick-sliders'), clean);
+                this._updateSliderContainerValues(document.getElementById('studio-live-sliders'), clean);
+                if (this._studioWheelDragIdx < 0) {
+                    this._drawStudioHarmonyWheel();
+                }
+                this._syncStudioAnchorCards();
+                this._renderMixProofBar();
+                this._renderPalettePreview();
+            }
+        });
+    }
+
     _ensureOklchTarget(hex, { force = false } = {}) {
         const clean = normalizeHex(hex, this.getActiveHex());
         if (!force && this._oklchTarget && this._oklchTarget.hex === clean) {
@@ -878,14 +1152,19 @@ export class PaletteStudio {
         return this._oklchTarget;
     }
 
-    _commitOklchTarget(L, C, H, { updateBase = true } = {}) {
+    _commitOklchTarget(L, C, H, { updateBase = true, deferSave = false, dragBaseline = null } = {}) {
         const nL = clamp(Number(L), 0, 100);
         const nC = clamp(Number(C), 0, 0.37);
         const nH = (((Number(H) || 0) % 360) + 360) % 360;
         const rgb = oklchToRgb(nL, nC, nH);
         const hex = rgbToHex(rgb.r, rgb.g, rgb.b);
         this._oklchTarget = { L: nL, C: nC, H: nH, hex };
-        this.commitPickedHex(hex, { updateBase });
+        this.commitPickedHex(hex, {
+            updateBase,
+            deferSave,
+            coordOverride: { L: nL, C: nC, H: nH },
+            dragBaseline
+        });
     }
 
     _getWheelAngle() {
@@ -896,7 +1175,7 @@ export class PaletteStudio {
         }
         const rgbHue = this.app.hsv?.h ?? 0;
         if (wheelSpace === 'ryb') return rgbHueToRybHue(rgbHue);
-        if (wheelSpace === 'oklch') {
+        if (wheelSpace === 'oklch' || wheelSpace === 'oklab') {
             const target = this._ensureOklchTarget(clean);
             return target.C > 0.004 ? target.H : hsvHueToOklchHue(rgbHue);
         }
@@ -908,23 +1187,36 @@ export class PaletteStudio {
     }
 
     // Apply picker value directly to active color + active main anchor
-    commitPickedHex(hex, { updateBase = true } = {}) {
+    commitPickedHex(hex, { updateBase = true, deferSave = false, coordOverride = null, dragBaseline = null } = {}) {
         const clean = normalizeHex(hex, '#000000');
         const palette = this.app.palette;
         if (updateBase) {
-            palette.setBaseColor(palette.activeIndex, clean);
+            palette.setBaseColor(palette.activeIndex, clean, {
+                skipSave: deferSave,
+                coordOverride,
+                dragBaseline: dragBaseline || this._dragGroupBaseline
+            });
         }
-        this.app.setColor(clean);
+        if (deferSave) {
+            this._pendingDeferredSave = true;
+        }
+        this.app.setColor(clean, { skipSave: deferSave, deferUi: deferSave });
         if (updateBase) {
-            this.app._renderPalette();
-            this.app.storage?.saveSetting('palette', palette.getSerializedState());
-        }
-        if (this.isOpen()) {
-            this.renderStudioDynamicSections();
+            if (deferSave) {
+                this._scheduleDragUISync();
+            } else {
+                this.app._renderPalette();
+                this.app.storage?.saveSetting('palette', palette.getSerializedState());
+                if (this.isOpen()) {
+                    this.renderStudioDynamicSections({ includeHeavy: false });
+                }
+            }
+        } else if (!deferSave && this.isOpen()) {
+            this.renderStudioDynamicSections({ includeHeavy: false });
         }
     }
 
-    commitWheelHsv(wheelHueDeg, sPct, vPct, { updateBase = true } = {}) {
+    commitWheelHsv(wheelHueDeg, sPct, vPct, { updateBase = true, deferSave = false, dragBaseline = null } = {}) {
         const wheelSpace = this.app.palette.config.wheelSpace || 'ryb';
         const normAngle = ((wheelHueDeg % 360) + 360) % 360;
         const rgb = wheelHsvToRgb(normAngle, sPct, vPct, wheelSpace);
@@ -932,7 +1224,7 @@ export class PaletteStudio {
         // Preserve wheel hue even when saturation/value hits 0 so triangle/ring doesn't jump to 0 deg
         const preservedRgbHue = wheelSpace === 'ryb'
             ? rybHueToRgbHue(normAngle)
-            : (wheelSpace === 'oklch' ? oklchHueToHsvHue(normAngle) : normAngle);
+            : ((wheelSpace === 'oklch' || wheelSpace === 'oklab') ? oklchHueToHsvHue(normAngle) : normAngle);
 
         this._ringAngleState = { wheelSpace, angle: normAngle, hex };
         this.app.hsv = {
@@ -941,17 +1233,25 @@ export class PaletteStudio {
             v: clamp(vPct, 0, 100)
         };
         if (updateBase) {
-            this.app.palette.setBaseColor(this.app.palette.activeIndex, hex);
+            this.app.palette.setBaseColor(this.app.palette.activeIndex, hex, {
+                skipSave: deferSave,
+                coordOverride: { h: normAngle, s: sPct, v: vPct },
+                dragBaseline: dragBaseline || this._dragGroupBaseline
+            });
+        }
+        if (deferSave) {
+            this._pendingDeferredSave = true;
+            this.app.setColor(hex, { skipSave: true, preserveHsv: true, deferUi: true });
+            if (updateBase) this._scheduleDragUISync();
+            return;
+        }
+        this.app.setColor(hex, { skipSave: false, preserveHsv: true, deferUi: false });
+        if (updateBase) {
             this.app._renderPalette();
             this.app.storage?.saveSetting('palette', this.app.palette.getSerializedState());
         }
-        this.app.engine.brush.color = hex;
-        const preview = document.getElementById('current-color-preview');
-        if (preview) preview.style.backgroundColor = hex;
-        if (this.app.storage) this.app.storage.saveSetting('lastColor', hex);
-        this.syncColorUI(hex, { preserveHsv: true });
         if (this.isOpen()) {
-            this.renderStudioDynamicSections();
+            this.renderStudioDynamicSections({ includeHeavy: false });
         }
     }
 
@@ -999,7 +1299,7 @@ export class PaletteStudio {
         if (!modal) return;
         modal.classList.remove('hidden');
         this.renderStudioControls();
-        this.renderStudioDynamicSections();
+        this.renderStudioDynamicSections({ includeHeavy: true });
     }
 
     closeModal() {
@@ -1050,23 +1350,24 @@ export class PaletteStudio {
         }
 
         const shape = cfg.pickerShape || 'sv-square';
-        const isOklch = (cfg.wheelSpace || 'ryb') === 'oklch';
+        const ws = cfg.wheelSpace || 'ryb';
+        const isOk2d = (ws === 'oklch' || ws === 'oklab');
         const isGeo = (shape === 'ring-triangle' || shape === 'ring-square' || shape === 'wheel');
         const dpr = this._getDpr();
         const innerCssW = Math.max(168, w - 28);
 
         if (colorSelector) {
             colorSelector.classList.toggle('hidden', shape === 'none');
-            colorSelector.classList.toggle('geo-dark', isGeo || (shape === 'sv-square' && isOklch));
+            colorSelector.classList.toggle('geo-dark', isGeo || (shape === 'sv-square' && isOk2d));
         }
         if (pickerSquareBox) {
             pickerSquareBox.classList.toggle('hidden', shape !== 'sv-square');
         }
         if (svClassicWrap) {
-            svClassicWrap.classList.toggle('hidden', isOklch);
+            svClassicWrap.classList.toggle('hidden', isOk2d);
         }
         if (oklchPickerWrap) {
-            oklchPickerWrap.classList.toggle('hidden', !isOklch);
+            oklchPickerWrap.classList.toggle('hidden', !isOk2d);
         }
         if (oklch2dCanvas) {
             const bw = Math.round(innerCssW * dpr);
@@ -1112,25 +1413,27 @@ export class PaletteStudio {
         const hexInput = document.getElementById('palette-hex-input');
 
         if (svPicker) {
-            const updateFromSV = (e) => {
+            const updateFromSV = (e, deferSave = true) => {
                 const rect = svPicker.getBoundingClientRect();
                 const x = clamp(e.clientX - rect.left, 0, rect.width || 1);
                 const y = clamp(e.clientY - rect.top, 0, rect.height || 1);
                 const s = (x / (rect.width || 1)) * 100;
                 const v = 100 - (y / (rect.height || 1)) * 100;
                 const wheelAngle = this._getWheelAngle();
-                this.commitWheelHsv(wheelAngle, s, v);
+                this.commitWheelHsv(wheelAngle, s, v, { deferSave, dragBaseline: this._dragGroupBaseline });
             };
             svPicker.onpointerdown = (e) => {
+                this._beginDragGroupBaseline();
                 try { svPicker.setPointerCapture(e.pointerId); } catch (_) {}
-                updateFromSV(e);
-                const onMove = (pe) => updateFromSV(pe);
+                updateFromSV(e, true);
+                const onMove = (pe) => updateFromSV(pe, true);
                 const onUp = (pe) => {
                     svPicker.removeEventListener('pointermove', onMove);
                     svPicker.removeEventListener('pointerup', onUp);
                     svPicker.removeEventListener('pointercancel', onUp);
                     svPicker.removeEventListener('lostpointercapture', onUp);
                     try { if (pe?.pointerId !== undefined) svPicker.releasePointerCapture(pe.pointerId); } catch (_) {}
+                    this._flushDeferredSave();
                 };
                 svPicker.addEventListener('pointermove', onMove);
                 svPicker.addEventListener('pointerup', onUp);
@@ -1140,34 +1443,55 @@ export class PaletteStudio {
         }
 
         if (hueSlider) {
+            hueSlider.onpointerdown = () => this._beginDragGroupBaseline();
             hueSlider.oninput = (e) => {
                 const angle = parseFloat(e.target.value) || 0;
-                this.commitWheelHsv(angle, this.app.hsv.s, this.app.hsv.v);
+                this.commitWheelHsv(angle, this.app.hsv.s, this.app.hsv.v, {
+                    deferSave: true,
+                    dragBaseline: this._dragGroupBaseline
+                });
             };
+            hueSlider.onchange = () => this._flushDeferredSave();
         }
 
         if (oklch2d) {
-            const updateFromOklch2D = (e) => {
+            const updateFromOklch2D = (e, deferSave = true) => {
                 const rect = oklch2d.getBoundingClientRect();
                 const rx = clamp((e.clientX - rect.left) / (rect.width || 1), 0, 1);
                 const ry = clamp((e.clientY - rect.top) / (rect.height || 1), 0, 1);
-                const H = rx * 360;
-                const C = (1 - ry) * 0.37;
                 const target = this._ensureOklchTarget(this.getActiveHex());
-                this._commitOklchTarget(target.L, C, H);
+                const ws = this.app.palette.config.wheelSpace || 'ryb';
+                if (ws === 'oklab') {
+                    const MAX_AB = 0.34;
+                    const a = (rx * 2 - 1) * MAX_AB;
+                    const b = (1 - ry * 2) * MAX_AB;
+                    const C = clamp(Math.hypot(a, b), 0, 0.37);
+                    let H = Math.atan2(b, a) * (180 / Math.PI);
+                    if (H < 0) H += 360;
+                    this._commitOklchTarget(target.L, C, C > 1e-4 ? H : target.H, {
+                        deferSave,
+                        dragBaseline: this._dragGroupBaseline
+                    });
+                } else {
+                    const H = rx * 360;
+                    const C = (1 - ry) * 0.37;
+                    this._commitOklchTarget(target.L, C, H, { deferSave, dragBaseline: this._dragGroupBaseline });
+                }
             };
             oklch2d.onpointerdown = (e) => {
                 e.preventDefault();
                 e.stopPropagation();
+                this._beginDragGroupBaseline();
                 try { oklch2d.setPointerCapture(e.pointerId); } catch (_) {}
-                updateFromOklch2D(e);
-                const onMove = (pe) => updateFromOklch2D(pe);
+                updateFromOklch2D(e, true);
+                const onMove = (pe) => updateFromOklch2D(pe, true);
                 const onUp = (pe) => {
                     oklch2d.removeEventListener('pointermove', onMove);
                     oklch2d.removeEventListener('pointerup', onUp);
                     oklch2d.removeEventListener('pointercancel', onUp);
                     oklch2d.removeEventListener('lostpointercapture', onUp);
                     try { if (pe?.pointerId !== undefined) oklch2d.releasePointerCapture(pe.pointerId); } catch (_) {}
+                    this._flushDeferredSave();
                 };
                 oklch2d.addEventListener('pointermove', onMove);
                 oklch2d.addEventListener('pointerup', onUp);
@@ -1177,25 +1501,27 @@ export class PaletteStudio {
         }
 
         if (oklch1d) {
-            const updateFromOklch1D = (e) => {
+            const updateFromOklch1D = (e, deferSave = true) => {
                 const rect = oklch1d.getBoundingClientRect();
                 const ratio = clamp((e.clientX - rect.left) / (rect.width || 1), 0, 1);
                 const L = ratio * 100;
                 const target = this._ensureOklchTarget(this.getActiveHex());
-                this._commitOklchTarget(L, target.C, target.H);
+                this._commitOklchTarget(L, target.C, target.H, { deferSave, dragBaseline: this._dragGroupBaseline });
             };
             oklch1d.onpointerdown = (e) => {
                 e.preventDefault();
                 e.stopPropagation();
+                this._beginDragGroupBaseline();
                 try { oklch1d.setPointerCapture(e.pointerId); } catch (_) {}
-                updateFromOklch1D(e);
-                const onMove = (pe) => updateFromOklch1D(pe);
+                updateFromOklch1D(e, true);
+                const onMove = (pe) => updateFromOklch1D(pe, true);
                 const onUp = (pe) => {
                     oklch1d.removeEventListener('pointermove', onMove);
                     oklch1d.removeEventListener('pointerup', onUp);
                     oklch1d.removeEventListener('pointercancel', onUp);
                     oklch1d.removeEventListener('lostpointercapture', onUp);
                     try { if (pe?.pointerId !== undefined) oklch1d.releasePointerCapture(pe.pointerId); } catch (_) {}
+                    this._flushDeferredSave();
                 };
                 oklch1d.addEventListener('pointermove', onMove);
                 oklch1d.addEventListener('pointerup', onUp);
@@ -1205,17 +1531,26 @@ export class PaletteStudio {
         }
 
         if (wheelValSlider) {
+            wheelValSlider.onpointerdown = () => this._beginDragGroupBaseline();
             wheelValSlider.oninput = (e) => {
                 const val = parseFloat(e.target.value);
                 const safeVal = Number.isFinite(val) ? val : 100;
-                if ((this.app.palette.config.wheelSpace || 'ryb') === 'oklch') {
+                const ws = this.app.palette.config.wheelSpace || 'ryb';
+                if (ws === 'oklch' || ws === 'oklab') {
                     const target = this._ensureOklchTarget(this.getActiveHex());
-                    this._commitOklchTarget(safeVal, target.C, target.H);
+                    this._commitOklchTarget(safeVal, target.C, target.H, {
+                        deferSave: true,
+                        dragBaseline: this._dragGroupBaseline
+                    });
                     return;
                 }
                 const angle = this._getWheelAngle();
-                this.commitWheelHsv(angle, this.app.hsv.s, safeVal);
+                this.commitWheelHsv(angle, this.app.hsv.s, safeVal, {
+                    deferSave: true,
+                    dragBaseline: this._dragGroupBaseline
+                });
             };
+            wheelValSlider.onchange = () => this._flushDeferredSave();
         }
 
         if (geoCanvas) {
@@ -1234,11 +1569,17 @@ export class PaletteStudio {
                     let deg = Math.atan2(ny, nx) * (180 / Math.PI);
                     if (deg < 0) deg += 360;
                     const sat01 = clamp(dist / outerR, 0, 1);
-                    if (wheelSpace === 'oklch') {
+                    if (wheelSpace === 'oklch' || wheelSpace === 'oklab') {
                         const target = this._ensureOklchTarget(this.getActiveHex());
-                        this._commitOklchTarget(target.L, sat01 * 0.34, deg);
+                        this._commitOklchTarget(target.L, sat01 * 0.34, deg, {
+                            deferSave: true,
+                            dragBaseline: this._dragGroupBaseline
+                        });
                     } else {
-                        this.commitWheelHsv(deg, sat01 * 100, this.app.hsv?.v ?? 100);
+                        this.commitWheelHsv(deg, sat01 * 100, this.app.hsv?.v ?? 100, {
+                            deferSave: true,
+                            dragBaseline: this._dragGroupBaseline
+                        });
                     }
                     return;
                 }
@@ -1250,12 +1591,18 @@ export class PaletteStudio {
                 if (this._dockDragMode === 'ring') {
                     let deg = Math.atan2(ny, nx) * (180 / Math.PI);
                     if (deg < 0) deg += 360;
-                    this.commitWheelHsv(deg, this.app.hsv.s, this.app.hsv.v);
+                    this.commitWheelHsv(deg, this.app.hsv.s, this.app.hsv.v, {
+                        deferSave: true,
+                        dragBaseline: this._dragGroupBaseline
+                    });
                 } else if (this._dockDragMode === 'sq') {
                     const halfSide = (innerR - 0.07) * Math.SQRT1_2;
                     const s = clamp(((nx + halfSide) / (2 * halfSide)) * 100, 0, 100);
                     const v = clamp((1 - (ny + halfSide) / (2 * halfSide)) * 100, 0, 100);
-                    this.commitWheelHsv(this._getWheelAngle(), s, v);
+                    this.commitWheelHsv(this._getWheelAngle(), s, v, {
+                        deferSave: true,
+                        dragBaseline: this._dragGroupBaseline
+                    });
                 } else if (this._dockDragMode === 'tri') {
                     // Stationary triangle (Pure Hue right, White top-left, Black bottom-left)
                     const wheelAngle = this._getWheelAngle();
@@ -1274,12 +1621,16 @@ export class PaletteStudio {
                     const [u, vW] = clampBarycentricToSimplex(rawA, rawB, rawC);
                     const V = clamp((u + vW) * 100, 0, 100);
                     const S = (u + vW) > 1e-4 ? clamp((u / (u + vW)) * 100, 0, 100) : 0;
-                    this.commitWheelHsv(wheelAngle, S, V);
+                    this.commitWheelHsv(wheelAngle, S, V, {
+                        deferSave: true,
+                        dragBaseline: this._dragGroupBaseline
+                    });
                 }
             };
 
             geoCanvas.onpointerdown = (e) => {
                 e.stopPropagation();
+                this._beginDragGroupBaseline();
                 try { geoCanvas.setPointerCapture(e.pointerId); } catch (_) {}
                 handleGeoPointer(e, true);
                 const onMove = (pe) => handleGeoPointer(pe, false);
@@ -1290,6 +1641,7 @@ export class PaletteStudio {
                     geoCanvas.removeEventListener('pointercancel', onUp);
                     geoCanvas.removeEventListener('lostpointercapture', onUp);
                     try { if (pe?.pointerId !== undefined) geoCanvas.releasePointerCapture(pe.pointerId); } catch (_) {}
+                    this._flushDeferredSave();
                 };
                 geoCanvas.addEventListener('pointermove', onMove);
                 geoCanvas.addEventListener('pointerup', onUp);
@@ -1317,7 +1669,7 @@ export class PaletteStudio {
         }
     }
 
-    syncColorUI(hex, { preserveHsv = false } = {}) {
+    syncColorUI(hex, { preserveHsv = false, deferUi = false } = {}) {
         const clean = normalizeHex(hex, this.getActiveHex());
         const oklchTarget = this._ensureOklchTarget(clean);
 
@@ -1331,8 +1683,8 @@ export class PaletteStudio {
         const shape = this.app.palette.config.pickerShape || 'sv-square';
 
         if (shape === 'sv-square') {
-            if (wheelSpace === 'oklch') {
-                this._drawOklch2DSurface(oklchTarget, clean);
+            if (wheelSpace === 'oklch' || wheelSpace === 'oklab') {
+                this._drawOklch2DSurface(oklchTarget, clean, wheelSpace);
                 const oklch1dTrack = document.getElementById('oklch-1d-track');
                 const oklch1dThumb = document.getElementById('oklch-1d-thumb');
                 if (oklch1dTrack) {
@@ -1370,7 +1722,7 @@ export class PaletteStudio {
 
         const wheelValSlider = document.getElementById('color-wheel-val-slider');
         if (wheelValSlider) {
-            if (wheelSpace === 'oklch') {
+            if (wheelSpace === 'oklch' || wheelSpace === 'oklab') {
                 wheelValSlider.value = Math.round(oklchTarget.L);
                 wheelValSlider.style.background = buildSliderGradient(9, t => {
                     const r = oklchToRgb(t * 100, oklchTarget.C, oklchTarget.H);
@@ -1388,28 +1740,34 @@ export class PaletteStudio {
             hexInput.value = clean;
         }
 
-        this._updateSliderContainerValues(document.getElementById('palette-live-sliders'), clean);
-        if (this.isOpen()) {
-            this._updateSliderContainerValues(document.getElementById('studio-live-sliders'), clean);
-            this._updateSliderContainerValues(document.getElementById('studio-quick-sliders'), clean);
-            this._drawStudioHarmonyWheel();
-            this._syncStudioAnchorCards();
+        if (!deferUi) {
+            this._updateSliderContainerValues(document.getElementById('palette-live-sliders'), clean);
+            if (this.isOpen()) {
+                this._updateSliderContainerValues(document.getElementById('studio-live-sliders'), clean);
+                this._updateSliderContainerValues(document.getElementById('studio-quick-sliders'), clean);
+                this._drawStudioHarmonyWheel();
+                this._syncStudioAnchorCards();
+            }
         }
     }
 
-    _drawOklch2DSurface(oklchTarget, activeHex) {
+    _drawOklch2DSurface(oklchTarget, activeHex, wheelSpace = null) {
         const canvas = document.getElementById('oklch-2d-canvas');
         if (!canvas) return;
         const bw = canvas.width;
         const bh = canvas.height;
         if (bw <= 0 || bh <= 0) return;
 
+        const ws = wheelSpace || this.app.palette.config.wheelSpace || 'oklch';
+        const isOklab = (ws === 'oklab');
         const L_key = Math.round(clamp(oklchTarget.L, 0, 100) * 2) / 2;
+        const rasterKey = `${ws}:${L_key}`;
         const rw = 180;
         const rh = 144;
         const MAX_C = 0.37;
+        const MAX_AB = 0.34;
 
-        if (!this._oklch2dRaster || this._oklch2dRaster.width !== rw || this._oklch2dRasterL !== L_key) {
+        if (!this._oklch2dRaster || this._oklch2dRaster.width !== rw || this._oklch2dRasterKey !== rasterKey) {
             if (!this._oklch2dRaster) {
                 this._oklch2dRaster = document.createElement('canvas');
                 this._oklch2dRaster.width = rw;
@@ -1419,46 +1777,62 @@ export class PaletteStudio {
             const img = rCtx.createImageData(rw, rh);
             const data = img.data;
             const L01 = clamp(L_key / 100, 0, 1);
-            const maxCs = new Float32Array(rw);
 
-            for (let x = 0; x < rw; x++) {
-                const hueDeg = (x / (rw - 1)) * 360;
-                const rad = hueDeg * (Math.PI / 180);
-                const ca = Math.cos(rad);
-                const cb = Math.sin(rad);
-                const maxC = getMaxOklchChroma(L_key, hueDeg);
-                maxCs[x] = maxC;
-
+            if (isOklab) {
                 for (let y = 0; y < rh; y++) {
-                    const targetC = (1 - y / (rh - 1)) * MAX_C;
-                    const actualC = targetC < maxC ? targetC : maxC;
-                    // Fast inline OKLab -> sRGB when already inside maxC gamut (0 binary loops)
-                    const a = actualC * ca;
-                    const b = actualC * cb;
-                    const l_ = L01 + 0.3963377774 * a + 0.2158037573 * b;
-                    const m_ = L01 - 0.1055613458 * a - 0.0638541728 * b;
-                    const s_ = L01 - 0.0894841775 * a - 1.2914855480 * b;
-                    const l = l_ * l_ * l_;
-                    const m = m_ * m_ * m_;
-                    const s = s_ * s_ * s_;
-                    const lr = clamp(+4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s, 0, 1);
-                    const lg = clamp(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s, 0, 1);
-                    const lb = clamp(-0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s, 0, 1);
-
-                    const sr = lr <= 0.0031308 ? 12.92 * lr : 1.055 * Math.pow(lr, 1 / 2.4) - 0.055;
-                    const sg = lg <= 0.0031308 ? 12.92 * lg : 1.055 * Math.pow(lg, 1 / 2.4) - 0.055;
-                    const sb = lb <= 0.0031308 ? 12.92 * lb : 1.055 * Math.pow(lb, 1 / 2.4) - 0.055;
-
-                    const idx = (y * rw + x) * 4;
-                    data[idx] = sr * 255;
-                    data[idx + 1] = sg * 255;
-                    data[idx + 2] = sb * 255;
-                    data[idx + 3] = 255;
+                    const b = (1 - (y / (rh - 1)) * 2) * MAX_AB;
+                    for (let x = 0; x < rw; x++) {
+                        const a = ((x / (rw - 1)) * 2 - 1) * MAX_AB;
+                        const rgb = oklabToRgb(L_key, a, b, true);
+                        const idx = (y * rw + x) * 4;
+                        data[idx] = rgb.r;
+                        data[idx + 1] = rgb.g;
+                        data[idx + 2] = rgb.b;
+                        data[idx + 3] = 255;
+                    }
                 }
+                this._oklch2dMaxC = null;
+            } else {
+                const maxCs = new Float32Array(rw);
+                for (let x = 0; x < rw; x++) {
+                    const hueDeg = (x / (rw - 1)) * 360;
+                    const rad = hueDeg * (Math.PI / 180);
+                    const ca = Math.cos(rad);
+                    const cb = Math.sin(rad);
+                    const maxC = getMaxOklchChroma(L_key, hueDeg);
+                    maxCs[x] = maxC;
+
+                    for (let y = 0; y < rh; y++) {
+                        const targetC = (1 - y / (rh - 1)) * MAX_C;
+                        const actualC = targetC < maxC ? targetC : maxC;
+                        // Fast inline OKLab -> sRGB when already inside maxC gamut (0 binary loops)
+                        const a = actualC * ca;
+                        const b = actualC * cb;
+                        const l_ = L01 + 0.3963377774 * a + 0.2158037573 * b;
+                        const m_ = L01 - 0.1055613458 * a - 0.0638541728 * b;
+                        const s_ = L01 - 0.0894841775 * a - 1.2914855480 * b;
+                        const l = l_ * l_ * l_;
+                        const m = m_ * m_ * m_;
+                        const s = s_ * s_ * s_;
+                        const lr = clamp(+4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s, 0, 1);
+                        const lg = clamp(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s, 0, 1);
+                        const lb = clamp(-0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s, 0, 1);
+
+                        const sr = lr <= 0.0031308 ? 12.92 * lr : 1.055 * Math.pow(lr, 1 / 2.4) - 0.055;
+                        const sg = lg <= 0.0031308 ? 12.92 * lg : 1.055 * Math.pow(lg, 1 / 2.4) - 0.055;
+                        const sb = lb <= 0.0031308 ? 12.92 * lb : 1.055 * Math.pow(lb, 1 / 2.4) - 0.055;
+
+                        const idx = (y * rw + x) * 4;
+                        data[idx] = sr * 255;
+                        data[idx + 1] = sg * 255;
+                        data[idx + 2] = sb * 255;
+                        data[idx + 3] = 255;
+                    }
+                }
+                this._oklch2dMaxC = maxCs;
             }
             rCtx.putImageData(img, 0, 0);
-            this._oklch2dRasterL = L_key;
-            this._oklch2dMaxC = maxCs;
+            this._oklch2dRasterKey = rasterKey;
         }
 
         const ctx = canvas.getContext('2d');
@@ -1467,34 +1841,53 @@ export class PaletteStudio {
         ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(this._oklch2dRaster, 0, 0, bw, bh);
 
-        // Draw crisp thin sRGB gamut boundary curve (no grey cutout!)
-        const maxCs = this._oklch2dMaxC;
-        if (maxCs && maxCs.length === rw) {
-            const dpr = bw / 180;
+        const scale = bw / 180;
+        let cx, cy;
+
+        if (isOklab) {
+            // Subtle neutral opponent axes crosshair (a=0, b=0)
+            ctx.save();
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+            ctx.lineWidth = Math.max(1, 0.8 * scale);
             ctx.beginPath();
-            for (let x = 0; x < rw; x++) {
-                const px = (x / (rw - 1)) * bw;
-                const py = (1 - clamp(maxCs[x] / MAX_C, 0, 1)) * bh;
-                if (x === 0) ctx.moveTo(px, py);
-                else ctx.lineTo(px, py);
+            ctx.moveTo(bw * 0.5, 0);
+            ctx.lineTo(bw * 0.5, bh);
+            ctx.moveTo(0, bh * 0.5);
+            ctx.lineTo(bw, bh * 0.5);
+            ctx.stroke();
+            ctx.restore();
+
+            const rad = oklchTarget.H * (Math.PI / 180);
+            const a = oklchTarget.C * Math.cos(rad);
+            const b = oklchTarget.C * Math.sin(rad);
+            cx = clamp((a / MAX_AB * 0.5 + 0.5) * bw, 0, bw);
+            cy = clamp((0.5 - b / MAX_AB * 0.5) * bh, 0, bh);
+        } else {
+            // Draw crisp thin sRGB gamut boundary curve (no grey cutout!)
+            const maxCs = this._oklch2dMaxC;
+            if (maxCs && maxCs.length === rw) {
+                ctx.beginPath();
+                for (let x = 0; x < rw; x++) {
+                    const px = (x / (rw - 1)) * bw;
+                    const py = (1 - clamp(maxCs[x] / MAX_C, 0, 1)) * bh;
+                    if (x === 0) ctx.moveTo(px, py);
+                    else ctx.lineTo(px, py);
+                }
+                ctx.lineJoin = 'round';
+                ctx.strokeStyle = 'rgba(0, 0, 0, 0.38)';
+                ctx.lineWidth = Math.max(2, 1.8 * scale);
+                ctx.stroke();
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.88)';
+                ctx.lineWidth = Math.max(1, 0.9 * scale);
+                ctx.stroke();
             }
-            ctx.lineJoin = 'round';
-            ctx.strokeStyle = 'rgba(0, 0, 0, 0.38)';
-            ctx.lineWidth = Math.max(2, 1.8 * dpr);
-            ctx.stroke();
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.88)';
-            ctx.lineWidth = Math.max(1, 0.9 * dpr);
-            ctx.stroke();
+            cx = clamp((oklchTarget.H / 360) * bw, 0, bw);
+            cy = clamp((1 - clamp(oklchTarget.C / MAX_C, 0, 1)) * bh, 0, bh);
         }
 
-        // Reticle at unclamped (H, C) target
-        const scale = bw / 180;
-        const cx = clamp((oklchTarget.H / 360) * bw, 0, bw);
-        const cy = clamp((1 - clamp(oklchTarget.C / MAX_C, 0, 1)) * bh, 0, bh);
-        const rad = Math.max(5, 4.2 * scale);
-
+        const radPx = Math.max(5, 4.2 * scale);
         ctx.beginPath();
-        ctx.arc(cx, cy, rad, 0, Math.PI * 2);
+        ctx.arc(cx, cy, radPx, 0, Math.PI * 2);
         ctx.fillStyle = activeHex;
         ctx.fill();
         ctx.lineWidth = Math.max(2.5, 2.2 * scale);
@@ -1506,20 +1899,24 @@ export class PaletteStudio {
     }
 
     _getCachedRingBitmap(size, wheelSpace) {
-        const key = `${size}:${wheelSpace}`;
-        if (this._ringCacheKey === key && this._ringCacheCanvas) {
-            return this._ringCacheCanvas;
+        const rasterSize = clamp(Math.round(size), 64, 280);
+        const key = `${rasterSize}:${wheelSpace}`;
+        if (this._ringBitmapCache.has(key)) {
+            const cached = this._ringBitmapCache.get(key);
+            this._ringBitmapCache.delete(key);
+            this._ringBitmapCache.set(key, cached);
+            return cached;
         }
         const c = document.createElement('canvas');
-        c.width = size;
-        c.height = size;
+        c.width = rasterSize;
+        c.height = rasterSize;
         const ctx = c.getContext('2d');
-        const img = ctx.createImageData(size, size);
+        const img = ctx.createImageData(rasterSize, rasterSize);
         const data = img.data;
-        const half = size * 0.5;
+        const half = rasterSize * 0.5;
         const outerPx = half * 0.94;
         const innerPx = half * 0.72;
-        const scale = size / 200;
+        const scale = rasterSize / 200;
         const bw = 1.05 * scale;
         const feather = Math.max(0.85, 0.85 * scale);
         const smooth01 = (t) => {
@@ -1527,14 +1924,14 @@ export class PaletteStudio {
             return x * x * (3 - 2 * x);
         };
 
-        for (let y = 0; y < size; y++) {
+        for (let y = 0; y < rasterSize; y++) {
             const dy = y - half + 0.5;
-            for (let x = 0; x < size; x++) {
+            for (let x = 0; x < rasterSize; x++) {
                 const dx = x - half + 0.5;
                 const d = Math.hypot(dx, dy);
                 if (d < innerPx - bw - feather || d > outerPx + bw + feather) continue;
 
-                const idx = (y * size + x) * 4;
+                const idx = (y * rasterSize + x) * 4;
                 let deg = Math.atan2(dy, dx) * (180 / Math.PI);
                 if (deg < 0) deg += 360;
                 const rgb = wheelAngleToRgb(deg, wheelSpace, 100, 100);
@@ -1557,49 +1954,62 @@ export class PaletteStudio {
             }
         }
         ctx.putImageData(img, 0, 0);
-        this._ringCacheKey = key;
-        this._ringCacheCanvas = c;
+        if (this._ringBitmapCache.size >= 10) {
+            const oldestKey = this._ringBitmapCache.keys().next().value;
+            this._ringBitmapCache.delete(oldestKey);
+        }
+        this._ringBitmapCache.set(key, c);
         return c;
     }
 
     _getCachedWheelBitmap(size, wheelSpace, oklchLightness = 70, studioWhiteCenter = false) {
-        const okKey = wheelSpace === 'oklch'
-            ? (studioWhiteCenter ? 'studio' : Math.round(clamp(oklchLightness, 0, 100)))
-            : 'v100';
-        const key = `${size}:${wheelSpace}:${okKey}`;
-        if (this._wheelCacheKey === key && this._wheelCacheCanvas) {
-            return this._wheelCacheCanvas;
+        const rasterSize = clamp(Math.round(size), 64, 256);
+        const isOk = (wheelSpace === 'oklch' || wheelSpace === 'oklab');
+        const qL = Math.round(clamp(oklchLightness, 0, 100) / 3) * 3;
+        const okKey = isOk ? (studioWhiteCenter ? 'studio' : qL) : 'v100';
+        const key = `${rasterSize}:${wheelSpace}:${okKey}`;
+        if (this._wheelBitmapCache.has(key)) {
+            const cached = this._wheelBitmapCache.get(key);
+            this._wheelBitmapCache.delete(key);
+            this._wheelBitmapCache.set(key, cached);
+            return cached;
         }
         const c = document.createElement('canvas');
-        c.width = size;
-        c.height = size;
+        c.width = rasterSize;
+        c.height = rasterSize;
         const ctx = c.getContext('2d');
-        const img = ctx.createImageData(size, size);
+        const img = ctx.createImageData(rasterSize, rasterSize);
         const data = img.data;
-        const half = size * 0.5;
+        const half = rasterSize * 0.5;
         const outerPx = half * 0.94;
-        const scale = size / 200;
+        const scale = rasterSize / 200;
         const bw = 1.15 * scale;
         const feather = Math.max(0.9, 0.9 * scale);
         const smooth01 = (t) => {
             const x = clamp(t, 0, 1);
             return x * x * (3 - 2 * x);
         };
+        const sampleL = studioWhiteCenter ? oklchLightness : qL;
 
-        for (let y = 0; y < size; y++) {
+        for (let y = 0; y < rasterSize; y++) {
             const dy = y - half + 0.5;
-            for (let x = 0; x < size; x++) {
+            for (let x = 0; x < rasterSize; x++) {
                 const dx = x - half + 0.5;
                 const d = Math.hypot(dx, dy);
                 if (d > outerPx + bw + feather) continue;
 
-                const idx = (y * size + x) * 4;
+                const idx = (y * rasterSize + x) * 4;
                 let deg = Math.atan2(dy, dx) * (180 / Math.PI);
                 if (deg < 0) deg += 360;
                 const sat01 = clamp(d / outerPx, 0, 1);
-                const rgb = wheelSpace === 'oklch'
-                    ? oklchWheelColor(deg, sat01, oklchLightness, studioWhiteCenter)
-                    : wheelAngleToRgb(deg, wheelSpace, sat01 * 100, 100);
+                let rgb;
+                if (wheelSpace === 'oklch') {
+                    rgb = oklchWheelColor(deg, sat01, sampleL, studioWhiteCenter);
+                } else if (wheelSpace === 'oklab') {
+                    rgb = oklabWheelColor(deg, sat01, sampleL, studioWhiteCenter);
+                } else {
+                    rgb = wheelAngleToRgb(deg, wheelSpace, sat01 * 100, 100);
+                }
 
                 const outerCov = 1 - smooth01((d - (outerPx + bw - feather)) / (2 * feather));
                 if (outerCov <= 0.002) continue;
@@ -1612,8 +2022,11 @@ export class PaletteStudio {
             }
         }
         ctx.putImageData(img, 0, 0);
-        this._wheelCacheKey = key;
-        this._wheelCacheCanvas = c;
+        if (this._wheelBitmapCache.size >= 20) {
+            const oldestKey = this._wheelBitmapCache.keys().next().value;
+            this._wheelBitmapCache.delete(oldestKey);
+        }
+        this._wheelBitmapCache.set(key, c);
         return c;
     }
 
@@ -1629,11 +2042,13 @@ export class PaletteStudio {
         const target = oklchTarget || this._ensureOklchTarget(this.getActiveHex());
 
         ctx.clearRect(0, 0, size, size);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
 
         if (shape === 'wheel') {
-            const isOkWheel = wheelSpace === 'oklch';
+            const isOkWheel = (wheelSpace === 'oklch' || wheelSpace === 'oklab');
             const disc = this._getCachedWheelBitmap(size, wheelSpace, isOkWheel ? target.L : 100, false);
-            ctx.drawImage(disc, 0, 0);
+            ctx.drawImage(disc, 0, 0, size, size);
 
             const outerPx = half * 0.94;
             const val01 = isOkWheel
@@ -1653,7 +2068,13 @@ export class PaletteStudio {
                 const isAct = (i === this.app.palette.activeIndex);
                 let ang, rPx;
                 if (isOkWheel) {
-                    const lch = isAct ? target : rgbToOklch(...Object.values(hexToRgb(c[i])));
+                    let lch;
+                    if (isAct) {
+                        lch = target;
+                    } else {
+                        const rgb = hexToRgb(c[i]);
+                        lch = rgbToOklch(rgb.r, rgb.g, rgb.b);
+                    }
                     ang = lch.H * (Math.PI / 180);
                     rPx = clamp(lch.C / 0.34, 0, 1) * outerPx;
                 } else {
@@ -1690,7 +2111,7 @@ export class PaletteStudio {
 
         // Draw crisp HiDPI outer hue ring
         const ring = this._getCachedRingBitmap(size, wheelSpace);
-        ctx.drawImage(ring, 0, 0);
+        ctx.drawImage(ring, 0, 0, size, size);
 
         const rad = wheelAngle * (Math.PI / 180);
         const innerPx = half * 0.72;
@@ -1937,11 +2358,23 @@ export class PaletteStudio {
             if (packId === 'oklch') {
                 const baseOk = dragOk || this._ensureOklchTarget(dragRef);
                 if (desc.key === 'oklch-l') {
-                    this._commitOklchTarget(ratio * 100, baseOk.C, baseOk.H, { updateBase: true });
+                    this._commitOklchTarget(ratio * 100, baseOk.C, baseOk.H, {
+                        updateBase: true,
+                        deferSave: true,
+                        dragBaseline: this._dragGroupBaseline
+                    });
                 } else if (desc.key === 'oklch-c') {
-                    this._commitOklchTarget(baseOk.L, ratio * 0.37, baseOk.H, { updateBase: true });
+                    this._commitOklchTarget(baseOk.L, ratio * 0.37, baseOk.H, {
+                        updateBase: true,
+                        deferSave: true,
+                        dragBaseline: this._dragGroupBaseline
+                    });
                 } else {
-                    this._commitOklchTarget(baseOk.L, baseOk.C, ratio * 360, { updateBase: true });
+                    this._commitOklchTarget(baseOk.L, baseOk.C, ratio * 360, {
+                        updateBase: true,
+                        deferSave: true,
+                        dragBaseline: this._dragGroupBaseline
+                    });
                 }
                 return;
             }
@@ -1950,12 +2383,17 @@ export class PaletteStudio {
             const fresh = freshList.find(d => d.key === desc.key) || desc;
             const rawVal = fresh.min + ratio * (fresh.max - fresh.min);
             const nextHex = fresh.apply(rawVal);
-            this.commitPickedHex(nextHex, { updateBase: true });
+            this.commitPickedHex(nextHex, {
+                updateBase: true,
+                deferSave: true,
+                dragBaseline: this._dragGroupBaseline
+            });
         };
 
         track.onpointerdown = (e) => {
             e.preventDefault();
             e.stopPropagation();
+            this._beginDragGroupBaseline();
             const activeHex = this.getActiveHex();
             this._activeSliderDrag = {
                 key: desc.key,
@@ -1973,6 +2411,7 @@ export class PaletteStudio {
                 track.removeEventListener('pointercancel', onUp);
                 track.removeEventListener('lostpointercapture', onUp);
                 try { if (pe?.pointerId !== undefined) track.releasePointerCapture(pe.pointerId); } catch (_) {}
+                this._flushDeferredSave();
                 this.syncColorUI(this.getActiveHex(), { preserveHsv: true });
             };
             track.addEventListener('pointermove', onMove);
@@ -1986,6 +2425,10 @@ export class PaletteStudio {
 
     _updateSliderContainerValues(container, hex) {
         if (!container || container.classList.contains('hidden')) return;
+        // Skip updating sliders inside hidden Studio tab panes!
+        const hiddenPane = container.closest('.cs-tab-pane.hidden');
+        if (hiddenPane) return;
+
         const rows = container.querySelectorAll('.cs-bar-row');
         if (!rows.length) return;
 
@@ -2032,22 +2475,45 @@ export class PaletteStudio {
     }
 
     // ==================== STUDIO MODAL CONTROLS & HARMONY WHEEL ====================
+    _updateGroupLockUI() {
+        const isLocked = !!this.app.palette.config.groupLock;
+        const btn = document.getElementById('btn-cs-group-lock');
+        if (btn) {
+            btn.classList.toggle('locked', isLocked);
+            btn.textContent = isLocked ? 'LOCKED · LINKED' : 'UNLOCKED · FREE';
+        }
+        const hint = document.getElementById('cs-wheel-hint');
+        if (hint) {
+            hint.textContent = isLocked
+                ? 'LOCKED · DRAG ANY NODE TO ROTATE & SHIFT GROUP'
+                : 'UNLOCKED · DRAG ANY NODE 1–6 FREELY';
+            hint.style.color = isLocked ? '#facc15' : '#999';
+        }
+    }
+
     _bindStudioUI() {
         const modal = document.getElementById('modal-color-studio');
         if (!modal) return;
 
-        // Tabs switching
+        // Tabs switching (sync newly revealed tab only)
         modal.querySelectorAll('.cs-tab-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 this._disarmResetBtn();
                 this.activeTab = btn.dataset.csTab || 'space';
                 modal.querySelectorAll('.cs-tab-btn').forEach(b => b.classList.toggle('active-tool', b === btn));
                 modal.querySelectorAll('.cs-tab-pane').forEach(p => p.classList.toggle('hidden', p.dataset.csPane !== this.activeTab));
-                this.renderStudioDynamicSections();
+                const hex = this.getActiveHex();
+                if (this.activeTab === 'space') {
+                    this._updateSliderContainerValues(document.getElementById('studio-quick-sliders'), hex);
+                } else if (this.activeTab === 'sliders') {
+                    this._updateSliderContainerValues(document.getElementById('studio-live-sliders'), hex);
+                } else if (this.activeTab === 'builder') {
+                    this._renderRowBuilder();
+                }
             });
         });
 
-        // Harmony Wheel interaction
+        // Harmony Wheel interaction (instant wheel redraw + rAF coalesced UI sync + save on pointerup)
         const wheelCanvas = document.getElementById('cs-harmony-wheel');
         if (wheelCanvas) {
             const pickOrDragNode = (e, isStart) => {
@@ -2061,13 +2527,13 @@ export class PaletteStudio {
                 const wheelSpace = palette.config.wheelSpace || 'ryb';
 
                 if (isStart) {
-                    // Hit test nodes 0..5
                     let bestIdx = -1;
                     let bestDist = 18;
+                    const isOkWheel = (wheelSpace === 'oklch' || wheelSpace === 'oklab');
                     for (let i = 0; i < 6; i++) {
                         const rgb = hexToRgb(palette.baseColors[i]);
                         let hDeg, sat01;
-                        if (wheelSpace === 'oklch') {
+                        if (isOkWheel) {
                             const lch = rgbToOklch(rgb.r, rgb.g, rgb.b);
                             hDeg = lch.H;
                             sat01 = clamp(lch.C / 0.34, 0, 1);
@@ -2088,6 +2554,17 @@ export class PaletteStudio {
                     }
                     this._studioWheelDragIdx = bestIdx >= 0 ? bestIdx : palette.activeIndex;
                     palette.activeIndex = this._studioWheelDragIdx;
+
+                    // Capture baseline BEFORE moving so group ratios and L/V never drift during drag
+                    const curRgb = hexToRgb(palette.baseColors[this._studioWheelDragIdx]);
+                    const activeTarget = this._ensureOklchTarget(palette.baseColors[this._studioWheelDragIdx]);
+                    this._studioWheelDragStartL = clamp(
+                        bestIdx >= 0 ? rgbToOklch(curRgb.r, curRgb.g, curRgb.b).L : activeTarget.L,
+                        28,
+                        90
+                    );
+                    this._studioWheelDragStartV = Math.max(15, rgbToHsv(curRgb.r, curRgb.g, curRgb.b).v);
+                    this._beginDragGroupBaseline();
                 }
 
                 const idx = this._studioWheelDragIdx >= 0 ? this._studioWheelDragIdx : palette.activeIndex;
@@ -2097,26 +2574,34 @@ export class PaletteStudio {
                 if (deg < 0) deg += 360;
                 const sat01 = clamp(Math.hypot(dx, dy) / outerPx, 0, 1);
                 let nextHex;
-                if (wheelSpace === 'oklch') {
-                    const curRgb = hexToRgb(palette.baseColors[idx]);
-                    const curL = clamp(rgbToOklch(curRgb.r, curRgb.g, curRgb.b).L, 38, 86);
-                    const outRgb = oklchToRgb(curL, sat01 * 0.34, deg);
+                let coordOverride = null;
+
+                if (wheelSpace === 'oklch' || wheelSpace === 'oklab') {
+                    const curL = this._studioWheelDragStartL !== null ? this._studioWheelDragStartL : 68;
+                    const C = sat01 * 0.34;
+                    const outRgb = oklchToRgb(curL, C, deg);
                     nextHex = rgbToHex(outRgb.r, outRgb.g, outRgb.b);
-                    if (idx === palette.activeIndex) {
-                        this._oklchTarget = { L: curL, C: sat01 * 0.34, H: deg, hex: nextHex };
-                    }
+                    coordOverride = { L: curL, C, H: deg };
+                    this._oklchTarget = { L: curL, C, H: deg, hex: nextHex };
                 } else {
-                    const curRgb = hexToRgb(palette.baseColors[idx]);
-                    const curV = Math.max(15, rgbToHsv(curRgb.r, curRgb.g, curRgb.b).v);
+                    const curV = this._studioWheelDragStartV !== null ? this._studioWheelDragStartV : 90;
                     const outRgb = wheelHsvToRgb(deg, sat01 * 100, curV, wheelSpace);
                     nextHex = rgbToHex(outRgb.r, outRgb.g, outRgb.b);
+                    coordOverride = { h: deg, s: sat01 * 100, v: curV };
+                    this._ringAngleState = { wheelSpace, angle: deg, hex: nextHex };
                 }
 
-                palette.setBaseColor(idx, nextHex);
-                this.app.setColor(nextHex);
-                this.app._renderPalette();
-                this.app.storage?.saveSetting('palette', palette.getSerializedState());
-                this.renderStudioDynamicSections();
+                palette.setBaseColor(idx, nextHex, {
+                    skipSave: true,
+                    coordOverride,
+                    dragBaseline: this._dragGroupBaseline
+                });
+                this._pendingDeferredSave = true;
+
+                // Instant light update: canvas wheel + synced docked picker + readout
+                this.app.setColor(nextHex, { skipSave: true, deferUi: true });
+                this._drawStudioHarmonyWheel();
+                this._scheduleDragUISync();
             };
 
             wheelCanvas.onpointerdown = (e) => {
@@ -2126,11 +2611,15 @@ export class PaletteStudio {
                 const onMove = (pe) => pickOrDragNode(pe, false);
                 const onUp = (pe) => {
                     this._studioWheelDragIdx = -1;
+                    this._studioWheelDragStartL = null;
+                    this._studioWheelDragStartV = null;
                     wheelCanvas.removeEventListener('pointermove', onMove);
                     wheelCanvas.removeEventListener('pointerup', onUp);
                     wheelCanvas.removeEventListener('pointercancel', onUp);
                     wheelCanvas.removeEventListener('lostpointercapture', onUp);
                     try { if (pe?.pointerId !== undefined) wheelCanvas.releasePointerCapture(pe.pointerId); } catch (_) {}
+                    this._flushDeferredSave();
+                    this.syncColorUI(this.getActiveHex());
                 };
                 wheelCanvas.addEventListener('pointermove', onMove);
                 wheelCanvas.addEventListener('pointerup', onUp);
@@ -2143,8 +2632,8 @@ export class PaletteStudio {
         modal.querySelectorAll('[data-wheel-space]').forEach(btn => {
             btn.addEventListener('click', () => {
                 this.app.palette.config.wheelSpace = btn.dataset.wheelSpace;
-                if (this.app.palette.config.symmetry !== 'custom' && this.app.palette.config.autoSyncSymmetry) {
-                    this.app.palette.applySymmetry(0);
+                if (this.app.palette.config.groupLock) {
+                    this.app.palette.captureGroupBaseline();
                 }
                 this._onStudioMutated({ rebuildSliders: true });
             });
@@ -2175,12 +2664,21 @@ export class PaletteStudio {
             });
         });
 
-        // Symmetry select & controls
+        // Symmetry select & header Group Lock toggle (only runs inside Studio!)
         const symSelect = document.getElementById('cs-symmetry-select');
-        const spreadSlider = document.getElementById('cs-spread-slider');
-        const contrastSlider = document.getElementById('cs-contrast-slider');
-        const autoSyncChk = document.getElementById('cs-auto-sync-chk');
-        const btnApplySym = document.getElementById('btn-cs-apply-sym');
+        const btnGroupLock = document.getElementById('btn-cs-group-lock');
+
+        if (btnGroupLock) {
+            btnGroupLock.addEventListener('click', () => {
+                const nextState = !this.app.palette.config.groupLock;
+                this.app.palette.setGroupLock(nextState);
+                this.app.storage?.saveSetting('palette', this.app.palette.getSerializedState());
+                this._updateGroupLockUI();
+                this.app._status?.(nextState
+                    ? 'HARMONY RATIOS LOCKED · NODES MOVE TOGETHER'
+                    : 'HARMONY UNLOCKED · NODES MOVE FREELY');
+            });
+        }
 
         if (symSelect) {
             symSelect.innerHTML = SYMMETRY_MODES.map(m => `<option value="${m.id}">${m.label}</option>`).join('');
@@ -2190,42 +2688,6 @@ export class PaletteStudio {
                     this.app.palette.applySymmetry(0);
                     this.app.setColor(this.app.palette.baseColors[this.app.palette.activeIndex]);
                 }
-                this._onStudioMutated();
-            });
-        }
-        if (spreadSlider) {
-            spreadSlider.addEventListener('input', () => {
-                this.app.palette.config.spread = parseFloat(spreadSlider.value) || 30;
-                if (this.app.palette.config.symmetry !== 'custom' && this.app.palette.config.autoSyncSymmetry) {
-                    this.app.palette.applySymmetry(0);
-                    this.app.setColor(this.app.palette.baseColors[this.app.palette.activeIndex]);
-                }
-                this._onStudioMutated();
-            });
-        }
-        if (contrastSlider) {
-            contrastSlider.addEventListener('input', () => {
-                this.app.palette.config.harmonyContrast = parseFloat(contrastSlider.value) || 16;
-                if (this.app.palette.config.symmetry !== 'custom' && this.app.palette.config.autoSyncSymmetry) {
-                    this.app.palette.applySymmetry(0);
-                    this.app.setColor(this.app.palette.baseColors[this.app.palette.activeIndex]);
-                }
-                this._onStudioMutated();
-            });
-        }
-        if (autoSyncChk) {
-            autoSyncChk.addEventListener('change', () => {
-                this.app.palette.config.autoSyncSymmetry = autoSyncChk.checked;
-                this._onStudioMutated();
-            });
-        }
-        if (btnApplySym) {
-            btnApplySym.addEventListener('click', () => {
-                if (this.app.palette.config.symmetry === 'custom') {
-                    this.app.palette.config.symmetry = 'complementary';
-                }
-                this.app.palette.applySymmetry(0);
-                this.app.setColor(this.app.palette.baseColors[this.app.palette.activeIndex]);
                 this._onStudioMutated();
             });
         }
@@ -2242,19 +2704,26 @@ export class PaletteStudio {
                 else if (action === 'light-minus') this.app.palette.adjustAllAnchors({ lightDelta: -8 });
                 else if (action === 'sat-plus') this.app.palette.adjustAllAnchors({ satDelta: 12 });
                 else if (action === 'sat-minus') this.app.palette.adjustAllAnchors({ satDelta: -12 });
+                else if (action === 'angle-plus') this.app.palette.adjustAngleSpread(1);
+                else if (action === 'angle-minus') this.app.palette.adjustAngleSpread(-1);
+                else if (action === 'contrast-plus') this.app.palette.adjustTonalContrast(1);
+                else if (action === 'contrast-minus') this.app.palette.adjustTonalContrast(-1);
                 else if (action === 'random') {
                     const baseH = Math.random() * 360;
                     const s = 55 + Math.random() * 40;
                     const v = 50 + Math.random() * 45;
                     const rgb = wheelHsvToRgb(baseH, s, v, this.app.palette.config.wheelSpace);
-                    this.app.palette.setBaseColor(0, rgbToHex(rgb.r, rgb.g, rgb.b), { skipSymmetry: true });
+                    this.app.palette.setBaseColor(0, rgbToHex(rgb.r, rgb.g, rgb.b), { skipGroup: true });
                     if (this.app.palette.config.symmetry !== 'custom') {
                         this.app.palette.applySymmetry(0);
                     } else {
                         for (let i = 1; i < 6; i++) {
                             if (this.app.palette.config.locks[i]) continue;
                             const rr = wheelHsvToRgb((baseH + i * 55 + Math.random() * 25) % 360, 40 + Math.random() * 55, 35 + Math.random() * 60, this.app.palette.config.wheelSpace);
-                            this.app.palette.setBaseColor(i, rgbToHex(rr.r, rr.g, rr.b), { skipSymmetry: true });
+                            this.app.palette.setBaseColor(i, rgbToHex(rr.r, rr.g, rr.b), { skipGroup: true });
+                        }
+                        if (this.app.palette.config.groupLock) {
+                            this.app.palette.captureGroupBaseline();
                         }
                     }
                 }
@@ -2412,18 +2881,8 @@ export class PaletteStudio {
         });
 
         const symSelect = document.getElementById('cs-symmetry-select');
-        const spreadSlider = document.getElementById('cs-spread-slider');
-        const spreadVal = document.getElementById('cs-spread-val');
-        const contrastSlider = document.getElementById('cs-contrast-slider');
-        const contrastVal = document.getElementById('cs-contrast-val');
-        const autoSyncChk = document.getElementById('cs-auto-sync-chk');
-
         if (symSelect) symSelect.value = cfg.symmetry || 'custom';
-        if (spreadSlider) spreadSlider.value = cfg.spread ?? 30;
-        if (spreadVal) spreadVal.textContent = `${cfg.spread ?? 30}°`;
-        if (contrastSlider) contrastSlider.value = cfg.harmonyContrast ?? 16;
-        if (contrastVal) contrastVal.textContent = `${cfg.harmonyContrast ?? 16}%`;
-        if (autoSyncChk) autoSyncChk.checked = !!cfg.autoSyncSymmetry;
+        this._updateGroupLockUI();
 
         document.querySelectorAll('.cs-shape-chk').forEach(chk => {
             chk.checked = (chk.dataset.pickerShape === cfg.pickerShape);
@@ -2475,13 +2934,15 @@ export class PaletteStudio {
         );
     }
 
-    renderStudioDynamicSections() {
+    renderStudioDynamicSections({ includeHeavy = true } = {}) {
         this._drawStudioHarmonyWheel();
         this._syncStudioAnchorCards();
         this._renderMixProofBar();
         this._renderPalettePreview();
-        this._renderRowBuilder();
-        this.renderPresetsBar();
+        if (includeHeavy) {
+            this._renderRowBuilder();
+            this.renderPresetsBar();
+        }
     }
 
     _drawStudioHarmonyWheel() {
@@ -2502,14 +2963,17 @@ export class PaletteStudio {
         const palette = this.app.palette;
 
         ctx.clearRect(0, 0, size, size);
-        const disc = this._getCachedWheelBitmap(size, wheelSpace, 72, true);
-        ctx.drawImage(disc, 0, 0);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        const disc = this._getCachedWheelBitmap(size, wheelSpace, wheelSpace === 'oklab' ? 68 : 72, true);
+        ctx.drawImage(disc, 0, 0, size, size);
 
+        const isOkWheel = (wheelSpace === 'oklch' || wheelSpace === 'oklab');
         const c = palette.baseColors;
         for (let i = c.length - 1; i >= 0; i--) {
             const rgb = hexToRgb(c[i]);
             let hDeg, sat01;
-            if (wheelSpace === 'oklch') {
+            if (isOkWheel) {
                 const lch = rgbToOklch(rgb.r, rgb.g, rgb.b);
                 hDeg = lch.H;
                 sat01 = clamp(lch.C / 0.34, 0, 1);
@@ -2547,17 +3011,17 @@ export class PaletteStudio {
             ctx.font = `bold ${Math.round(8 * scale)}px monospace`;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillText(i === 0 ? '★' : String(i + 1), px, py + 0.5 * scale);
+            ctx.fillText(String(i + 1), px, py + 0.5 * scale);
         }
 
         const readout = document.getElementById('cs-wheel-readout');
         if (readout) {
             const actHex = c[palette.activeIndex] || c[0];
             const actRgb = hexToRgb(actHex);
-            const angle = wheelSpace === 'oklch'
+            const angle = isOkWheel
                 ? this._ensureOklchTarget(actHex).H
                 : rgbToWheelHsv(actRgb.r, actRgb.g, actRgb.b, wheelSpace).h;
-            readout.textContent = `${wheelSpace.toUpperCase()} · ${Math.round(angle)}° · ${actHex}`;
+            readout.textContent = `${wheelSpace === 'hsl' ? 'RGB' : wheelSpace.toUpperCase()} · ${Math.round(angle)}° · ${actHex}`;
         }
     }
 
@@ -2565,8 +3029,30 @@ export class PaletteStudio {
         const grid = document.getElementById('cs-anchor-cards');
         if (!grid) return;
         const palette = this.app.palette;
-        grid.innerHTML = '';
 
+        // Fast path: patch existing 6 cards in place without innerHTML rebuild
+        if (grid.children.length === 6) {
+            for (let idx = 0; idx < 6; idx++) {
+                const hex = palette.baseColors[idx];
+                const card = grid.children[idx];
+                const isAct = palette.activeIndex === idx;
+                const isLocked = !!palette.config.locks[idx];
+                card.className = 'cs-anchor-card' + (isAct ? ' active' : '');
+                card.style.backgroundColor = hex;
+                card.style.color = getContrastTextColor(hex);
+                const lockBtn = card.querySelector('.cs-anchor-lock');
+                if (lockBtn) {
+                    lockBtn.className = 'cs-anchor-lock' + (isLocked ? ' locked' : '');
+                    lockBtn.textContent = isLocked ? 'LCK' : 'OPN';
+                    lockBtn.title = isLocked ? 'Unlock Anchor' : 'Freeze Anchor';
+                }
+                const code = card.querySelector('.cs-anchor-hex');
+                if (code) code.textContent = hex;
+            }
+            return;
+        }
+
+        grid.innerHTML = '';
         palette.baseColors.forEach((hex, idx) => {
             const card = document.createElement('div');
             card.className = 'cs-anchor-card' + (palette.activeIndex === idx ? ' active' : '');
@@ -2578,11 +3064,11 @@ export class PaletteStudio {
 
             const badge = document.createElement('span');
             badge.className = 'cs-anchor-idx';
-            badge.textContent = idx === 0 ? '★1' : String(idx + 1);
+            badge.textContent = String(idx + 1);
 
             const lockBtn = document.createElement('button');
             lockBtn.className = 'cs-anchor-lock' + (palette.config.locks[idx] ? ' locked' : '');
-            lockBtn.title = palette.config.locks[idx] ? 'Unlock Anchor' : 'Lock Anchor from Symmetry';
+            lockBtn.title = palette.config.locks[idx] ? 'Unlock Anchor' : 'Freeze Anchor';
             lockBtn.textContent = palette.config.locks[idx] ? 'LCK' : 'OPN';
             lockBtn.onclick = (e) => {
                 e.stopPropagation();
@@ -2602,9 +3088,10 @@ export class PaletteStudio {
 
             card.onclick = () => {
                 palette.activeIndex = idx;
-                this.app.setColor(hex);
+                const curHex = palette.baseColors[idx];
+                this.app.setColor(curHex);
                 this.app._renderPalette();
-                this.renderStudioDynamicSections();
+                this.renderStudioDynamicSections({ includeHeavy: false });
             };
             grid.appendChild(card);
         });
@@ -2618,6 +3105,27 @@ export class PaletteStudio {
         const a0 = this.app.palette.baseColors[0];
         const a1 = this.app.palette.baseColors[1];
         const liveSample = mixColorsSpace(a0, a1, 0.5, space);
+
+        const rows = box.querySelectorAll('.cs-mix-proof-row');
+        if (rows.length === 2) {
+            const r0Lbl = rows[0].querySelector('.cs-proof-lbl');
+            const r0Wide = rows[0].querySelector('.cs-proof-chip.wide');
+            if (r0Lbl) r0Lbl.textContent = `YEL + BLU (${space.toUpperCase()}):`;
+            if (r0Wide) {
+                r0Wide.style.background = mixSample;
+                r0Wide.style.color = getContrastTextColor(mixSample);
+                r0Wide.textContent = mixSample;
+            }
+            const r1Chips = rows[1].querySelectorAll('.cs-proof-chip');
+            if (r1Chips.length === 3) {
+                r1Chips[0].style.background = a0;
+                r1Chips[1].style.background = a1;
+                r1Chips[2].style.background = liveSample;
+                r1Chips[2].style.color = getContrastTextColor(liveSample);
+                r1Chips[2].textContent = liveSample;
+            }
+            return;
+        }
 
         box.innerHTML = `
             <div class="cs-mix-proof-row">
@@ -2659,6 +3167,63 @@ export class PaletteStudio {
             }
         ];
 
+        // Fast path: patch existing mode cards & swatches in place when structure matches
+        const cards = preview.children;
+        let canPatch = cards.length === modes.length;
+        if (canPatch) {
+            for (let m = 0; m < modes.length; m++) {
+                const card = cards[m];
+                const mode = modes[m];
+                // child 0 is header, children 1..N are palette-row elements
+                if (!card || card.children.length !== mode.rows.length + 1) {
+                    canPatch = false;
+                    break;
+                }
+                for (let r = 0; r < mode.rows.length; r++) {
+                    const rowEl = card.children[r + 1];
+                    const row = mode.rows[r];
+                    if (!rowEl || rowEl.children.length !== row.length) {
+                        canPatch = false;
+                        break;
+                    }
+                    for (let c = 0; c < row.length; c++) {
+                        const sw = rowEl.children[c];
+                        if (!sw || sw.dataset.swType !== row[c].type || String(sw.dataset.swSpan || '') !== String(row[c].span || '')) {
+                            canPatch = false;
+                            break;
+                        }
+                    }
+                    if (!canPatch) break;
+                }
+                if (!canPatch) break;
+            }
+        }
+
+        if (canPatch) {
+            const radius = cfg.swatchShape === 'rounded' ? '3px' : '0px';
+            for (let m = 0; m < modes.length; m++) {
+                const card = cards[m];
+                const mode = modes[m];
+                card.className = 'cs-mode-card' + (activeMode === mode.id ? ' active-mode' : '');
+                const badge = card.querySelector('.cs-mode-badge');
+                if (badge) badge.textContent = activeMode === mode.id ? 'ACTIVE' : mode.badge;
+                for (let r = 0; r < mode.rows.length; r++) {
+                    const rowEl = card.children[r + 1];
+                    const row = mode.rows[r];
+                    for (let c = 0; c < row.length; c++) {
+                        const sw = rowEl.children[c];
+                        const item = row[c];
+                        sw._swatchColor = item.color;
+                        sw.style.backgroundColor = item.color;
+                        sw.style.borderRadius = radius;
+                        sw.classList.toggle('active-swatch', !!item.active);
+                        sw.title = item.color;
+                    }
+                }
+            }
+            return;
+        }
+
         preview.innerHTML = '';
         modes.forEach(mode => {
             const card = document.createElement('div');
@@ -2693,7 +3258,10 @@ export class PaletteStudio {
                 row.forEach(item => {
                     const sw = document.createElement('div');
                     sw.className = `swatch ${item.type}`;
+                    sw.dataset.swType = item.type;
+                    if (item.span) sw.dataset.swSpan = String(item.span);
                     if (item.active) sw.classList.add('active-swatch');
+                    sw._swatchColor = item.color;
                     sw.style.backgroundColor = item.color;
                     sw.style.height = '13px';
                     if (cfg.swatchShape === 'rounded') sw.style.borderRadius = '3px';
@@ -2701,13 +3269,14 @@ export class PaletteStudio {
                     sw.title = item.color;
                     sw.onclick = (e) => {
                         e.stopPropagation();
+                        const col = sw._swatchColor || item.color;
                         if (item.type === 'main') {
                             this.app.palette.activeIndex = item.index;
-                            this.app.setColor(item.color);
+                            this.app.setColor(col);
                             this.app._renderPalette();
-                            this.renderStudioDynamicSections();
+                            this.renderStudioDynamicSections({ includeHeavy: false });
                         } else {
-                            this.commitPickedHex(item.color, { updateBase: true });
+                            this.commitPickedHex(col, { updateBase: true });
                         }
                     };
                     rowEl.appendChild(sw);
@@ -2837,22 +3406,32 @@ export class PaletteStudio {
         ];
 
         all.forEach((p, idx) => {
-            const btn = document.createElement('button');
-            btn.className = 'brutal-btn cs-preset-btn';
-            btn.innerHTML = `
-                <span class="cs-preset-dots">${p.colors.slice(0, 4).map(c => `<i style="background:${c}"></i>`).join('')}</span>
-                <span>${p.name}</span>
-            `;
-            btn.onclick = () => {
-                this.app.palette.loadPreset(p);
-                this.app.setColor(this.app.palette.baseColors[0]);
-                this._onStudioMutated({ rebuildSliders: true });
-            };
+            const card = document.createElement('button');
+            card.type = 'button';
+            card.className = 'cs-preset-card';
+            card.title = p.name;
+
+            const swatches = document.createElement('div');
+            swatches.className = 'cs-preset-swatches';
+            p.colors.slice(0, 6).forEach(col => {
+                const chip = document.createElement('i');
+                chip.style.background = col;
+                swatches.appendChild(chip);
+            });
+
+            const footer = document.createElement('div');
+            footer.className = 'cs-preset-footer';
+
+            const nameEl = document.createElement('span');
+            nameEl.className = 'cs-preset-name';
+            nameEl.textContent = p.name;
+            footer.appendChild(nameEl);
+
             if (!p.builtIn) {
                 const del = document.createElement('span');
-                del.textContent = ' ×';
-                del.style.color = '#ff4444';
-                del.style.marginLeft = '4px';
+                del.className = 'cs-preset-del';
+                del.textContent = '×';
+                del.title = 'Delete Preset';
                 del.onclick = (ev) => {
                     ev.stopPropagation();
                     const usrIdx = idx - PALETTE_PRESETS.length;
@@ -2860,9 +3439,17 @@ export class PaletteStudio {
                     this.app.palette.saveCustomPresets();
                     this.renderPresetsBar();
                 };
-                btn.appendChild(del);
+                footer.appendChild(del);
             }
-            bar.appendChild(btn);
+
+            card.appendChild(swatches);
+            card.appendChild(footer);
+            card.onclick = () => {
+                this.app.palette.loadPreset(p);
+                this.app.setColor(this.app.palette.baseColors[0]);
+                this._onStudioMutated({ rebuildSliders: true });
+            };
+            bar.appendChild(card);
         });
     }
 }

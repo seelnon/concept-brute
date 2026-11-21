@@ -1382,15 +1382,18 @@
 
                 <!-- WHEEL SPACE + SYMMETRY TOP STRIP -->
                 <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; border: 2px solid #000; background: #2a2a2a; padding: 6px 8px;">
-                    <div style="display: flex; align-items: center; gap: 4px;">
+                    <div style="display: flex; align-items: center; gap: 4px; flex-wrap: wrap;">
                         <span style="font-size: 8px; font-weight: 900; color: #bbb; margin-right: 4px;">WHEEL:</span>
                         <button class="mini-btn cs-seg-btn" data-wheel-space="ryb" title="Painterly RYB Wheel (Y+B=Green)">RYB</button>
                         <button class="mini-btn cs-seg-btn" data-wheel-space="oklch" title="Perceptual Uniform OKLCH Wheel">OKLCH</button>
+                        <button class="mini-btn cs-seg-btn" data-wheel-space="oklab" title="Perceptual OKLab Opponent Wheel (Green-Red / Blue-Yellow)">OKLAB</button>
+                        <button class="mini-btn cs-seg-btn" data-wheel-space="cmyk" title="Subtractive CMYK Process Wheel (Cyan-Magenta-Yellow)">CMYK</button>
                         <button class="mini-btn cs-seg-btn" data-wheel-space="hsl" title="Standard Digital RGB Wheel">RGB</button>
                     </div>
                     <div style="display: flex; align-items: center; gap: 6px; flex: 1; min-width: 180px; justify-content: flex-end;">
                         <span style="font-size: 8px; font-weight: 900; color: #bbb;">SYMMETRY:</span>
-                        <select id="cs-symmetry-select" style="border: 2px solid #000; background: #fff; color: #000; font-family: inherit; font-size: 9px; font-weight: 900; padding: 3px 6px; flex: 1; max-width: 190px;"></select>
+                        <select id="cs-symmetry-select" style="border: 2px solid #000; background: #fff; color: #000; font-family: inherit; font-size: 9px; font-weight: 900; padding: 3px 6px; flex: 1; max-width: 165px;"></select>
+                        <button id="btn-cs-group-lock" class="mini-btn cs-lock-btn" title="Lock current 6-color differences & ratios so dragging ANY node in Studio or docked UI shifts the whole group">UNLOCKED · FREE</button>
                     </div>
                 </div>
 
@@ -1400,7 +1403,7 @@
                     <!-- TOP-LEFT: HARMONY WHEEL CIRCLE (DARK) -->
                     <div style="position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; background: #141414; border: 2px solid #000; padding: 8px;">
                         <canvas id="cs-harmony-wheel" width="290" height="290" style="width: 240px; height: 240px; cursor: crosshair; touch-action: none;"></canvas>
-                        <div style="font-size: 7.5px; color: #999; margin-top: 4px; font-weight: 900; letter-spacing: 0.4px; text-align: center;">DRAG ★1 TO ROTATE SYMMETRY · DRAG NODES 2–6 FREELY</div>
+                        <div id="cs-wheel-hint" style="font-size: 7.5px; color: #999; margin-top: 4px; font-weight: 900; letter-spacing: 0.4px; text-align: center;">UNLOCKED · DRAG ANY NODE 1–6 FREELY</div>
                     </div>
 
                     <!-- TOP-RIGHT: 6 MAIN ANCHORS + GLOBAL ANCHOR SHIFT -->
@@ -1418,6 +1421,10 @@
                             <button class="mini-btn" data-global-nudge="light-plus">LIGHT +</button>
                             <button class="mini-btn" data-global-nudge="sat-minus">MUD -</button>
                             <button class="mini-btn" data-global-nudge="sat-plus">PURE +</button>
+                            <button class="mini-btn" data-global-nudge="angle-minus" title="Tighten hue angle spread between anchors">ANGLE -</button>
+                            <button class="mini-btn" data-global-nudge="angle-plus" title="Expand hue angle spread between anchors">ANGLE +</button>
+                            <button class="mini-btn" data-global-nudge="contrast-minus" title="Reduce tonal lightness contrast across anchors">CONTR -</button>
+                            <button class="mini-btn" data-global-nudge="contrast-plus" title="Increase tonal lightness contrast across anchors">CONTR +</button>
                         </div>
                         <button class="brutal-btn full-width" data-global-nudge="random" style="height: 22px; font-size: 9px;">↻ GENERATE HARMONIOUS SEED</button>
                     </div>
@@ -1440,7 +1447,7 @@
                                 <button id="btn-cs-save-preset" class="mini-btn" style="background: #fff; height: 22px; padding: 0 8px;">+ SAVE</button>
                             </div>
                         </div>
-                        <div id="cs-presets-bar" style="display: flex; flex-wrap: wrap; gap: 4px; align-content: flex-start;"></div>
+                        <div id="cs-presets-bar" class="cs-presets-grid"></div>
                     </div>
                 </div>
             </div>
@@ -1486,32 +1493,6 @@
                                 <button class="brutal-btn cs-seg-btn" data-mix-space="rgb" style="height: 24px; font-size: 8.5px;">RGB</button>
                             </div>
                             <div id="cs-mix-proof" class="cs-mix-proof"></div>
-                        </div>
-
-                        <div class="cs-section-box">
-                            <div class="cs-section-title">HARMONY &amp; SYMMETRY TUNING</div>
-                            <div class="settings-group" style="margin-bottom: 6px;">
-                                <div style="display: flex; justify-content: space-between; align-items: center;">
-                                    <label class="settings-label">ANGLE SPREAD</label>
-                                    <span id="cs-spread-val" style="font-size: 9px; font-weight: 900;">30°</span>
-                                </div>
-                                <input type="range" id="cs-spread-slider" min="5" max="90" step="1" value="30" class="brutal-range" style="width: 100%; height: 16px;">
-                            </div>
-                            <div class="settings-group" style="margin-bottom: 8px;">
-                                <div style="display: flex; justify-content: space-between; align-items: center;">
-                                    <label class="settings-label">TONAL CONTRAST</label>
-                                    <span id="cs-contrast-val" style="font-size: 9px; font-weight: 900;">16%</span>
-                                </div>
-                                <input type="range" id="cs-contrast-slider" min="0" max="45" step="1" value="16" class="brutal-range" style="width: 100%; height: 16px;">
-                            </div>
-                            <div class="settings-row" style="margin: 6px 0;">
-                                <label class="settings-label">AUTO-SYNC SYMMETRY FROM ★1</label>
-                                <div class="checkbox-wrapper">
-                                    <input type="checkbox" id="cs-auto-sync-chk" checked class="settings-input-check">
-                                    <span class="checkbox-custom"></span>
-                                </div>
-                            </div>
-                            <button id="btn-cs-apply-sym" class="brutal-btn full-width" style="height: 26px; background: #000; color: #fff;">GENERATE / APPLY SYMMETRY TO 6 ANCHORS</button>
                         </div>
 
                         <div class="cs-section-box">

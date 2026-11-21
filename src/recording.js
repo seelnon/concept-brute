@@ -1,16 +1,26 @@
 import { TOOLS, LAYERS_COUNT } from './constants.js';
 
-function canvasToDataURLAsync(canvas, type = 'image/png', quality) {
+const TIMELAPSE_PAGE_SIZE = 20;
+
+function canvasToJpegBlobAsync(canvas, quality = 0.8) {
   if (!canvas || canvas.width <= 0 || canvas.height <= 0) {
-    return Promise.resolve('');
+    return Promise.resolve(null);
   }
   return new Promise((resolve) => {
     let settled = false;
-    const fallbackUrl = () => {
+    const dataUrlToBlob = (url) => {
+      if (!url || !url.startsWith('data:')) return null;
       try {
-        return canvas.toDataURL(type, quality);
-      } catch (e) {
-        return '';
+        const comma = url.indexOf(',');
+        if (comma === -1) return null;
+        const mimeMatch = /data:([^;]+)/.exec(url.slice(0, comma));
+        const mime = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+        const bin = atob(url.slice(comma + 1));
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return new Blob([bytes], { type: mime });
+      } catch (_) {
+        return null;
       }
     };
     const done = (val) => {
@@ -19,21 +29,47 @@ function canvasToDataURLAsync(canvas, type = 'image/png', quality) {
       clearTimeout(timer);
       resolve(val);
     };
-    const timer = setTimeout(() => done(fallbackUrl()), 10000);
+    const timer = setTimeout(() => {
+      try {
+        done(dataUrlToBlob(canvas.toDataURL('image/jpeg', quality)));
+      } catch (_) {
+        done(null);
+      }
+    }, 10000);
     try {
       canvas.toBlob((blob) => {
         if (settled) return;
-        if (!blob) {
-          done(fallbackUrl());
+        if (blob) {
+          done(blob);
           return;
         }
-        const reader = new FileReader();
-        reader.onloadend = () => done(reader.result || '');
-        reader.onerror = () => done(fallbackUrl());
-        reader.readAsDataURL(blob);
-      }, type, quality);
+        try {
+          done(dataUrlToBlob(canvas.toDataURL('image/jpeg', quality)));
+        } catch (_) {
+          done(null);
+        }
+      }, 'image/jpeg', quality);
     } catch (e) {
-      done(fallbackUrl());
+      try {
+        done(dataUrlToBlob(canvas.toDataURL('image/jpeg', quality)));
+      } catch (_) {
+        done(null);
+      }
+    }
+  });
+}
+
+function blobToDataURLAsync(blob) {
+  if (!blob) return Promise.resolve('');
+  if (typeof blob === 'string') return Promise.resolve(blob);
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result || '');
+    reader.onerror = () => resolve('');
+    try {
+      reader.readAsDataURL(blob);
+    } catch (_) {
+      resolve('');
     }
   });
 }
@@ -64,15 +100,22 @@ export class TimelapseRecorder {
     this.playbackIntervalId = null;
     this.playbackFps = 12;
 
-    // Buffered capture & deferred encode/save state (prevents lag during rapid strokes)
+    // Buffered capture, non-starving background encoder & paged IDB persistence
     this._workCanvas = null;
     this._workCtx = null;
     this._hasUnsavedChanges = false;
     this._encodeTimer = null;
     this._isEncodingBuffer = false;
     this._flushPromise = null;
-    this._maxBufferedRawFrames = 18;
+    this._maxBufferedRawFrames = 6;
     this._pendingGpuCapture = false;
+    this._dirtyPageVersions = new Map();
+    this._persistedPageCount = 0;
+    this._legacyNeedsPageMigration = false;
+    this._previewObjectUrl = null;
+    this._lastPreviewFrameRef = null;
+    this._clearArmed = false;
+    this._clearArmTimer = null;
 
     this._initStyles();
     this.resetSession();
@@ -81,6 +124,23 @@ export class TimelapseRecorder {
   _isPanelVisible() {
     const panel = document.getElementById('panel-recording');
     return Boolean(panel && !panel.classList.contains('hidden'));
+  }
+
+  _revokePreviewObjectUrl() {
+    if (this._previewObjectUrl) {
+      try { URL.revokeObjectURL(this._previewObjectUrl); } catch (_) {}
+      this._previewObjectUrl = null;
+    }
+    this._lastPreviewFrameRef = null;
+  }
+
+  _disposeWorkCanvas() {
+    if (this._workCanvas) {
+      this._workCanvas.width = 1;
+      this._workCanvas.height = 1;
+      this._workCanvas = null;
+      this._workCtx = null;
+    }
   }
 
   _disposeFrameItem(item) {
@@ -98,6 +158,17 @@ export class TimelapseRecorder {
     }
   }
 
+  _countBufferedFrames() {
+    if (!Array.isArray(this.frames)) return 0;
+    let count = 0;
+    for (let i = 0; i < this.frames.length; i++) {
+      if (this.frames[i] && typeof this.frames[i] === 'object' && this.frames[i].__buffered) {
+        count++;
+      }
+    }
+    return count;
+  }
+
   _hasBufferedFrames() {
     if (!Array.isArray(this.frames)) return false;
     for (let i = 0; i < this.frames.length; i++) {
@@ -108,8 +179,27 @@ export class TimelapseRecorder {
     return false;
   }
 
+  _markPageDirty(pageIdx) {
+    if (pageIdx < 0) return;
+    const prev = this._dirtyPageVersions.get(pageIdx) || 0;
+    this._dirtyPageVersions.set(pageIdx, prev + 1);
+  }
+
+  _markPagesDirtyFrom(startFrameIdx = 0) {
+    const startPage = Math.floor(Math.max(0, startFrameIdx) / TIMELAPSE_PAGE_SIZE);
+    const totalPages = Math.ceil(this.frames.length / TIMELAPSE_PAGE_SIZE);
+    for (let p = startPage; p < totalPages; p++) {
+      this._markPageDirty(p);
+    }
+  }
+
   hasPendingSave() {
-    return Boolean(this._hasUnsavedChanges || this._hasBufferedFrames() || this._pendingGpuCapture);
+    return Boolean(
+      this._hasUnsavedChanges ||
+      this._dirtyPageVersions.size > 0 ||
+      this._hasBufferedFrames() ||
+      this._pendingGpuCapture
+    );
   }
 
   _clearEncodeTimer() {
@@ -119,9 +209,13 @@ export class TimelapseRecorder {
     }
   }
 
-  _scheduleIdleEncode(delayMs = 700) {
-    this._clearEncodeTimer();
+  _scheduleIdleEncode(delayMs = 250, { forceReschedule = false } = {}) {
     if (!this._hasBufferedFrames()) return;
+    if (this._encodeTimer) {
+      if (!forceReschedule) return; // Never starve pending encode timer during rapid strokes!
+      clearTimeout(this._encodeTimer);
+      this._encodeTimer = null;
+    }
     this._encodeTimer = setTimeout(() => {
       this._encodeTimer = null;
       this._drainOneBufferedFrameIdle();
@@ -130,8 +224,13 @@ export class TimelapseRecorder {
 
   async _drainOneBufferedFrameIdle() {
     if (this._isEncodingBuffer || this._flushPromise) return;
-    if (this.engine && (this.engine.isDrawing || this.engine.isPanning || this.engine.isZooming || this.engine.isGesture)) {
-      this._scheduleIdleEncode(700);
+    const bufferedCount = this._countBufferedFrames();
+    if (bufferedCount === 0) return;
+
+    // Only yield to pointer activity while buffer is small; force drain if >= maxBufferedRawFrames
+    if (bufferedCount < this._maxBufferedRawFrames &&
+        this.engine && (this.engine.isDrawing || this.engine.isPanning || this.engine.isZooming || this.engine.isGesture)) {
+      this._scheduleIdleEncode(250, { forceReschedule: true });
       return;
     }
 
@@ -142,18 +241,20 @@ export class TimelapseRecorder {
     try {
       const item = this.frames[idx];
       if (item && item.canvas) {
-        const dataUrl = await canvasToDataURLAsync(item.canvas, 'image/jpeg', 0.8);
-        if (this.frames[idx] === item) {
-          this.frames[idx] = dataUrl;
-          this._disposeFrameItem(item);
+        const blob = await canvasToJpegBlobAsync(item.canvas, 0.8);
+        const liveIdx = this.frames[idx] === item ? idx : this.frames.indexOf(item);
+        if (liveIdx !== -1 && blob) {
+          this.frames[liveIdx] = blob;
+          this._markPageDirty(Math.floor(liveIdx / TIMELAPSE_PAGE_SIZE));
         }
+        this._disposeFrameItem(item);
       }
     } catch (e) {
       console.warn('Idle timelapse encode failed', e);
     } finally {
       this._isEncodingBuffer = false;
       if (this._hasBufferedFrames()) {
-        this._scheduleIdleEncode(60);
+        this._scheduleIdleEncode(35, { forceReschedule: true });
       }
     }
   }
@@ -175,8 +276,11 @@ export class TimelapseRecorder {
         const item = this.frames[i];
         if (item && typeof item === 'object' && item.__buffered && item.canvas) {
           try {
-            const dataUrl = await canvasToDataURLAsync(item.canvas, 'image/jpeg', 0.8);
-            this.frames[i] = dataUrl;
+            const blob = await canvasToJpegBlobAsync(item.canvas, 0.8);
+            if (blob) {
+              this.frames[i] = blob;
+              this._markPageDirty(Math.floor(i / TIMELAPSE_PAGE_SIZE));
+            }
           } catch (e) {
             console.warn('Flush encode failed for frame', i, e);
           } finally {
@@ -194,9 +298,25 @@ export class TimelapseRecorder {
   }
 
   _getFramePreviewSrc(frame) {
-    if (!frame) return '';
-    if (typeof frame === 'string') return frame;
+    if (!frame) {
+      this._revokePreviewObjectUrl();
+      return '';
+    }
+    if (typeof frame === 'string') {
+      this._revokePreviewObjectUrl();
+      return frame;
+    }
+    if (frame instanceof Blob) {
+      if (this._lastPreviewFrameRef === frame && this._previewObjectUrl) {
+        return this._previewObjectUrl;
+      }
+      this._revokePreviewObjectUrl();
+      this._previewObjectUrl = URL.createObjectURL(frame);
+      this._lastPreviewFrameRef = frame;
+      return this._previewObjectUrl;
+    }
     if (frame.__buffered && frame.canvas) {
+      this._revokePreviewObjectUrl();
       try {
         return frame.canvas.toDataURL('image/jpeg', 0.8);
       } catch (_) {
@@ -265,12 +385,16 @@ export class TimelapseRecorder {
   resetSession() {
     this._clearEncodeTimer();
     this._disposeAllBufferedFrames();
+    this._disposeWorkCanvas();
+    this._revokePreviewObjectUrl();
     this._pendingGpuCapture = false;
     this.sessionId = 'REC-' + new Date().toISOString().replace(/[-:T]/g, '').slice(2, 14);
     this.frames = [];
     this.currentFrameIdx = 0;
     this.strokeCounter = 0;
     this._hasUnsavedChanges = false;
+    this._dirtyPageVersions.clear();
+    this._legacyNeedsPageMigration = false;
     this.isPlaying = false;
     if (this.playbackIntervalId) {
       clearInterval(this.playbackIntervalId);
@@ -282,23 +406,72 @@ export class TimelapseRecorder {
   async saveCurrentSession(explicitProjectId = null) {
     if (!this.app || !this.app.storage) return;
     await this.flushBufferedFrames();
-    const data = {
-      sessionId: this.sessionId,
-      frames: this.frames,
-      selectionBox: this.selectionBox,
-      isRecording: this.isRecording,
-      isBoxVisible: this.isBoxVisible,
-      qualityScale: this.qualityScale,
-      strideInterval: this.strideInterval,
-      playbackFps: this.playbackFps
-    };
+
+    if (this._legacyNeedsPageMigration) {
+      this._markPagesDirtyFrom(0);
+      this._legacyNeedsPageMigration = false;
+    }
+
+    const targetPid = explicitProjectId || this.app.currentProjectId;
+    const isForeignProjectSave = Boolean(explicitProjectId && explicitProjectId !== this.app.currentProjectId);
+    const frameCount = this.frames.length;
+    const pageCount = Math.ceil(frameCount / TIMELAPSE_PAGE_SIZE);
+    const storage = this.app.storage;
+
     try {
-      await this.app.storage.saveSetting('timelapse_data', data, explicitProjectId);
-      if (!explicitProjectId || explicitProjectId === this.app.currentProjectId) {
+      // Write ONLY modified pages (unless explicitly saving snapshot into a different projectId)
+      const pagesToWrite = isForeignProjectSave
+        ? Array.from({ length: pageCount }, (_, i) => i)
+        : Array.from(this._dirtyPageVersions.keys()).filter(p => p >= 0 && p < pageCount);
+
+      for (const pageIdx of pagesToWrite) {
+        const versionAtStart = this._dirtyPageVersions.get(pageIdx);
+        const start = pageIdx * TIMELAPSE_PAGE_SIZE;
+        let slice = this.frames.slice(start, start + TIMELAPSE_PAGE_SIZE);
+        if (storage.isFallback) {
+          slice = await Promise.all(slice.map(f => blobToDataURLAsync(f)));
+        }
+        await storage.saveSetting(`timelapse_page_${pageIdx}`, { page: pageIdx, frames: slice }, explicitProjectId);
+        if (!isForeignProjectSave && this._dirtyPageVersions.get(pageIdx) === versionAtStart) {
+          this._dirtyPageVersions.delete(pageIdx);
+        }
+      }
+
+      // Clean up stale trailing dirty entries beyond new pageCount
+      if (!isForeignProjectSave) {
+        for (const p of Array.from(this._dirtyPageVersions.keys())) {
+          if (p >= pageCount) this._dirtyPageVersions.delete(p);
+        }
+      }
+
+      // Delete any leftover old pages beyond current pageCount
+      if (this._persistedPageCount > pageCount && typeof storage.deleteSetting === 'function') {
+        for (let p = pageCount; p < this._persistedPageCount; p++) {
+          await storage.deleteSetting(`timelapse_page_${p}`, explicitProjectId);
+        }
+      }
+
+      // Compact metadata header only (never re-writes old frame bytes on every autosave)
+      const meta = {
+        version: 2,
+        sessionId: this.sessionId,
+        frameCount,
+        pageSize: TIMELAPSE_PAGE_SIZE,
+        pageCount,
+        selectionBox: this.selectionBox,
+        isRecording: this.isRecording,
+        isBoxVisible: this.isBoxVisible,
+        qualityScale: this.qualityScale,
+        strideInterval: this.strideInterval,
+        playbackFps: this.playbackFps
+      };
+      await storage.saveSetting('timelapse_data', meta, explicitProjectId);
+      if (targetPid === this.app.currentProjectId) {
+        this._persistedPageCount = pageCount;
         this._hasUnsavedChanges = false;
       }
     } catch (e) {
-      console.warn("Failed saving timelapse_data session", e);
+      console.warn('Failed saving timelapse_data session', e);
     }
   }
 
@@ -724,18 +897,21 @@ export class TimelapseRecorder {
       if (!snapCtx) return;
       snapCtx.drawImage(outCanvas, 0, 0);
 
+      const frameIndex = this.frames.length;
       this.frames.push({ __buffered: true, canvas: snapCanvas });
-      this.currentFrameIdx = this.frames.length - 1;
+      this.currentFrameIdx = frameIndex;
+      this._markPageDirty(Math.floor(frameIndex / TIMELAPSE_PAGE_SIZE));
       this._hasUnsavedChanges = true;
 
-      // Skip DOM & image updates while panel is closed; flush/encode lazily when idle or saving
+      // Skip DOM & image updates while panel is closed; encode lazily in non-starving background pump
       if (this._isPanelVisible()) {
         this.updateUI();
       }
-      if (this.frames.length >= this._maxBufferedRawFrames && !this._isEncodingBuffer) {
-        this._scheduleIdleEncode(350);
+      const bufferedCount = this._countBufferedFrames();
+      if (bufferedCount >= this._maxBufferedRawFrames && !this._isEncodingBuffer) {
+        this._scheduleIdleEncode(35, { forceReschedule: true });
       } else {
-        this._scheduleIdleEncode(700);
+        this._scheduleIdleEncode(250);
       }
     } catch (e) {
       console.error('Timelapse Frame Capture Failed:', e);
@@ -745,9 +921,11 @@ export class TimelapseRecorder {
   deleteCurrentFrame() {
     if (this.frames.length === 0) return;
     if (this.isPlaying) this.togglePlayback();
-    const removed = this.frames.splice(this.currentFrameIdx, 1);
+    const removedIdx = this.currentFrameIdx;
+    const removed = this.frames.splice(removedIdx, 1);
     if (removed && removed[0]) this._disposeFrameItem(removed[0]);
     this.currentFrameIdx = Math.max(0, Math.min(this.currentFrameIdx, this.frames.length - 1));
+    this._markPagesDirtyFrom(removedIdx);
     this._hasUnsavedChanges = true;
     this.updateUI();
     this.asyncSave();
@@ -761,6 +939,7 @@ export class TimelapseRecorder {
     }
     this.frames = this.frames.slice(this.currentFrameIdx);
     this.currentFrameIdx = 0;
+    this._markPagesDirtyFrom(0);
     this._hasUnsavedChanges = true;
     this.updateUI();
     this.asyncSave();
@@ -772,18 +951,50 @@ export class TimelapseRecorder {
     for (let i = this.currentFrameIdx + 1; i < this.frames.length; i++) {
       this._disposeFrameItem(this.frames[i]);
     }
+    const prevLen = this.frames.length;
     this.frames = this.frames.slice(0, this.currentFrameIdx + 1);
     this.currentFrameIdx = this.frames.length - 1;
+    if (prevLen !== this.frames.length) {
+      this._markPageDirty(Math.floor(Math.max(0, this.frames.length - 1) / TIMELAPSE_PAGE_SIZE));
+    }
     this._hasUnsavedChanges = true;
     this.updateUI();
     this.asyncSave();
   }
 
   clearTimeline() {
-    if (confirm('Clear the current timelapse recording completely? All captured frames under this session will be wiped.')) {
-      this.resetSession();
-      this.asyncSave();
+    const clearBtn = document.getElementById('btn-rec-clear');
+    if (clearBtn) {
+      if (!this._clearArmed) {
+        this._clearArmed = true;
+        clearBtn.dataset.origLabel = clearBtn.dataset.origLabel || clearBtn.textContent;
+        clearBtn.textContent = 'CONFIRM CLEAR?';
+        clearBtn.style.background = '#c00';
+        clearBtn.style.color = '#fff';
+        if (this._clearArmTimer) clearTimeout(this._clearArmTimer);
+        this._clearArmTimer = setTimeout(() => {
+          this._clearArmed = false;
+          this._clearArmTimer = null;
+          clearBtn.textContent = clearBtn.dataset.origLabel || 'CLEAR';
+          clearBtn.style.background = '';
+          clearBtn.style.color = '';
+        }, 3500);
+        this.app?._status?.('CLICK CLEAR AGAIN TO WIPE TIMELAPSE');
+        return;
+      }
+      this._clearArmed = false;
+      if (this._clearArmTimer) {
+        clearTimeout(this._clearArmTimer);
+        this._clearArmTimer = null;
+      }
+      clearBtn.textContent = clearBtn.dataset.origLabel || 'CLEAR';
+      clearBtn.style.background = '';
+      clearBtn.style.color = '';
     }
+    this.resetSession();
+    this._hasUnsavedChanges = true;
+    this.asyncSave();
+    this.app?._status?.('TIMELAPSE CLEARED');
   }
 
   async togglePlayback() {
@@ -824,20 +1035,21 @@ export class TimelapseRecorder {
 
   async downloadSequence() {
     if (this.frames.length === 0) {
-      alert('There are no frames captured yet. Start drawing to snap elements!');
+      this.app?._status?.('NO TIMELAPSE FRAMES CAPTURED YET');
       return;
     }
 
     await this.flushBufferedFrames();
 
     try {
+      const dataUrlFrames = await Promise.all(this.frames.map(f => blobToDataURLAsync(f)));
       const payload = {
         sessionId: this.sessionId,
         fps: this.playbackFps,
         mode: this.engine.isStatic ? 'Static' : 'Infinite',
         quality: this.qualityScale,
-        totalFrames: this.frames.length,
-        frames: this.frames // array of base64 jpg streams
+        totalFrames: dataUrlFrames.length,
+        frames: dataUrlFrames // array of base64 jpg streams
       };
 
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -846,16 +1058,16 @@ export class TimelapseRecorder {
       link.download = `${this.sessionId}_TIMELAPSE.json`;
       link.href = url;
       link.click();
-      URL.revokeObjectURL(url);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (e) {
       console.error('Failed to export timelapse sequence payload:', e);
-      alert('Error creating sequence file payload: ' + e.message);
+      this.app?._status?.('TIMELAPSE JSON EXPORT ERROR');
     }
   }
 
   async exportVideo() {
     if (this.frames.length === 0) {
-      alert('There are no frames captured yet. Start drawing to snap elements!');
+      this.app?._status?.('NO TIMELAPSE FRAMES CAPTURED YET');
       return;
     }
 
@@ -872,28 +1084,44 @@ export class TimelapseRecorder {
       btn.innerHTML = '🎬 SETUP ENCODER...';
     }
 
+    const loadFrameImage = (frame) => new Promise((resolve, reject) => {
+      const img = new Image();
+      let tempUrl = null;
+      const cleanup = () => {
+        if (tempUrl) {
+          URL.revokeObjectURL(tempUrl);
+          tempUrl = null;
+        }
+      };
+      img.onload = () => { cleanup(); resolve(img); };
+      img.onerror = (err) => { cleanup(); reject(err); };
+      if (frame instanceof Blob) {
+        tempUrl = URL.createObjectURL(frame);
+        img.src = tempUrl;
+      } else {
+        img.src = typeof frame === 'string' ? frame : '';
+      }
+    });
+
+    let stream = null;
+    let exportCanvas = null;
+
     try {
       // 1. Get first image dimensions
-      const firstImg = new Image();
-      await new Promise((resolve, reject) => {
-        firstImg.onload = resolve;
-        firstImg.onerror = reject;
-        firstImg.src = this.frames[0];
-      });
-
+      const firstImg = await loadFrameImage(this.frames[0]);
       const w = firstImg.width;
       const h = firstImg.height;
 
       // 2. Offscreen canvas at target dimensions
-      const canvas = document.createElement('canvas');
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext('2d');
+      exportCanvas = document.createElement('canvas');
+      exportCanvas.width = w;
+      exportCanvas.height = h;
+      const ctx = exportCanvas.getContext('2d');
       if (!ctx) throw new Error('Could not get Canvas 2D context');
 
       ctx.drawImage(firstImg, 0, 0);
 
-      // 3. Find supported mine types
+      // 3. Find supported mime types
       let mimeType = '';
       let ext = 'webm';
       const types = [
@@ -916,14 +1144,12 @@ export class TimelapseRecorder {
         throw new Error('Your browser does not support high fidelity MediaRecorder format.');
       }
 
-      console.log('[TIMELAPSE] Using video writer mimeType:', mimeType, 'extension:', ext);
-
       // 4. Set up MediaRecorder on canvas capture stream
       const fps = this.playbackFps || 12;
-      const stream = canvas.captureStream(fps);
+      stream = exportCanvas.captureStream(fps);
       const options = {
         mimeType: mimeType,
-        videoBitsPerSecond: 8000000 // 8 Mbps high bit-rate for crystal clear canvas rendering
+        videoBitsPerSecond: 8000000
       };
 
       const chunks = [];
@@ -952,21 +1178,13 @@ export class TimelapseRecorder {
           btn.innerHTML = `🎬 RENDER VIDEO (${percent}%)`;
         }
 
-        const img = new Image();
-        await new Promise((resolve, reject) => {
-          img.onload = resolve;
-          img.onerror = reject;
-          img.src = this.frames[i];
-        });
-
+        const img = await loadFrameImage(this.frames[i]);
         ctx.clearRect(0, 0, w, h);
         ctx.drawImage(img, 0, 0);
 
-        // Standard delay matching FPS to let recorder capture the painted buffer correctly
         await new Promise(resolve => setTimeout(resolve, frameDelay));
       }
 
-      // Add trailing buffer of half a second to capture final frame nicely
       await new Promise(resolve => setTimeout(resolve, 300));
 
       recorder.stop();
@@ -978,12 +1196,18 @@ export class TimelapseRecorder {
       link.download = `${this.sessionId}_TIMELAPSE.${ext}`;
       link.href = url;
       link.click();
-      URL.revokeObjectURL(url);
-
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (err) {
       console.error('[TIMELAPSE ENCODE ERROR]:', err);
-      alert('Failed to encode video stream: ' + err.message);
+      this.app?._status?.('VIDEO EXPORT FAILED');
     } finally {
+      if (stream) {
+        try { stream.getTracks().forEach(t => t.stop()); } catch (_) {}
+      }
+      if (exportCanvas) {
+        exportCanvas.width = 1;
+        exportCanvas.height = 1;
+      }
       if (btn) {
         btn.disabled = false;
         btn.innerHTML = orgText;
@@ -1073,6 +1297,7 @@ export class TimelapseRecorder {
             });
           } else {
             this.toggleSelectionBox(false);
+            this._revokePreviewObjectUrl();
           }
         }
       };
@@ -1085,6 +1310,7 @@ export class TimelapseRecorder {
         const panel = document.getElementById('panel-recording');
         if (panel) panel.classList.add('hidden');
         this.toggleSelectionBox(false);
+        this._revokePreviewObjectUrl();
       };
     }
 
@@ -1251,7 +1477,11 @@ export class TimelapseRecorder {
   async onProjectSwitched(explicitProjectId = null) {
     this._clearEncodeTimer();
     this._disposeAllBufferedFrames();
+    this._disposeWorkCanvas();
+    this._revokePreviewObjectUrl();
     this._hasUnsavedChanges = false;
+    this._dirtyPageVersions.clear();
+    this._persistedPageCount = 0;
     this._pendingGpuCapture = false;
 
     // 1. If currently playing, stop it cleanly
@@ -1292,18 +1522,46 @@ export class TimelapseRecorder {
         data = await this.app.storage.loadSetting('timelapse_data', explicitProjectId);
       }
     } catch (e) {
-      console.warn("Failed to load timelapse data on switch", e);
+      console.warn('Failed to load timelapse data on switch', e);
     }
 
     if (data && data.sessionId) {
       this.sessionId = data.sessionId;
-      this.frames = data.frames || [];
       this.selectionBox = data.selectionBox || { cx: 0, cy: 0, w: 500, h: 500 };
       this.isRecording = data.isRecording || false;
       this.isBoxVisible = data.isBoxVisible || false;
       this.qualityScale = data.qualityScale !== undefined ? data.qualityScale : 0.25;
       this.strideInterval = data.strideInterval !== undefined ? data.strideInterval : 4;
       this.playbackFps = data.playbackFps !== undefined ? data.playbackFps : 12;
+
+      if (data.version === 2) {
+        const pageCount = Math.max(0, data.pageCount || 0);
+        this._persistedPageCount = pageCount;
+        const loadedFrames = [];
+        if (pageCount > 0 && this.app?.storage) {
+          const keys = Array.from({ length: pageCount }, (_, i) => `timelapse_page_${i}`);
+          try {
+            const pagesMap = typeof this.app.storage.loadSettingsBatch === 'function'
+              ? await this.app.storage.loadSettingsBatch(keys, explicitProjectId)
+              : null;
+            for (let p = 0; p < pageCount; p++) {
+              const k = keys[p];
+              const pageObj = pagesMap ? pagesMap[k] : await this.app.storage.loadSetting(k, explicitProjectId);
+              if (pageObj && Array.isArray(pageObj.frames)) {
+                loadedFrames.push(...pageObj.frames);
+              }
+            }
+          } catch (e) {
+            console.warn('Failed to load paged timelapse frames', e);
+          }
+        }
+        this.frames = loadedFrames;
+      } else {
+        // Legacy single-record migration on read
+        this.frames = Array.isArray(data.frames) ? data.frames.slice() : [];
+        this._persistedPageCount = 0;
+        this._legacyNeedsPageMigration = this.frames.length > 0;
+      }
     } else {
       // Create a fresh session and clear frames sequence
       this.sessionId = 'REC-' + new Date().toISOString().replace(/[-:T]/g, '').slice(2, 14);
@@ -1314,6 +1572,8 @@ export class TimelapseRecorder {
       this.qualityScale = 0.25;
       this.strideInterval = 4;
       this.playbackFps = 12;
+      this._persistedPageCount = 0;
+      this._legacyNeedsPageMigration = false;
     }
 
     this.currentFrameIdx = this.frames.length > 0 ? this.frames.length - 1 : 0;

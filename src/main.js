@@ -56,9 +56,12 @@ class App {
         const indices = [0, 1, 5, 6, 10, 11];
         indices.forEach((extractedIdx, paletteIdx) => {
             if (colors[extractedIdx]) {
-                this.palette.setBaseColor(paletteIdx, colors[extractedIdx], { skipSymmetry: true });
+                this.palette.setBaseColor(paletteIdx, colors[extractedIdx], { skipGroup: true, skipSave: true });
             }
         });
+        if (this.palette.config.groupLock) {
+            this.palette.captureGroupBaseline();
+        }
         this.palette.saveConfig();
         this._renderPalette();
         if (colors.length > 0) {
@@ -1585,9 +1588,54 @@ class App {
     const swRadius = cfg.swatchShape === 'rounded' ? '4px' : '0px';
 
     paletteEl.style.gap = `${swGap}px`;
-    const frag = document.createDocumentFragment();
     const rows = this.palette.generate();
 
+    // Fast path: patch existing swatch nodes in-place if layout structure matches (avoids DOM churn during 60fps wheel drag)
+    const existingRows = paletteEl.children;
+    let canPatch = existingRows.length === rows.length;
+    if (canPatch) {
+        for (let r = 0; r < rows.length; r++) {
+            const rowEl = existingRows[r];
+            const row = rows[r];
+            if (!rowEl || rowEl.children.length !== row.length) {
+                canPatch = false;
+                break;
+            }
+            for (let c = 0; c < row.length; c++) {
+                const sw = rowEl.children[c];
+                if (!sw || sw.dataset.swType !== row[c].type || String(sw.dataset.swSpan || '') !== String(row[c].span || '')) {
+                    canPatch = false;
+                    break;
+                }
+            }
+            if (!canPatch) break;
+        }
+    }
+
+    if (canPatch) {
+        for (let r = 0; r < rows.length; r++) {
+            const rowEl = existingRows[r];
+            rowEl.style.gap = `${swGap}px`;
+            rowEl.style.minHeight = `${swHeight}px`;
+            const row = rows[r];
+            for (let c = 0; c < row.length; c++) {
+                const sw = rowEl.children[c];
+                const item = row[c];
+                sw._swatchColor = item.color;
+                sw.style.backgroundColor = item.color;
+                sw.style.height = `${swHeight}px`;
+                sw.style.borderRadius = swRadius;
+                sw.classList.toggle('active-swatch', !!item.active);
+                sw.classList.toggle('locked-swatch', !!item.locked);
+                sw.title = item.type === 'main'
+                    ? `${item.color} (Anchor ${item.index + 1}${item.locked ? ' · Locked' : ''})`
+                    : `${item.color} (Click to use · Shift+Click to set active anchor)`;
+            }
+        }
+        return;
+    }
+
+    const frag = document.createDocumentFragment();
     rows.forEach((row) => {
         const rowEl = document.createElement('div');
         rowEl.className = 'palette-row';
@@ -1597,8 +1645,11 @@ class App {
         row.forEach(item => {
             const swatch = document.createElement('div');
             swatch.className = `swatch ${item.type}`;
+            swatch.dataset.swType = item.type;
+            if (item.span) swatch.dataset.swSpan = String(item.span);
             if (item.active) swatch.classList.add('active-swatch');
             if (item.locked) swatch.classList.add('locked-swatch');
+            swatch._swatchColor = item.color;
             swatch.style.backgroundColor = item.color;
             swatch.style.height = `${swHeight}px`;
             swatch.style.borderRadius = swRadius;
@@ -1606,21 +1657,22 @@ class App {
 
             swatch.onclick = (e) => {
                 e.stopPropagation();
+                const col = swatch._swatchColor || item.color;
                 if (item.type === 'main') {
                     this.palette.activeIndex = item.index;
-                    this._updateHSVFromHex(item.color);
-                    this.setColor(item.color);
+                    this._updateHSVFromHex(col);
+                    this.setColor(col);
                     this._renderPalette();
-                    this.paletteStudio?.renderStudioDynamicSections();
+                    this.paletteStudio?.renderStudioDynamicSections({ includeHeavy: false });
                 } else if (e.shiftKey) {
                     // Shift+Click promotes generated swatch into active main anchor
-                    this.palette.setBaseColor(this.palette.activeIndex, item.color);
-                    this.setColor(item.color);
+                    this.palette.setBaseColor(this.palette.activeIndex, col);
+                    this.setColor(col);
                     this._renderPalette();
                     this.storage?.saveSetting('palette', this.palette.getSerializedState());
-                    this.paletteStudio?.renderStudioDynamicSections();
+                    this.paletteStudio?.renderStudioDynamicSections({ includeHeavy: false });
                 } else {
-                    this.setColor(item.color);
+                    this.setColor(col);
                 }
             };
 
@@ -1659,9 +1711,9 @@ class App {
     this._updateColorUI();
   }
 
-  _updateColorUI() {
+  _updateColorUI(opts = {}) {
     if (this.paletteStudio && this.paletteStudio._initialized) {
-        this.paletteStudio.syncColorUI(this.engine?.brush?.color || this.palette.baseColors[this.palette.activeIndex]);
+        this.paletteStudio.syncColorUI(this.engine?.brush?.color || this.palette.baseColors[this.palette.activeIndex], opts);
         return;
     }
     const svPicker = document.getElementById('sv-picker');
@@ -2333,19 +2385,18 @@ class App {
     if (tool) this._status(tool);
   }
 
-  setColor(color) {
+  setColor(color, { skipSave = false, preserveHsv = false, deferUi = false } = {}) {
     this.engine.brush.color = color;
     const preview = document.getElementById('current-color-preview');
     if (preview) preview.style.backgroundColor = color;
     
-    if (this.storage) this.storage.saveSetting('lastColor', color);
+    if (!skipSave && this.storage) this.storage.saveSetting('lastColor', color);
 
-    // Sync picker if it differs significantly or always sync?
-    // Always sync to ensure the selector matches current color
-    const rgb = hexToRgb(color);
-    const hsv = rgbToHsv(rgb.r, rgb.g, rgb.b);
-    this.hsv = hsv;
-    this._updateColorUI();
+    if (!preserveHsv) {
+        const rgb = hexToRgb(color);
+        this.hsv = rgbToHsv(rgb.r, rgb.g, rgb.b);
+    }
+    this._updateColorUI({ deferUi });
 
     // Smart Switch check: if color picked while using non-painting tools, switch to last brush
     if (this.activeTool === TOOLS.ERASER || this.activeTool === TOOLS.LASSO || this.activeTool === TOOLS.SMUDGE || this.activeTool === TOOLS.PICKER) {
