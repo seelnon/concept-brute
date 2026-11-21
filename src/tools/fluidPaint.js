@@ -1177,7 +1177,8 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
         streamerHScale: depthRatio * 10.0 + glossRatio * 2.0,
         isShading,
         depthRatio,
-        glossRatio
+        glossRatio,
+        pressure: effPressure
       });
 
       if (!isTailFlush) {

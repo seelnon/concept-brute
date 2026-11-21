@@ -1623,14 +1623,15 @@ function getNormalizedAirParams() {
   };
 }
 
-function buildTipInfo(engine, dirX, dirY, params, pointAngle = null, isDab = false) {
+function buildTipInfo(engine, dirX, dirY, params, pointAngle = null, isDab = false, pressure = 1.0) {
   const rot = computeAirTipAngle(engine, dirX, dirY, pointAngle);
   return {
     hasTip: _hasAirTip,
     cosR: rot.cosR,
     sinR: rot.sinR,
     tipPour: params.tipPour,
-    isDab
+    isDab,
+    pressure
   };
 }
 
@@ -1668,7 +1669,7 @@ export function clearAirWetCacheForProject(engine, projId) {
   }
 }
 
-function runGpuSmoothedBezier(engine, solver, ab, a, ctrl, b, radius, opacity, baseColor, flowFactor, params, timeSec, pointAngle = null, isDab = false) {
+function runGpuSmoothedBezier(engine, solver, ab, a, ctrl, b, radius, opacity, baseColor, flowFactor, params, timeSec, pointAngle = null, isDab = false, pressure = 1.0) {
   const dx1 = ctrl.x - a.x;
   const dy1 = ctrl.y - a.y;
   const dx2 = b.x - ctrl.x;
@@ -1708,7 +1709,7 @@ function runGpuSmoothedBezier(engine, solver, ab, a, ctrl, b, radius, opacity, b
     const sL = Math.hypot(sDx, sDy);
     const dirX = sL > 0.0001 ? sDx / sL : (ab.prevDir ? ab.prevDir.x : 1.0);
     const dirY = sL > 0.0001 ? sDy / sL : (ab.prevDir ? ab.prevDir.y : 0.0);
-    const tipInfo = buildTipInfo(engine, dirX, dirY, params, pointAngle, isDab);
+    const tipInfo = buildTipInfo(engine, dirX, dirY, params, pointAngle, isDab, pressure);
     solver.injectSegment(engine, prevPt, nextPt, radius, baseColor, opacity, flowFactor, params, timeSec + i * 0.015, tipInfo);
     ab.prevDir = { x: dirX, y: dirY };
     prevPt = nextPt;
@@ -1815,7 +1816,7 @@ export function paintAirIncrementally(engine, j) {
         const dirX = sL > 0.0001 ? sDx / sL : (ab.prevDir ? ab.prevDir.x : 1.0);
         const dirY = sL > 0.0001 ? sDy / sL : (ab.prevDir ? ab.prevDir.y : 0.0);
         ab.prevDir = { x: dirX, y: dirY };
-        const tipInfo = buildTipInfo(engine, dirX, dirY, params, pointAngle, true);
+        const tipInfo = buildTipInfo(engine, dirX, dirY, params, pointAngle, true, effPressure);
         const pad = Math.ceil(radius * (1.12 + params.bloom * 0.35 + params.tipPour * 0.22)) + 16;
         solver.beginStepBatch(engine, p.x - pad, p.y - pad, p.x + pad, p.y + pad);
         solver.injectSegment(engine, p, p, radius, baseColor, effOpacity, flowFactor, params, ab.time, tipInfo);
@@ -1832,7 +1833,7 @@ export function paintAirIncrementally(engine, j) {
         const dirX = sL > 0.0001 ? sDx / sL : 1.0;
         const dirY = sL > 0.0001 ? sDy / sL : 0.0;
         ab.prevDir = { x: dirX, y: dirY };
-        const tipInfo = buildTipInfo(engine, dirX, dirY, params, pointAngle, false);
+        const tipInfo = buildTipInfo(engine, dirX, dirY, params, pointAngle, false, effPressure);
         const pad = Math.ceil(radius * (1.12 + params.bloom * 0.35 + params.tipPour * 0.22)) + 16;
         const bMinX = Math.min(ab.p0.x, mid.x) - pad;
         const bMinY = Math.min(ab.p0.y, mid.y) - pad;
@@ -1846,7 +1847,7 @@ export function paintAirIncrementally(engine, j) {
         ab.midPrev = mid;
       } else {
         const midNext = { x: (ab.p1.x + p.x) * 0.5, y: (ab.p1.y + p.y) * 0.5 };
-        runGpuSmoothedBezier(engine, solver, ab, ab.midPrev, ab.p1, midNext, radius, effOpacity, baseColor, flowFactor, params, ab.time, pointAngle, false);
+        runGpuSmoothedBezier(engine, solver, ab, ab.midPrev, ab.p1, midNext, radius, effOpacity, baseColor, flowFactor, params, ab.time, pointAngle, false, effPressure);
         ab.p1 = { x: p.x, y: p.y };
         ab.midPrev = midNext;
       }
@@ -1900,7 +1901,7 @@ export function endAirPaintStroke(engine) {
       if (!ab.hasPainted) {
         const dirX = ab.prevDir ? ab.prevDir.x : 1.0;
         const dirY = ab.prevDir ? ab.prevDir.y : 0.0;
-        const tipInfo = buildTipInfo(engine, dirX, dirY, params, pAng, true);
+        const tipInfo = buildTipInfo(engine, dirX, dirY, params, pAng, true, effPressure);
         const pad = Math.ceil(ab.radius * (1.12 + params.bloom * 0.35 + params.tipPour * 0.22)) + 16;
         solver.beginStepBatch(engine, p.x - pad, p.y - pad, p.x + pad, p.y + pad);
         if (_hasAirTip) {
@@ -1918,7 +1919,7 @@ export function endAirPaintStroke(engine) {
         const sL = Math.hypot(sDx, sDy);
         const dirX = sL > 0.0001 ? sDx / sL : (ab.prevDir ? ab.prevDir.x : 1.0);
         const dirY = sL > 0.0001 ? sDy / sL : (ab.prevDir ? ab.prevDir.y : 0.0);
-        const tipInfo = buildTipInfo(engine, dirX, dirY, params, pAng, false);
+        const tipInfo = buildTipInfo(engine, dirX, dirY, params, pAng, false, effPressure);
         const pad = Math.ceil(ab.radius * (1.12 + params.bloom * 0.35 + params.tipPour * 0.22)) + 16;
         const bMinX = Math.min(ab.midPrev.x, ab.p1.x) - pad;
         const bMinY = Math.min(ab.midPrev.y, ab.p1.y) - pad;

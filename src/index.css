@@ -248,6 +248,28 @@ button:focus, input:focus, select:focus, .tool-btn:focus, .brutal-btn:focus, .mi
     gap: 2px;
 }
 
+#panel-brush-tips .brush-settings-container {
+    padding: 5px 4px 0 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+#panel-brush-tips .brush-setting {
+    margin: 0;
+}
+
+#panel-brush-tips .brush-setting .setting-label {
+    line-height: 1.05;
+    margin-bottom: 1px;
+}
+
+#panel-brush-tips .minimal-range {
+    height: 14px;
+    margin: 0;
+    display: block;
+}
+
 #tip-palette {
     padding: 6px 0 0 0;
     flex-shrink: 0;

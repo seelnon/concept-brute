@@ -175,6 +175,15 @@ uniform int u_nSteps;
 uniform int u_alphaLock;
 uniform int u_physicalMix;
 
+uniform sampler2D u_surfaceMap;
+uniform int u_hasSurface;
+uniform float u_surfaceInvScale;
+uniform float u_surfSlip;
+uniform float u_surfResist;
+uniform float u_surfChannel;
+uniform float u_surfRelief;
+uniform float u_pressure;
+
 ${GLSL_RYB_MIX}
 
 layout(location = 0) out vec4 outPaint;
@@ -260,21 +269,37 @@ void main() {
     curlVy = -(cos(p1) * cos(q1) + 1.05 * cos(p2) * sin(q2));
   }
 
+  vec4 surf = (u_hasSurface == 1)
+    ? texture(u_surfaceMap, worldPos * u_surfaceInvScale)
+    : vec4(0.5, 0.5, 0.5, 0.0);
+  float sHeight = surf.r;
+  vec2 sSlope = (surf.gb - 0.5) * 2.0;
+  float sCavity = surf.a;
+  vec2 sTangent = vec2(-sSlope.y, sSlope.x);
+
+  float slipVelMult = (u_hasSurface == 1) ? mix(0.60, 1.85, u_surfSlip) : 1.0;
+  float slipAdvMult = (u_hasSurface == 1) ? mix(0.68, 1.45, u_surfSlip) : 1.0;
+  float tanSign = (dot(sTangent, sDir) >= 0.0) ? 1.0 : -1.0;
+  vec2 grainPush = (u_hasSurface == 1)
+    ? (sTangent * (tanSign * u_surfChannel * 1.55) - sSlope * (u_surfChannel * 0.80)) * (0.30 + 0.70 * u_fluidity) * w
+    : vec2(0.0);
+
   float trailFade = proj >= 0.0 ? 1.0 : max(0.0, 1.0 + proj * u_trailFeatherInv);
   float activeTipDrive = 0.25 + 0.75 * maxTipA;
-  vec2 vel = sDir * (u_dragAmp * activeTipDrive)
-           + vec2(-rVec.y, rVec.x) * (invR * u_swirlAmp * w)
-           + vec2(curlVx, curlVy) * (u_curlAmp * w);
+  vec2 vel = sDir * (u_dragAmp * activeTipDrive * slipVelMult)
+           + vec2(-rVec.y, rVec.x) * (invR * u_swirlAmp * w * mix(0.75, 1.35, u_surfSlip))
+           + vec2(curlVx, curlVy) * (u_curlAmp * w)
+           + grainPush;
   float vLen = length(vel);
   if (vLen > 4.5) vel *= (4.5 / vLen);
 
-  float m = u_advMixBase * w * trailFade;
+  float m = clamp(u_advMixBase * slipAdvMult, 0.0, 0.85) * w * trailFade;
   vec4 wetP = srcP;
   float wetH = srcS.r;
 
   if (m > 0.005) {
     vec2 uv1 = clamp(v_uv - vel * w * u_texel, u_uvClamp.xy, u_uvClamp.zw);
-    vec2 uv2 = clamp(v_uv - sDir * (u_lagDistBase * w) * u_texel, u_uvClamp.xy, u_uvClamp.zw);
+    vec2 uv2 = clamp(v_uv - sDir * (u_lagDistBase * slipVelMult * w) * u_texel, u_uvClamp.xy, u_uvClamp.zw);
     vec4 advP = mixPremulPaint(texture(u_paint, uv1), texture(u_paint, uv2), 0.36, u_physicalMix);
     float advH = texture(u_state, uv1).r * 0.64 + texture(u_state, uv2).r * 0.36;
     wetP = mixPremulPaint(srcP, advP, m, u_physicalMix);
@@ -308,6 +333,14 @@ void main() {
     float localDist = u_prevDistTotal + u_safeDist * tSeg;
     float prevCov = (localDist - srcS.b >= 0.0 && localDist - srcS.b < u_coverWindow) ? srcS.g : 0.0;
 
+    if (u_hasSurface == 1 && u_surfResist > 0.01) {
+      float workEffort = clamp(u_pressure * 0.50 + u_paintSupply * 0.32 + prevCov * 0.38 + wetA * 0.34, 0.0, 1.35);
+      float valleyFloor = clamp((1.0 - workEffort * 0.78) * u_surfResist * 0.88, 0.0, 0.82);
+      float toothSignal = clamp(sHeight * (1.0 - 0.18 * u_surfResist) + 0.16 * u_surfRelief * (sHeight - 0.5) - sCavity * 0.24 * u_surfResist, 0.0, 1.0);
+      float valleyPass = smoothstep(valleyFloor - 0.15, valleyFloor + 0.17, toothSignal);
+      strandCoverage *= mix(1.0, valleyPass, u_surfResist);
+    }
+
     float targetBrushAlpha = min(1.0, strandCoverage * u_strokeOpacity);
     float stepA = (targetBrushAlpha > prevCov && prevCov < 0.99)
       ? (targetBrushAlpha - prevCov) / (1.0 - prevCov)
@@ -318,6 +351,9 @@ void main() {
       if (outA < targetBrushAlpha) outA = targetBrushAlpha;
 
       float toneShift = (wave - 0.54) * (4.0 + 14.0 * maxTipBump) * (0.2 + 1.25 * u_bristleContrast) / 255.0;
+      if (u_hasSurface == 1) {
+        toneShift += (sHeight - 0.5) * u_surfRelief * (10.0 / 255.0);
+      }
       vec3 fCol = clamp(paintColor + vec3(toneShift), 0.0, 1.0);
 
       if (u_alphaLock == 1) {
@@ -341,7 +377,8 @@ void main() {
 
       if (u_depthScale > 0.01 && (u_alphaLock == 0 || srcP.a > 0.004)) {
         float supplyH = 0.22 + 0.78 * u_paintSupply;
-        float targetH = strandCoverage * (0.14 + 0.86 * maxTipBump) * (0.30 + 0.70 * ridgeFactor) * u_depthScale * supplyH;
+        float toothRelief = (u_hasSurface == 1) ? mix(1.0, 0.72 + 0.56 * sHeight, u_surfRelief) : 1.0;
+        float targetH = strandCoverage * (0.14 + 0.86 * maxTipBump) * (0.30 + 0.70 * ridgeFactor) * toothRelief * u_depthScale * supplyH;
         wetH = min(52.0, max(wetH, targetH));
       }
 
@@ -457,6 +494,11 @@ uniform float u_bumpScale;
 uniform float u_diffIntensity;
 uniform float u_rimMax;
 uniform float u_specScale;
+uniform sampler2D u_surfaceMap;
+uniform int u_hasSurface;
+uniform vec2 u_simOrigin;
+uniform float u_surfaceInvScale;
+uniform float u_surfRelief;
 
 out vec4 outLit;
 
@@ -497,6 +539,12 @@ void main() {
   float gy = (bl + 2.0 * bc + br) - (tl + 2.0 * tc + tr);
 
   vec2 nxy = vec2(-gx, -gy) * u_bumpScale;
+  if (u_hasSurface == 1 && u_surfRelief > 0.01) {
+    vec2 wp = u_simOrigin + gl_FragCoord.xy;
+    vec2 surfSlope = (texture(u_surfaceMap, wp * u_surfaceInvScale).gb - 0.5) * 2.0;
+    float thinFade = clamp(1.0 - h * 0.04, 0.20, 1.0);
+    nxy += -surfSlope * (u_surfRelief * 0.65 * thinFade);
+  }
   float invLen = inversesqrt(dot(nxy, nxy) + 1.0);
   vec3 n = vec3(nxy * invLen, invLen);
 
@@ -708,7 +756,9 @@ export class GpuFluidSolver {
       'u_dragAmp', 'u_swirlAmp', 'u_curlAmp', 'u_lagDistBase', 'u_advMixBase', 'u_trailFeatherInv',
       'u_brFreq', 'u_bristleContrast', 'u_fluidity', 'u_vortex', 'u_turb', 'u_depthScale',
       'u_paintSupply', 'u_supplyThreshold', 'u_strokeOpacity', 'u_recolorRateBase',
-      'u_nSteps', 'u_alphaLock', 'u_physicalMix'
+      'u_nSteps', 'u_alphaLock', 'u_physicalMix',
+      'u_surfaceMap', 'u_hasSurface', 'u_surfaceInvScale', 'u_surfSlip',
+      'u_surfResist', 'u_surfChannel', 'u_surfRelief', 'u_pressure'
     ]);
     this.streamerLocs = this._cacheLocs(this.progStreamer, [
       'u_paint', 'u_state', 'u_simOrigin', 'u_segCount', 'u_segPos', 'u_segCol', 'u_segMeta',
@@ -716,7 +766,8 @@ export class GpuFluidSolver {
     ]);
     this.lightLocs = this._cacheLocs(this.progLight, [
       'u_paint', 'u_state', 'u_texel', 'u_uvClamp', 'u_doShade',
-      'u_bumpScale', 'u_diffIntensity', 'u_rimMax', 'u_specScale'
+      'u_bumpScale', 'u_diffIntensity', 'u_rimMax', 'u_specScale',
+      'u_surfaceMap', 'u_hasSurface', 'u_simOrigin', 'u_surfaceInvScale', 'u_surfRelief'
     ]);
     this.unpremultLocs = this._cacheLocs(this.progUnpremult, ['u_tex']);
 
@@ -860,6 +911,16 @@ export class GpuFluidSolver {
     gl.uniform1i(this.injectLocs.u_nSteps, 1);
     gl.uniform1i(this.injectLocs.u_alphaLock, 0);
     gl.uniform1i(this.injectLocs.u_physicalMix, 0);
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, this.tipTex);
+    gl.uniform1i(this.injectLocs.u_surfaceMap, 4);
+    gl.uniform1i(this.injectLocs.u_hasSurface, 0);
+    gl.uniform1f(this.injectLocs.u_surfaceInvScale, 1.0 / 320.0);
+    gl.uniform1f(this.injectLocs.u_surfSlip, 0.5);
+    gl.uniform1f(this.injectLocs.u_surfResist, 0.0);
+    gl.uniform1f(this.injectLocs.u_surfChannel, 0.0);
+    gl.uniform1f(this.injectLocs.u_surfRelief, 0.0);
+    gl.uniform1f(this.injectLocs.u_pressure, 1.0);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 
     // 4. progStreamer (MRT): workPaintB + workStateB -> mrtWorkA
@@ -892,6 +953,13 @@ export class GpuFluidSolver {
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, this.workStateA.tex);
     gl.uniform1i(this.lightLocs.u_state, 1);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.tipTex);
+    gl.uniform1i(this.lightLocs.u_surfaceMap, 2);
+    gl.uniform1i(this.lightLocs.u_hasSurface, 0);
+    gl.uniform2f(this.lightLocs.u_simOrigin, 0, 0);
+    gl.uniform1f(this.lightLocs.u_surfaceInvScale, 1.0 / 320.0);
+    gl.uniform1f(this.lightLocs.u_surfRelief, 0.0);
     gl.uniform2f(this.lightLocs.u_texel, 1 / WORK_SIZE, 1 / WORK_SIZE);
     gl.uniform4f(this.lightLocs.u_uvClamp, 0.001, 0.001, 0.999, 0.999);
     gl.uniform1i(this.lightLocs.u_doShade, 1);
@@ -1335,6 +1403,11 @@ export class GpuFluidSolver {
     const alphaLock = layerSet && layerSet.alphaLock ? 1 : 0;
     const physicalMix = (engine.physicalColorMix !== false) ? 1 : 0;
 
+    const surfMgr = engine.surfaceManager;
+    const surfU = surfMgr ? surfMgr.getShaderUniforms() : { active: false };
+    const surfTex = surfU.active ? surfMgr.ensureGpuTextures(gl) : { mapTex: null };
+    const hasSurface = !!(surfU.active && surfTex.mapTex);
+
     gl.disable(gl.BLEND);
     gl.bindVertexArray(this.gpuRenderer.vao);
 
@@ -1441,6 +1514,17 @@ export class GpuFluidSolver {
       gl.uniform1i(this.injectLocs.u_alphaLock, alphaLock);
       gl.uniform1i(this.injectLocs.u_physicalMix, physicalMix);
 
+      gl.activeTexture(gl.TEXTURE4);
+      gl.bindTexture(gl.TEXTURE_2D, hasSurface ? surfTex.mapTex : this.tipTex);
+      gl.uniform1i(this.injectLocs.u_surfaceMap, 4);
+      gl.uniform1i(this.injectLocs.u_hasSurface, hasSurface ? 1 : 0);
+      gl.uniform1f(this.injectLocs.u_surfaceInvScale, surfU.invScale || (1.0 / 320.0));
+      gl.uniform1f(this.injectLocs.u_surfSlip, surfU.slip ?? 0.5);
+      gl.uniform1f(this.injectLocs.u_surfResist, surfU.resist ?? 0.0);
+      gl.uniform1f(this.injectLocs.u_surfChannel, surfU.channel ?? 0.0);
+      gl.uniform1f(this.injectLocs.u_surfRelief, surfU.relief ?? 0.0);
+      gl.uniform1f(this.injectLocs.u_pressure, params.pressure !== undefined ? params.pressure : 1.0);
+
       gl.drawArrays(gl.TRIANGLES, 0, 6);
       this._swapWork();
     }
@@ -1501,6 +1585,13 @@ export class GpuFluidSolver {
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, this._srcState().tex);
     gl.uniform1i(this.lightLocs.u_state, 1);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, hasSurface ? surfTex.mapTex : this.tipTex);
+    gl.uniform1i(this.lightLocs.u_surfaceMap, 2);
+    gl.uniform1i(this.lightLocs.u_hasSurface, hasSurface ? 1 : 0);
+    gl.uniform2f(this.lightLocs.u_simOrigin, workX, workY);
+    gl.uniform1f(this.lightLocs.u_surfaceInvScale, surfU.invScale || (1.0 / 320.0));
+    gl.uniform1f(this.lightLocs.u_surfRelief, surfU.relief ?? 0.0);
 
     gl.uniform2f(this.lightLocs.u_texel, texel, texel);
     gl.uniform4f(this.lightLocs.u_uvClamp, minU, minV, maxU, maxV);
@@ -1602,6 +1693,11 @@ export class GpuFluidSolver {
       }
 
       // Compute Sobel 3D impasto lighting inside [1, 1, rw, rh]
+      const commitSurfMgr = engine.surfaceManager;
+      const commitSurfU = commitSurfMgr ? commitSurfMgr.getShaderUniforms() : { active: false };
+      const commitSurfTex = commitSurfU.active ? commitSurfMgr.ensureGpuTextures(gl) : { mapTex: null };
+      const commitHasSurf = !!(commitSurfU.active && commitSurfTex.mapTex);
+
       gl.scissor(1, 1, rw, rh);
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.workLit.fbo);
       gl.useProgram(this.progLight);
@@ -1611,6 +1707,13 @@ export class GpuFluidSolver {
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, this.workStateA.tex);
       gl.uniform1i(this.lightLocs.u_state, 1);
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, commitHasSurf ? commitSurfTex.mapTex : this.tipTex);
+      gl.uniform1i(this.lightLocs.u_surfaceMap, 2);
+      gl.uniform1i(this.lightLocs.u_hasSurface, commitHasSurf ? 1 : 0);
+      gl.uniform2f(this.lightLocs.u_simOrigin, workX, workY);
+      gl.uniform1f(this.lightLocs.u_surfaceInvScale, commitSurfU.invScale || (1.0 / 320.0));
+      gl.uniform1f(this.lightLocs.u_surfRelief, commitSurfU.relief ?? 0.0);
       gl.uniform2f(this.lightLocs.u_texel, texel, texel);
       gl.uniform4f(this.lightLocs.u_uvClamp, 0.5 * texel, 0.5 * texel, (boxW - 0.5) * texel, (boxH - 0.5) * texel);
       gl.uniform1i(this.lightLocs.u_doShade, doShade);

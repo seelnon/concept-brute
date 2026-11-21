@@ -328,8 +328,8 @@
                 </div>
              </div>
              <!-- TEXTURE SWATCHES -->
-              <div class="brush-settings-container" style="padding: 0 8px;">
-                  <div id="height-control" class="brush-setting" style="margin: 8px 0;">
+              <div class="brush-settings-container">
+                  <div id="height-control" class="brush-setting">
                     <div class="setting-label" style="display: flex; justify-content: space-between; align-items: center;">
                       <span class="uppercase font-black" style="font-size: 9px; font-weight: 900;">IMPASTO</span>
                       <span id="height-val" class="font-black" style="font-size: 9px; font-weight: 900;">0%</span>
@@ -337,7 +337,7 @@
                     <input type="range" id="brush-height" min="0" max="100" value="0" class="minimal-range" style="width: 100%;">
                   </div>
 
-                  <div id="oiliness-control" class="brush-setting" style="margin: 8px 0;">
+                  <div id="oiliness-control" class="brush-setting">
                     <div class="setting-label" style="display: flex; justify-content: space-between; align-items: center;">
                       <span class="uppercase font-black" style="font-size: 9px; font-weight: 900;">OILINESS</span>
                       <span id="oiliness-val" class="font-black" style="font-size: 9px; font-weight: 900;">0%</span>
@@ -345,14 +345,30 @@
                     <input type="range" id="brush-oiliness" min="0" max="100" value="50" class="minimal-range" style="width: 100%;">
                   </div>
 
-                  <div id="airbrush-control" class="brush-setting" style="margin: 8px 0;">
+                  <div id="smudge-alpha-control" class="brush-setting" style="display: none;">
+                    <div id="smudge-alpha-label-row" class="setting-label" style="display: flex; justify-content: space-between; align-items: center; cursor: pointer;" title="OFF: Old Smudge (Alpha-blind) | ON: Current Smudge">
+                      <span class="uppercase font-black" style="font-size: 9px; font-weight: 900;">ALPHA</span>
+                      <span id="smudge-alpha-val" class="font-black" style="font-size: 9px; font-weight: 900;">ON</span>
+                    </div>
+                    <input type="range" id="brush-smudge-alpha" min="0" max="1" step="1" value="1" class="minimal-range" style="width: 100%;">
+                  </div>
+
+                  <div id="smudge-pickup-control" class="brush-setting" style="display: none;">
+                    <div class="setting-label" style="display: flex; justify-content: space-between; align-items: center;">
+                      <span class="uppercase font-black" style="font-size: 9px; font-weight: 900;">PICKUP</span>
+                      <span id="smudge-pickup-val" class="font-black" style="font-size: 9px; font-weight: 900;">2.0</span>
+                    </div>
+                    <input type="range" id="brush-smudge-pickup" min="0" max="4" step="0.1" value="2.0" class="minimal-range" style="width: 100%;">
+                  </div>
+
+                  <div id="airbrush-control" class="brush-setting">
                     <div class="setting-label" style="display: flex; justify-content: space-between; align-items: center;">
                       <span class="uppercase font-black" style="font-size: 9px; font-weight: 900;">AIRBRUSH</span>
                       <span id="airbrush-val" class="font-black" style="font-size: 9px; font-weight: 900;">0%</span>
                     </div>
                     <input type="range" id="brush-airbrush" min="0" max="100" value="0" class="minimal-range" style="width: 100%;">
                   </div>
-                  <button id="btn-advanced-brush" class="brutal-btn full-width" style="margin-top: 4px; font-size: 9px; height: 24px;">ADVANCED</button>
+                  <button id="btn-advanced-brush" class="brutal-btn full-width" style="margin-top: 2px; font-size: 9px; height: 22px;">ADVANCED</button>
               </div>
              <div id="tip-palette">
                 <!-- 6 main slots -->
@@ -576,6 +592,86 @@
                   <div class="settings-group">
                      <label class="settings-label">CANVAS BACKGROUND</label>
                      <input type="color" id="settings-bg-color" value="#ffffff" class="settings-input-color">
+                  </div>
+                  <div class="settings-group">
+                     <div style="display: flex; justify-content: space-between; align-items: center; gap: 4px; margin-bottom: 4px;">
+                        <label class="settings-label" style="margin: 0;">SURFACE TEXTURE (FLUID / AIR)</label>
+                        <button id="btn-surface-upload" class="mini-btn" style="padding: 2px 6px; font-size: 9px; font-weight: 900;">UPLOAD IMG</button>
+                        <input type="file" id="input-surface-file" accept="image/*" style="display: none;">
+                     </div>
+                     <select id="settings-surface-type" class="full-width" style="border: 2px solid #000; font-family: inherit; font-size: 10px; font-weight: 800; padding: 3px 4px;">
+                        <option value="none">FLAT / OFF (100% DIRECT)</option>
+                        <option value="paper">COLD-PRESS PAPER</option>
+                        <option value="canvas">WOVEN LINEN CANVAS</option>
+                        <option value="wood">OAK WOOD GRAIN</option>
+                        <option value="stone">SLATE / STONE</option>
+                        <option value="cloth">TWILL CLOTH</option>
+                        <option value="ceramic">GLAZED CERAMIC</option>
+                        <option value="glass">SLICK GLASS</option>
+                        <option value="custom">CUSTOM UPLOADED IMAGE</option>
+                     </select>
+                  </div>
+                  <div id="surface-controls-box" class="settings-group hidden" style="border: 2px solid #000; padding: 8px; background: #f6f6f6; margin-top: 6px;">
+                     <div style="display: flex; gap: 8px; align-items: flex-start; margin-bottom: 8px;">
+                        <canvas id="surface-preview-canvas" width="96" height="96" style="width: 72px; height: 72px; border: 2px solid #000; background: #fff; flex-shrink: 0;"></canvas>
+                        <div style="flex: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0;">
+                           <div style="display: flex; gap: 4px;">
+                              <button id="btn-surface-preview-mode" class="mini-btn" style="flex: 1; font-size: 8px; padding: 3px 4px; font-weight: 900;">HEIGHTMAP</button>
+                              <button id="btn-surface-regen" class="mini-btn" style="font-size: 8px; padding: 3px 6px; font-weight: 900;">SEED</button>
+                           </div>
+                           <span id="surface-gen-info" style="font-size: 8px; font-weight: 800; color: #333; line-height: 1.25;">READY</span>
+                           <span id="surface-preset-hint" style="font-size: 8px; color: #555; line-height: 1.2;"></span>
+                        </div>
+                     </div>
+                     <div class="settings-row" style="margin-bottom: 6px;">
+                        <label class="settings-label">SEAMLESS TILE</label>
+                        <div class="checkbox-wrapper">
+                           <input type="checkbox" id="settings-surface-seamless" checked class="settings-input-check">
+                           <span class="checkbox-custom"></span>
+                        </div>
+                     </div>
+                     <div class="settings-row" style="margin-bottom: 6px;">
+                        <label class="settings-label">INVERT HEIGHT</label>
+                        <div class="checkbox-wrapper">
+                           <input type="checkbox" id="settings-surface-invert" class="settings-input-check">
+                           <span class="checkbox-custom"></span>
+                        </div>
+                     </div>
+                     <div class="settings-group" style="margin-bottom: 6px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                           <label class="settings-label">TILE SCALE</label>
+                           <span id="surface-scale-val" style="font-size: 9px; font-weight: 900;">340px</span>
+                        </div>
+                        <input type="range" id="settings-surface-scale" min="64" max="800" step="8" value="340" class="brutal-range" style="width: 100%;">
+                     </div>
+                     <div class="settings-group" style="margin-bottom: 6px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                           <label class="settings-label">SLIP / GRIP</label>
+                           <span id="surface-slip-val" style="font-size: 9px; font-weight: 900;">24% SLIP</span>
+                        </div>
+                        <input type="range" id="settings-surface-slip" min="0" max="100" value="24" class="brutal-range" style="width: 100%;">
+                     </div>
+                     <div class="settings-group" style="margin-bottom: 6px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                           <label class="settings-label">RELIEF / VALLEY RESIST</label>
+                           <span id="surface-relief-val" style="font-size: 9px; font-weight: 900;">58%</span>
+                        </div>
+                        <input type="range" id="settings-surface-relief" min="0" max="100" value="58" class="brutal-range" style="width: 100%;">
+                     </div>
+                     <div class="settings-group" style="margin-bottom: 6px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                           <label class="settings-label">GRAIN CHANNELING</label>
+                           <span id="surface-channel-val" style="font-size: 9px; font-weight: 900;">22%</span>
+                        </div>
+                        <input type="range" id="settings-surface-channel" min="0" max="100" value="22" class="brutal-range" style="width: 100%;">
+                     </div>
+                     <div class="settings-group" style="margin-bottom: 0;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                           <label class="settings-label">BG VISIBILITY</label>
+                           <span id="surface-opacity-val" style="font-size: 9px; font-weight: 900;">62%</span>
+                        </div>
+                        <input type="range" id="settings-surface-opacity" min="0" max="100" value="62" class="brutal-range" style="width: 100%;">
+                     </div>
                   </div>
                   <div class="settings-divider"></div>
                   <div class="settings-group">
@@ -944,13 +1040,6 @@
                          <span id="adv-smudge-flow-boost-val" style="font-size: 9px; font-weight: 900;">1.0</span>
                      </div>
                      <input type="range" id="adv-smudge-flow-boost" min="0" max="10" step="0.1" value="1.0" class="brutal-range" style="width: 100%;">
-                  </div>
-                  <div class="settings-group">
-                     <div style="display: flex; justify-content: space-between; align-items: center;">
-                         <label class="settings-label">PICKUP (WETNESS)</label>
-                         <span id="adv-smudge-pickup-val" style="font-size: 9px; font-weight: 900;">2.0</span>
-                     </div>
-                     <input type="range" id="adv-smudge-pickup" min="0" max="4" step="0.1" value="2.0" class="brutal-range" style="width: 100%;">
                   </div>
                   <div class="settings-group">
                      <div style="display: flex; justify-content: space-between; align-items: center;">

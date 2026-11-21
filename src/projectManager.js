@@ -1468,7 +1468,7 @@ export async function generateThumbnail(app, options = {}) {
     
     tctx.fillStyle = app.engine.canvasBg;
     tctx.fillRect(0, 0, size, size);
-    
+
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     if (app.engine.isStatic) {
         minX = -app.engine.staticWidth / 2;
@@ -1494,6 +1494,22 @@ export async function generateThumbnail(app, options = {}) {
     tctx.translate(size/2, size/2);
     tctx.scale(scale, scale);
     tctx.translate(-(minX + w/2), -(minY + h/2));
+
+    if (app.engine.surfaceManager && app.engine.surfaceManager.isActive && app.engine.surfaceManager.bgOpacity > 0.01) {
+        const surfCanvas = app.engine.surfaceManager.getColorCanvas();
+        if (surfCanvas) {
+            const pat = tctx.createPattern(surfCanvas, 'repeat');
+            if (pat) {
+                const sc = (app.engine.surfaceManager.scale || 340) / surfCanvas.width;
+                tctx.save();
+                tctx.globalAlpha = app.engine.surfaceManager.bgOpacity;
+                tctx.scale(sc, sc);
+                tctx.fillStyle = pat;
+                tctx.fillRect(minX / sc, minY / sc, w / sc, h / sc);
+                tctx.restore();
+            }
+        }
+    }
     
     app.engine.chunks.forEach(chunk => {
         const lx = app.engine.isStatic ? -app.engine.staticWidth / 2 : chunk.cx * app.engine.chunkSize;
@@ -1559,10 +1575,27 @@ export async function performExport(app) {
     const tempCtx = tempCanvas.getContext('2d');
     if (!tempCtx) return;
     
-    // Draw background color and grid pattern if not exporting transparency (alpha)
+    // Draw background color, surface texture, and grid pattern if not exporting transparency (alpha)
     if (!alpha) {
         tempCtx.fillStyle = app.engine.canvasBg;
         tempCtx.fillRect(0, 0, exactW, exactH);
+
+        if (app.engine.surfaceManager && app.engine.surfaceManager.isActive && app.engine.surfaceManager.bgOpacity > 0.01) {
+            const surfCanvas = app.engine.surfaceManager.getColorCanvas();
+            if (surfCanvas) {
+                const surfPat = tempCtx.createPattern(surfCanvas, 'repeat');
+                if (surfPat) {
+                    const patScale = (app.engine.surfaceManager.scale || 340) / surfCanvas.width;
+                    tempCtx.save();
+                    tempCtx.globalAlpha = app.engine.surfaceManager.bgOpacity;
+                    tempCtx.translate(-xStart, -yStart);
+                    tempCtx.scale(patScale, patScale);
+                    tempCtx.fillStyle = surfPat;
+                    tempCtx.fillRect(xStart / patScale, yStart / patScale, exactW / patScale, exactH / patScale);
+                    tempCtx.restore();
+                }
+            }
+        }
         
         if (app.engine.showGrid) {
             if (!app.engine._gridCanvas) {

@@ -31,8 +31,10 @@ export function setupBoard(force = false) {
       this.gpuRenderer.requestRender();
       return;
   }
+  const surfMgr = this.surfaceManager;
+  const surfVer = (surfMgr && surfMgr.isActive) ? `${surfMgr.version}-${surfMgr.scale}-${surfMgr.bgOpacity}` : 'none';
   const gridVisible = this.showGrid && this.zoom > 0.01;
-  const currentKey = `${this.isStatic}-${this.staticWidth}-${this.staticHeight}-${this.canvasBg}-${gridVisible}-${this.gridSize}-${this.gridColor}-${this.gridIntensity}-${this.gridPattern}-${this.gridThickness || 2}`;
+  const currentKey = `${this.isStatic}-${this.staticWidth}-${this.staticHeight}-${this.canvasBg}-${gridVisible}-${this.gridSize}-${this.gridColor}-${this.gridIntensity}-${this.gridPattern}-${this.gridThickness || 2}-${surfVer}`;
   
   if (!force && this._lastSetupBoardKey === currentKey) {
       return;
@@ -52,6 +54,11 @@ export function setupBoard(force = false) {
   // Reset wrapper background in case
   this.canvasWrapper.style.backgroundColor = 'transparent';
   this.canvasWrapper.style.backgroundImage = 'none';
+
+  const surfTileUrl = (surfMgr && surfMgr.isActive && surfMgr.bgOpacity > 0.01 && surfMgr.getColorCanvas())
+      ? surfMgr.getColorCanvas().toDataURL()
+      : null;
+  const surfTilePx = (surfMgr && surfMgr.isActive) ? (surfMgr.scale || 340) : 340;
   
   if (this.isStatic) {
       this.boardContainer.style.overflow = 'hidden';
@@ -71,16 +78,28 @@ export function setupBoard(force = false) {
       // High contrast dark gray workspace for desk
       this.container.style.backgroundColor = '#18181c';
       
-      // Set up static board grid pattern
+      // Set up static board grid + surface pattern
       if (gridVisible) {
           const currentKeyGrid = `${this.gridSize}-${this.gridColor}-${this.gridIntensity}-${this.gridPattern}-${this.gridThickness || 2}`;
           if (this._lastGridParams !== currentKeyGrid) {
               this._gridTexture = this._generateGridTexture();
               this._lastGridParams = currentKeyGrid;
           }
-          this.boardContainer.style.backgroundImage = `url(${this._gridTexture})`;
           const texSize = this._gridTextureSize || 1024;
-          this.boardContainer.style.backgroundSize = `${texSize}px ${texSize}px`;
+          if (surfTileUrl) {
+              this.boardContainer.style.backgroundImage = `url(${this._gridTexture}), url(${surfTileUrl})`;
+              this.boardContainer.style.backgroundSize = `${texSize}px ${texSize}px, ${surfTilePx}px ${surfTilePx}px`;
+              this.boardContainer.style.backgroundPosition = `0px 0px, 0px 0px`;
+              this.boardContainer.style.backgroundRepeat = 'repeat, repeat';
+          } else {
+              this.boardContainer.style.backgroundImage = `url(${this._gridTexture})`;
+              this.boardContainer.style.backgroundSize = `${texSize}px ${texSize}px`;
+              this.boardContainer.style.backgroundPosition = `0px 0px`;
+              this.boardContainer.style.backgroundRepeat = 'repeat';
+          }
+      } else if (surfTileUrl) {
+          this.boardContainer.style.backgroundImage = `url(${surfTileUrl})`;
+          this.boardContainer.style.backgroundSize = `${surfTilePx}px ${surfTilePx}px`;
           this.boardContainer.style.backgroundPosition = `0px 0px`;
           this.boardContainer.style.backgroundRepeat = 'repeat';
       } else {

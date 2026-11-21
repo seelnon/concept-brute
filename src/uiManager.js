@@ -1,6 +1,7 @@
 import { TOOLS, LAYERS_COUNT } from './constants.js';
 import { syncFluidSettingsFromTip } from './tools/fluidPaint.js';
 import { syncAirSettingsFromTip } from './tools/airPaint.js';
+import { SURFACE_PRESETS } from './engine/canvasSurfaceGpu.js';
 
 export function setupUI(app) {
     // Ensures keyboard hotkeys listen immediately when the user touches or interacts with the app
@@ -533,6 +534,257 @@ export function setupUI(app) {
         app.engine.refreshGrid();
         queueGridSettingsSave();
     };
+
+    // CANVAS SURFACE TEXTURE (Fluid & Air/Watercolor physics + background tile)
+    let surfaceSaveTimeout = null;
+    const queueSurfaceSettingsSave = () => {
+        if (surfaceSaveTimeout) clearTimeout(surfaceSaveTimeout);
+        surfaceSaveTimeout = setTimeout(async () => {
+            if (!app.engine?.surfaceManager) return;
+            const serialized = app.engine.surfaceManager.serialize();
+            await app.storage.saveSetting('canvasSurface', serialized);
+            await updateProjectSetting('canvasSurface', serialized);
+        }, 250);
+    };
+
+    let surfacePreviewHeightMode = false;
+    const surfaceTypeEl = document.getElementById('settings-surface-type');
+    const surfaceBoxEl = document.getElementById('surface-controls-box');
+    const surfacePreviewEl = document.getElementById('surface-preview-canvas');
+    const surfacePreviewBtn = document.getElementById('btn-surface-preview-mode');
+    const surfaceRegenBtn = document.getElementById('btn-surface-regen');
+    const surfaceUploadBtn = document.getElementById('btn-surface-upload');
+    const surfaceFileInput = document.getElementById('input-surface-file');
+    const surfaceInfoEl = document.getElementById('surface-gen-info');
+    const surfaceHintEl = document.getElementById('surface-preset-hint');
+    const surfaceSeamlessEl = document.getElementById('settings-surface-seamless');
+    const surfaceInvertEl = document.getElementById('settings-surface-invert');
+    const surfaceScaleEl = document.getElementById('settings-surface-scale');
+    const surfaceSlipEl = document.getElementById('settings-surface-slip');
+    const surfaceReliefEl = document.getElementById('settings-surface-relief');
+    const surfaceChannelEl = document.getElementById('settings-surface-channel');
+    const surfaceOpacityEl = document.getElementById('settings-surface-opacity');
+
+    app.syncSurfaceUI = () => {
+        const mgr = app.engine?.surfaceManager;
+        if (!mgr) return;
+        const pDef = SURFACE_PRESETS[mgr.type] || SURFACE_PRESETS.none;
+
+        if (surfaceTypeEl) surfaceTypeEl.value = mgr.type || 'none';
+        if (surfaceBoxEl) surfaceBoxEl.classList.toggle('hidden', mgr.type === 'none');
+        if (surfaceSeamlessEl) surfaceSeamlessEl.checked = !!mgr.seamless;
+        if (surfaceInvertEl) surfaceInvertEl.checked = !!mgr.invertHeight;
+
+        if (surfaceScaleEl) {
+            surfaceScaleEl.value = Math.round(mgr.scale || 340);
+            const vEl = document.getElementById('surface-scale-val');
+            if (vEl) vEl.innerText = `${Math.round(mgr.scale || 340)}px`;
+        }
+        if (surfaceSlipEl) {
+            const pct = Math.round((mgr.slip ?? 0.24) * 100);
+            surfaceSlipEl.value = pct;
+            const vEl = document.getElementById('surface-slip-val');
+            if (vEl) vEl.innerText = `${pct}% SLIP`;
+        }
+        if (surfaceReliefEl) {
+            const pct = Math.round((mgr.relief ?? 0.58) * 100);
+            surfaceReliefEl.value = pct;
+            const vEl = document.getElementById('surface-relief-val');
+            if (vEl) vEl.innerText = `${pct}%`;
+        }
+        if (surfaceChannelEl) {
+            const pct = Math.round((mgr.channel ?? 0.22) * 100);
+            surfaceChannelEl.value = pct;
+            const vEl = document.getElementById('surface-channel-val');
+            if (vEl) vEl.innerText = `${pct}%`;
+        }
+        if (surfaceOpacityEl) {
+            const pct = Math.round((mgr.bgOpacity ?? 0.62) * 100);
+            surfaceOpacityEl.value = pct;
+            const vEl = document.getElementById('surface-opacity-val');
+            if (vEl) vEl.innerText = `${pct}%`;
+        }
+        if (surfacePreviewBtn) {
+            surfacePreviewBtn.innerText = surfacePreviewHeightMode ? 'ALBEDO' : 'HEIGHTMAP';
+        }
+        if (surfaceRegenBtn) {
+            surfaceRegenBtn.style.display = mgr.type === 'custom' ? 'none' : '';
+        }
+        if (surfaceSeamlessEl && surfaceSeamlessEl.closest('.settings-row')) {
+            surfaceSeamlessEl.closest('.settings-row').style.display = mgr.type === 'custom' ? 'flex' : 'none';
+        }
+        if (surfaceInfoEl) {
+            surfaceInfoEl.innerText = mgr.isActive
+                ? `${mgr.width}x${mgr.height} TILE • ${mgr.lastGenMs}ms`
+                : 'FLAT SURFACE';
+        }
+        if (surfaceHintEl) {
+            surfaceHintEl.innerText = pDef.hint || '';
+        }
+        if (surfacePreviewEl && mgr.isActive) {
+            const srcCanvas = surfacePreviewHeightMode ? mgr.getHeightCanvas() : mgr.getColorCanvas();
+            if (srcCanvas) {
+                const pCtx = surfacePreviewEl.getContext('2d');
+                pCtx.clearRect(0, 0, surfacePreviewEl.width, surfacePreviewEl.height);
+                pCtx.drawImage(srcCanvas, 0, 0, surfacePreviewEl.width, surfacePreviewEl.height);
+            }
+        }
+    };
+
+    if (surfaceTypeEl) {
+        surfaceTypeEl.onchange = (e) => {
+            const mgr = app.engine?.surfaceManager;
+            if (!mgr) return;
+            const val = e.target.value;
+            if (val === 'custom' && !mgr._customImage && !mgr.customDataUrl) {
+                surfaceFileInput?.click();
+            }
+            mgr.applyPresetDefaults(val);
+            app.syncSurfaceUI();
+            app.engine.refreshGrid();
+            queueSurfaceSettingsSave();
+        };
+    }
+
+    if (surfaceUploadBtn && surfaceFileInput) {
+        surfaceUploadBtn.onclick = () => {
+            surfaceFileInput.value = '';
+            surfaceFileInput.click();
+        };
+        surfaceFileInput.onchange = (e) => {
+            const file = e.target.files && e.target.files[0];
+            if (!file || !app.engine?.surfaceManager) return;
+            const url = URL.createObjectURL(file);
+            const img = new Image();
+            img.onload = () => {
+                try {
+                    // Store a compressed <= 512px dataUrl so localStorage & project reloads stay small/fast
+                    const maxDim = 512;
+                    const c = document.createElement('canvas');
+                    c.width = Math.min(maxDim, Math.max(64, img.width || maxDim));
+                    c.height = Math.min(maxDim, Math.max(64, img.height || maxDim));
+                    const ctx = c.getContext('2d');
+                    ctx.drawImage(img, 0, 0, c.width, c.height);
+                    const compactUrl = c.toDataURL('image/jpeg', 0.86);
+                    app.engine.surfaceManager.setCustomImage(c, compactUrl);
+                    app.syncSurfaceUI();
+                    app.engine.refreshGrid();
+                    queueSurfaceSettingsSave();
+                } finally {
+                    URL.revokeObjectURL(url);
+                }
+            };
+            img.onerror = () => {
+                URL.revokeObjectURL(url);
+            };
+            img.src = url;
+        };
+    }
+
+    if (surfacePreviewBtn) {
+        surfacePreviewBtn.onclick = () => {
+            surfacePreviewHeightMode = !surfacePreviewHeightMode;
+            app.syncSurfaceUI();
+        };
+    }
+
+    if (surfaceRegenBtn) {
+        surfaceRegenBtn.onclick = () => {
+            const mgr = app.engine?.surfaceManager;
+            if (!mgr) return;
+            mgr.seed = ((mgr.seed || 1337) + 97) % 100000;
+            mgr.rebuild();
+            app.syncSurfaceUI();
+            app.engine.refreshGrid();
+            queueSurfaceSettingsSave();
+        };
+    }
+
+    if (surfaceSeamlessEl) {
+        surfaceSeamlessEl.onchange = (e) => {
+            const mgr = app.engine?.surfaceManager;
+            if (!mgr) return;
+            mgr.seamless = !!e.target.checked;
+            mgr.rebuild();
+            app.syncSurfaceUI();
+            app.engine.refreshGrid();
+            queueSurfaceSettingsSave();
+        };
+    }
+
+    if (surfaceInvertEl) {
+        surfaceInvertEl.onchange = (e) => {
+            const mgr = app.engine?.surfaceManager;
+            if (!mgr) return;
+            mgr.invertHeight = !!e.target.checked;
+            mgr.rebuild();
+            app.syncSurfaceUI();
+            app.engine.refreshGrid();
+            queueSurfaceSettingsSave();
+        };
+    }
+
+    if (surfaceScaleEl) {
+        surfaceScaleEl.oninput = (e) => {
+            const mgr = app.engine?.surfaceManager;
+            if (!mgr) return;
+            mgr.scale = parseInt(e.target.value, 10) || 340;
+            const vEl = document.getElementById('surface-scale-val');
+            if (vEl) vEl.innerText = `${mgr.scale}px`;
+            app.engine.refreshGrid();
+        };
+        surfaceScaleEl.onchange = () => queueSurfaceSettingsSave();
+    }
+
+    if (surfaceSlipEl) {
+        surfaceSlipEl.oninput = (e) => {
+            const mgr = app.engine?.surfaceManager;
+            if (!mgr) return;
+            const pct = parseInt(e.target.value, 10) || 0;
+            mgr.slip = pct / 100;
+            const vEl = document.getElementById('surface-slip-val');
+            if (vEl) vEl.innerText = `${pct}% SLIP`;
+        };
+        surfaceSlipEl.onchange = () => queueSurfaceSettingsSave();
+    }
+
+    if (surfaceReliefEl) {
+        surfaceReliefEl.oninput = (e) => {
+            const mgr = app.engine?.surfaceManager;
+            if (!mgr) return;
+            const pct = parseInt(e.target.value, 10) || 0;
+            mgr.relief = pct / 100;
+            mgr.resist = Math.min(1, (pct / 100) * 0.95);
+            const vEl = document.getElementById('surface-relief-val');
+            if (vEl) vEl.innerText = `${pct}%`;
+        };
+        surfaceReliefEl.onchange = () => queueSurfaceSettingsSave();
+    }
+
+    if (surfaceChannelEl) {
+        surfaceChannelEl.oninput = (e) => {
+            const mgr = app.engine?.surfaceManager;
+            if (!mgr) return;
+            const pct = parseInt(e.target.value, 10) || 0;
+            mgr.channel = pct / 100;
+            const vEl = document.getElementById('surface-channel-val');
+            if (vEl) vEl.innerText = `${pct}%`;
+        };
+        surfaceChannelEl.onchange = () => queueSurfaceSettingsSave();
+    }
+
+    if (surfaceOpacityEl) {
+        surfaceOpacityEl.oninput = (e) => {
+            const mgr = app.engine?.surfaceManager;
+            if (!mgr) return;
+            const pct = parseInt(e.target.value, 10) || 0;
+            mgr.bgOpacity = pct / 100;
+            const vEl = document.getElementById('surface-opacity-val');
+            if (vEl) vEl.innerText = `${pct}%`;
+            app.engine.refreshGrid();
+        };
+        surfaceOpacityEl.onchange = () => queueSurfaceSettingsSave();
+    }
     document.getElementById('settings-brush-spacing').oninput = (e) => {
         const val = parseFloat(e.target.value);
         app.updateActiveSetting('spacing', val);
@@ -810,6 +1062,36 @@ export function setupUI(app) {
             const val = parseInt(e.target.value);
             oilinessVal.innerText = `${val}%`;
             app.updateActiveSetting('oiliness', val / 100);
+        };
+    }
+
+    const smudgeAlphaSlider = document.getElementById('brush-smudge-alpha');
+    const smudgeAlphaVal = document.getElementById('smudge-alpha-val');
+    const smudgeAlphaLabelRow = document.getElementById('smudge-alpha-label-row');
+    const applySmudgeAlpha = (isOn) => {
+        if (smudgeAlphaSlider) smudgeAlphaSlider.value = isOn ? '1' : '0';
+        if (smudgeAlphaVal) smudgeAlphaVal.innerText = isOn ? 'ON' : 'OFF';
+        app.updateActiveSetting('smudgeAlpha', isOn);
+    };
+    if (smudgeAlphaSlider) {
+        smudgeAlphaSlider.oninput = (e) => {
+            applySmudgeAlpha(parseInt(e.target.value, 10) >= 1);
+        };
+    }
+    if (smudgeAlphaLabelRow) {
+        smudgeAlphaLabelRow.onclick = () => {
+            const cur = smudgeAlphaSlider ? (parseInt(smudgeAlphaSlider.value, 10) >= 1) : true;
+            applySmudgeAlpha(!cur);
+        };
+    }
+
+    const smudgePickupSlider = document.getElementById('brush-smudge-pickup');
+    const smudgePickupVal = document.getElementById('smudge-pickup-val');
+    if (smudgePickupSlider) {
+        smudgePickupSlider.oninput = (e) => {
+            const val = parseFloat(e.target.value);
+            if (smudgePickupVal) smudgePickupVal.innerText = val.toFixed(1);
+            app.updateActiveSetting('smudgePickup', val);
         };
     }
 
@@ -1166,15 +1448,6 @@ export function setupUI(app) {
             const val = parseFloat(e.target.value);
             document.getElementById('adv-smudge-flow-boost-val').innerText = val.toFixed(1);
             app.updateActiveSetting('smudgeFlowBoost', val);
-        };
-    }
-
-    const smudgePickupInput = document.getElementById('adv-smudge-pickup');
-    if (smudgePickupInput) {
-        smudgePickupInput.oninput = (e) => {
-            const val = parseFloat(e.target.value);
-            document.getElementById('adv-smudge-pickup-val').innerText = val.toFixed(1);
-            app.updateActiveSetting('smudgePickup', val);
         };
     }
 

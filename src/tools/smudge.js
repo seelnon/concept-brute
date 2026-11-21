@@ -1,6 +1,10 @@
 import { isMobileDevice, mixRgb255Ryb } from '../colorUtils.js';
 import { GpuSmudgeSolver } from './smudgeGpu.js';
 import { backupChunkLayer } from '../engine/backupPool.js';
+import {
+  paintSmudgeOnChunks as paintBruteSmudgeChunks,
+  startSmudgeStroke as startBruteSmudgeStroke
+} from './bruteSmudge.js';
 
 const TILE_SIZE = 256;
 const SMUDGE_RES = 64;
@@ -58,8 +62,15 @@ let _tipWorkCanvas = null;
 let _tipWorkCtx = null;
 let _cachedTipRef = null;
 let _cachedTipVer = -1;
+let _cachedTipBlur = -1;
 let _smudgeTipVersionCounter = 0;
 const _tipMask = new Float32Array(SMUDGE_RES * SMUDGE_RES);
+
+let _airTipCanvas = null;
+let _airTipCtx = null;
+let _airTipSrcRef = null;
+let _airTipSrcVer = -1;
+let _airTipBlurBucket = -1;
 
 let _tileReadCanvas = null;
 let _tileReadCtx = null;
@@ -73,6 +84,64 @@ let _patchOrig = new Uint8ClampedArray(0);
 let _patchSim = new Float32Array(0);
 let _patchCov = new Float32Array(0);
 const _tmpSample = new Float32Array(SMUDGE_RES * SMUDGE_RES * 4);
+
+function ensureEngineSmudgeCanvas(engine) {
+  if (!engine.smudgeCanvas) {
+    engine.smudgeCanvas = document.createElement('canvas');
+    engine.smudgeCanvas.width = 128;
+    engine.smudgeCanvas.height = 128;
+    engine.smudgeCtx = engine.smudgeCanvas.getContext('2d', isMobileDevice ? undefined : { willReadFrequently: true });
+  } else if (!engine.smudgeCtx) {
+    engine.smudgeCtx = engine.smudgeCanvas.getContext('2d', isMobileDevice ? undefined : { willReadFrequently: true });
+  }
+}
+
+function getEffectiveSmudgeTip(tip, airbrush) {
+  const ab = Math.max(0, Math.min(1, airbrush || 0));
+  if (ab <= 0.005) return tip;
+
+  const targetRef = tip || 'circle';
+  const tipVer = tip ? (tip._tipVersion || 0) : 0;
+  const blurBucket = Math.round(ab * 100);
+  if (_airTipCanvas && _airTipSrcRef === targetRef && _airTipSrcVer === tipVer && _airTipBlurBucket === blurBucket) {
+    return _airTipCanvas;
+  }
+
+  _airTipSrcRef = targetRef;
+  _airTipSrcVer = tipVer;
+  _airTipBlurBucket = blurBucket;
+
+  if (!_airTipCanvas) {
+    _airTipCanvas = document.createElement('canvas');
+    _airTipCanvas.width = 128;
+    _airTipCanvas.height = 128;
+    _airTipCtx = _airTipCanvas.getContext('2d');
+  }
+  const ctx = _airTipCtx;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, 128, 128);
+
+  if (tip && tip.width > 0 && tip.height > 0) {
+    const pad = Math.round(ab * 12);
+    const drawSz = Math.max(16, 128 - pad * 2);
+    const blurPx = (ab * 11).toFixed(2);
+    ctx.filter = `blur(${blurPx}px)`;
+    ctx.drawImage(tip, pad, pad, drawSz, drawSz);
+    ctx.filter = 'none';
+  } else {
+    const innerR = Math.max(0, 62 * (1 - ab * 0.92));
+    const grad = ctx.createRadialGradient(64, 64, innerR, 64, 64, 63);
+    grad.addColorStop(0, 'rgba(0,0,0,1)');
+    grad.addColorStop(Math.max(0.15, 1 - ab * 0.55), `rgba(0,0,0,${(0.65 - ab * 0.35).toFixed(3)})`);
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 128, 128);
+  }
+  ctx.restore();
+  _airTipCanvas._tipVersion = (_airTipCanvas._tipVersion || 0) + 1;
+  return _airTipCanvas;
+}
 
 function ensureScratch(w, h) {
   if (!_outCanvas) {
@@ -99,12 +168,14 @@ function ensureScratch(w, h) {
   }
 }
 
-function updateTipMaskCache(tip) {
+function updateTipMaskCache(tip, airbrush = 0) {
+  const blurBucket = Math.round(Math.max(0, Math.min(1, airbrush || 0)) * 100);
   const targetRef = tip || 'circle';
   const tipVer = tip ? (tip._tipVersion || 0) : 0;
-  if (_cachedTipRef === targetRef && _cachedTipVer === tipVer) return;
+  if (_cachedTipRef === targetRef && _cachedTipVer === tipVer && _cachedTipBlur === blurBucket) return;
   _cachedTipRef = targetRef;
   _cachedTipVer = tipVer;
+  _cachedTipBlur = blurBucket;
   _smudgeTipVersionCounter++;
 
   if (tip && tip.width > 0 && tip.height > 0) {
@@ -483,7 +554,9 @@ export function ensureSmudgeBuffers(engine) {
 export function warmSmudgeSolver(engine) {
   if (!engine) return null;
   ensureSmudgeBuffers(engine);
-  updateTipMaskCache(engine.brush?.tip);
+  const airbrush = (engine.brush && engine.brush.airbrush) || 0;
+  const effectiveTip = getEffectiveSmudgeTip(engine.brush?.tip, airbrush);
+  updateTipMaskCache(effectiveTip, airbrush);
   const solver = getGpuSmudgeSolver(engine);
   if (solver && solver.prewarmPipelines) {
     solver.prewarmPipelines(engine, _tipMask, _smudgeTipVersionCounter);
@@ -495,12 +568,27 @@ export function paintSmudgeOnChunks(engine, stamps, affectedChunks, flow, opacit
   if (!stamps || stamps.length === 0) return;
   if (opacity <= 0.001 || flow <= 0.001) return;
 
+  const airbrush = (engine.brush && engine.brush.airbrush) || 0;
+  const effectiveTip = airbrush > 0.005 ? getEffectiveSmudgeTip(tip, airbrush) : tip;
+
+  const useBrute = (engine._useBruteSmudge !== undefined)
+    ? engine._useBruteSmudge
+    : !!(engine.brush && engine.brush.smudgeAlpha === false);
+  if (useBrute) {
+    if (engine.perfMonitor) {
+      engine.perfMonitor.markPhase('smudge_step', { stamps: stamps.length, chunks: affectedChunks ? affectedChunks.size : 1, brute: true });
+    }
+    ensureEngineSmudgeCanvas(engine);
+    paintBruteSmudgeChunks(engine, stamps, affectedChunks, flow, opacity, effectiveTip);
+    return;
+  }
+
   if (engine.perfMonitor) {
     engine.perfMonitor.markPhase('smudge_step', { stamps: stamps.length, chunks: affectedChunks ? affectedChunks.size : 1 });
   }
 
   ensureSmudgeBuffers(engine);
-  updateTipMaskCache(tip);
+  updateTipMaskCache(effectiveTip, airbrush);
 
   const flowBoost = engine.brush.smudgeFlowBoost !== undefined ? engine.brush.smudgeFlowBoost : 1.0;
   const pickupSetting = engine.brush.smudgePickup !== undefined ? engine.brush.smudgePickup : 2.0;
@@ -702,6 +790,17 @@ export function paintSmudgeOnChunks(engine, stamps, affectedChunks, flow, opacit
  * Samples initial premultiplied RGBA at worldPos without inflating alpha.
  */
 export function startSmudgeStroke(engine, worldPos) {
+  const useBrute = !!(engine && engine.brush && engine.brush.smudgeAlpha === false);
+  engine._useBruteSmudge = useBrute;
+
+  if (useBrute) {
+    ensureEngineSmudgeCanvas(engine);
+    engine.smudgeDirty = false;
+    engine.useGpuSmudge = false;
+    startBruteSmudgeStroke(engine, worldPos);
+    return;
+  }
+
   ensureSmudgeBuffers(engine);
   if (engine.smudgeTiles) {
     engine.smudgeTiles.clear();
@@ -712,7 +811,9 @@ export function startSmudgeStroke(engine, worldPos) {
   engine.smudgeBuf.fill(0);
   engine.useGpuSmudge = false;
 
-  updateTipMaskCache(engine.brush.tip);
+  const airbrush = (engine.brush && engine.brush.airbrush) || 0;
+  const effectiveTip = airbrush > 0.005 ? getEffectiveSmudgeTip(engine.brush.tip, airbrush) : engine.brush.tip;
+  updateTipMaskCache(effectiveTip, airbrush);
 
   const solver = getGpuSmudgeSolver(engine);
   if (solver && solver.beginStroke(engine, worldPos, _tipMask, _smudgeTipVersionCounter)) {
@@ -754,6 +855,9 @@ export function startSmudgeStroke(engine, worldPos) {
 }
 
 export function endSmudgeStroke(engine) {
+  if (engine && engine._useBruteSmudge && engine.smudgeCtx) {
+    engine.smudgeCtx.clearRect(0, 0, 128, 128);
+  }
   if (engine && engine.useGpuSmudge) {
     const solver = engine.gpuRenderer && engine.gpuRenderer.smudgeSolver;
     if (solver) {
@@ -766,11 +870,15 @@ export function endSmudgeStroke(engine) {
   }
   if (engine) {
     engine.smudgeDirty = false;
+    engine._useBruteSmudge = undefined;
   }
 }
 
 export function cancelSmudgeStroke(engine) {
   if (!engine) return;
+  if (engine._useBruteSmudge && engine.smudgeCtx) {
+    engine.smudgeCtx.clearRect(0, 0, 128, 128);
+  }
   if (engine.useGpuSmudge) {
     const solver = engine.gpuRenderer && engine.gpuRenderer.smudgeSolver;
     if (solver && typeof solver.cancel === 'function') {
@@ -782,5 +890,6 @@ export function cancelSmudgeStroke(engine) {
     engine.smudgeTiles.clear();
   }
   engine.smudgeDirty = false;
+  engine._useBruteSmudge = undefined;
 }
 

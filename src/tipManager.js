@@ -35,6 +35,7 @@ export class TipManager {
     t.smudgeFlowBoost = rawSmudgeBoost;
     t._smudgeCalibratedV2 = true;
     t.smudgePickup = saved.smudgePickup ?? 2.0;
+    t.smudgeAlpha = saved.smudgeAlpha ?? true;
     t.brushSharpen = saved.brushSharpen ?? 0.0;
     t.wireDensity = saved.wireDensity ?? 30;
     t.wireRange = saved.wireRange ?? 4.0;
@@ -785,6 +786,7 @@ export class TipManager {
           smudgeFlowBoost: t.smudgeFlowBoost ?? 1.0,
           _smudgeCalibratedV2: true,
           smudgePickup: t.smudgePickup ?? 2.0,
+          smudgeAlpha: t.smudgeAlpha ?? true,
           brushSharpen: t.brushSharpen ?? 0.0,
           wireDensity: t.wireDensity ?? 30,
           wireRange: t.wireRange ?? 4.0,
@@ -818,6 +820,7 @@ export class TipManager {
           smudgeFlowBoost: t.smudgeFlowBoost ?? 1.0,
           _smudgeCalibratedV2: true,
           smudgePickup: t.smudgePickup ?? 2.0,
+          smudgeAlpha: t.smudgeAlpha ?? true,
           brushSharpen: t.brushSharpen ?? 0.0,
           wireDensity: t.wireDensity ?? 30,
           wireRange: t.wireRange ?? 4.0,

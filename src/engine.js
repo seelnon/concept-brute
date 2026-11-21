@@ -2,6 +2,7 @@ import { CHUNK_SIZE as DEFAULT_CHUNK_SIZE, LAYERS_COUNT, TOOLS } from './constan
 import * as liquify from './tools/liquify.js';
 import { paintWireframeIncrementally } from './tools/wireframe.js';
 import { GPURenderer } from './engine/gpuRenderer.js';
+import { CanvasSurfaceManager } from './engine/canvasSurfaceGpu.js';
 import { wasmCore } from './wasm/wasmBridge.js';
 import {
   drawLasso,
@@ -101,7 +102,8 @@ export class Engine {
       oiliness: 0.5,
       airbrush: 0.0,
       smudgeFlowBoost: 1.0,
-      smudgePickup: 1.0,
+      smudgePickup: 2.0,
+      smudgeAlpha: true,
       brushSharpen: 0,
       wireDensity: 30,
       wireRange: 4.0,
@@ -143,6 +145,7 @@ export class Engine {
     this.exportStartPos = null;
 
     this.canvasBg = '#ffffff';
+    this.surfaceManager = new CanvasSurfaceManager();
     this.gridColor = '#cccccc';
     this.gridPattern = 'dots';
     this.gridSize = 20;

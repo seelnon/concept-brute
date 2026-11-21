@@ -193,6 +193,7 @@ function createScratchEngine(realEngine, app, scratchChunk, gpuProxy) {
       oiliness: Math.max(0.2, realBrush.oiliness ?? 0.5),
       smudgeFlowBoost: realBrush.smudgeFlowBoost ?? 1.0,
       smudgePickup: realBrush.smudgePickup ?? 2.0,
+      smudgeAlpha: true,
       wireDensity: realBrush.wireDensity ?? 24,
       wireRange: realBrush.wireRange ?? 4.0,
       wireMinDist: realBrush.wireMinDist ?? 0.5,

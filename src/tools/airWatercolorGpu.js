@@ -170,6 +170,14 @@ uniform float u_rotCos;
 uniform float u_rotSin;
 uniform float u_tipPour;
 uniform int u_physicalMix;
+uniform sampler2D u_surfaceMap;
+uniform int u_hasSurface;
+uniform float u_surfaceInvScale;
+uniform float u_surfSlip;
+uniform float u_surfResist;
+uniform float u_surfChannel;
+uniform float u_surfRelief;
+uniform float u_pressure;
 
 layout(location = 0) out vec4 outPigment;
 layout(location = 1) out vec4 outVel;
@@ -205,9 +213,17 @@ void main() {
   float curlFreq = 1.0 / max(12.0, u_radius * 0.72);
   vec2 curl = sampleCurl(worldPos, u_time, curlFreq);
   float tooth = samplePaperTooth(worldPos);
+  vec2 surfSlope = vec2(0.0);
+  float surfCavity = 0.0;
+  if (u_hasSurface == 1) {
+    vec4 surf = texture(u_surfaceMap, worldPos * u_surfaceInvScale);
+    tooth = clamp(mix(0.5, surf.r, clamp(0.25 + 0.85 * u_surfRelief, 0.0, 1.25)), 0.0, 1.0);
+    surfSlope = (surf.gb - 0.5) * 2.0;
+    surfCavity = surf.a;
+  }
 
   float dNormRaw = dist / max(1.0, u_radius);
-  float edgeWobble = (curl.x * 0.10 + (tooth - 0.5) * 0.14) * (0.25 + 0.75 * u_bloom);
+  float edgeWobble = (curl.x * 0.10 + (tooth - 0.5) * (0.14 + 0.08 * u_surfRelief)) * (0.25 + 0.75 * u_bloom);
   float dNorm = max(0.0, dNormRaw + edgeWobble);
 
   float maxTipA = 0.0;
@@ -283,7 +299,11 @@ void main() {
       tipPourPush = -gWorld * pourAmp;
     }
   }
-  vel += u_dir * pushAmp * prox * prox + curl * curlAmp * prox + tipPourPush;
+  float slipVelMult = (u_hasSurface == 1) ? mix(0.68, 1.58, u_surfSlip) : 1.0;
+  vec2 surfChannelPush = (u_hasSurface == 1)
+    ? (surfSlope * (-0.50 - 1.45 * u_surfChannel) * (0.35 + 0.65 * u_wetness) * prox)
+    : vec2(0.0);
+  vel += (u_dir * pushAmp * prox * prox + curl * curlAmp * prox + tipPourPush) * slipVelMult + surfChannelPush;
   vel = clamp(vel, vec2(-u_maxVel), vec2(u_maxVel));
 
   float meniscus;
@@ -298,7 +318,15 @@ void main() {
   }
 
   if (meniscus > 0.004) {
-    float waterScale = (u_hasTip == 1) ? mix(0.24, 1.0, u_tipPour) : 1.0;
+    float toothCatch = 1.0;
+    if (u_hasSurface == 1 && u_surfResist > 0.01) {
+      float valleyDepth = clamp(1.0 - tooth + surfCavity * 0.45, 0.0, 1.0);
+      float pressFill = clamp(0.18 + 0.65 * clamp(u_pressure, 0.05, 1.0) + 0.42 * prevCov + 0.45 * u_wetness, 0.0, 1.0);
+      float resistGate = smoothstep(0.0, 0.72, valleyDepth * u_surfResist * 1.15 - pressFill * 0.48);
+      toothCatch = clamp(1.0 - resistGate * (0.45 + 0.45 * u_surfResist), 0.14, 1.0);
+    }
+
+    float waterScale = ((u_hasTip == 1) ? mix(0.24, 1.0, u_tipPour) : 1.0) * (0.35 + 0.65 * toothCatch);
     float tipWaterMass = (u_hasTip == 1) ? mix(maxTipA, max(maxTipA * 0.6, maxTipBump), u_tipPour) : meniscus;
     float injWater = clamp(tipWaterMass * (0.30 + 0.70 * u_wetness) * (0.50 + 0.50 * u_flow) * waterScale, 0.0, 1.0);
     if (injWater > water) water = injWater;
@@ -316,11 +344,12 @@ void main() {
     float rimBoost = 1.0 + rimMask * u_edge * 0.22;
 
     vec2 fineCurl = sampleCurl(worldPos + curl * 6.0, u_time * 0.4, curlFreq * 1.65);
-    float mottle = (tooth - 0.5) * 0.65 + fineCurl.y * 0.35;
+    float mottle = (tooth - 0.5) * (0.65 + 0.30 * u_surfRelief) + fineCurl.y * 0.35;
     float ribbon = 0.94 + 0.08 * mottle * (0.25 + 0.75 * u_streamFlow);
-    float gran = 1.0 - u_granulation * 0.26 * tooth;
+    float granEff = u_granulation + ((u_hasSurface == 1) ? u_surfRelief * 0.18 : 0.0);
+    float gran = clamp(1.0 - granEff * (0.24 * tooth + 0.16 * (1.0 - surfCavity)), 0.45, 1.05);
 
-    float targetA = clamp(meniscus * u_opacity * u_flow * centerThin * rimBoost * ribbon * gran, 0.0, 1.0);
+    float targetA = clamp(meniscus * u_opacity * u_flow * centerThin * rimBoost * ribbon * gran * toothCatch, 0.0, 1.0);
     float stepA = (targetA > prevCov && prevCov < 0.992)
       ? clamp((targetA - prevCov) / (1.0 - prevCov), 0.0, 1.0)
       : 0.0;
@@ -497,6 +526,14 @@ uniform float u_dt;
 uniform int u_isFloat;
 uniform int u_alphaLock;
 uniform int u_physicalMix;
+uniform sampler2D u_surfaceMap;
+uniform int u_hasSurface;
+uniform float u_surfaceInvScale;
+uniform float u_surfSlip;
+uniform float u_surfResist;
+uniform float u_surfChannel;
+uniform float u_surfRelief;
+uniform float u_surfAbsorb;
 
 layout(location = 0) out vec4 outPigment;
 layout(location = 1) out vec4 outVel;
@@ -529,7 +566,8 @@ void main() {
   vel -= 0.5 * vec2(pR - pL, pB - pT);
   vel = clamp(vel, vec2(-u_maxVel), vec2(u_maxVel));
 
-  float damp = min(0.97, 0.78 + 0.16 * u_wetness);
+  float surfDampBias = (u_hasSurface == 1) ? ((u_surfSlip - 0.5) * 0.09 - u_surfAbsorb * 0.03) : 0.0;
+  float damp = clamp(0.78 + 0.16 * u_wetness + surfDampBias, 0.62, 0.985);
   vec2 advVelUv = clamp(v_uv - vel * u_texel * 0.65 * u_dt, u_uvClamp.xy, u_uvClamp.zw);
   vec2 velNext = decodeVel(texture(u_vel, advVelUv), u_isFloat, u_maxVel) * damp;
 
@@ -549,7 +587,21 @@ void main() {
 
   vec2 worldPos = u_simOrigin + gl_FragCoord.xy;
   float tooth = samplePaperTooth(worldPos);
-  float mob = smoothstep(0.015, 0.40, maxNbW) * (0.20 + 0.80 * u_wetness);
+  vec2 surfSlope = vec2(0.0);
+  float surfCavity = 0.0;
+  if (u_hasSurface == 1) {
+    vec4 surf = texture(u_surfaceMap, worldPos * u_surfaceInvScale);
+    tooth = clamp(mix(0.5, surf.r, clamp(0.25 + 0.85 * u_surfRelief, 0.0, 1.25)), 0.0, 1.0);
+    surfSlope = (surf.gb - 0.5) * 2.0;
+    surfCavity = surf.a;
+
+    // Channel liquid along wood grain, stone cracks, and cloth weave grooves
+    vec2 surfTan = vec2(-surfSlope.y, surfSlope.x);
+    float tanAlign = dot(velNext, surfTan) >= 0.0 ? 1.0 : -1.0;
+    vec2 grainForce = (-surfSlope * (0.45 + 0.85 * u_surfChannel) + surfTan * tanAlign * (0.75 * u_surfChannel)) * smoothstep(0.015, 0.35, maxNbW);
+    velNext = clamp(velNext + grainForce * u_dt, vec2(-u_maxVel), vec2(u_maxVel));
+  }
+  float mob = smoothstep(0.015, 0.40, maxNbW) * (0.20 + 0.80 * u_wetness) * ((u_hasSurface == 1) ? mix(0.75, 1.32, u_surfSlip) : 1.0);
 
   float spd = length(vel);
   float advScale = min(3.5, (0.35 + 0.95 * u_streamFlow) * mob * u_dt);
@@ -573,8 +625,9 @@ void main() {
   if (wT > bestW) { bestW = wT; bestPig = pT_c; }
   if (wB > bestW) { bestW = wB; bestPig = pB_c; }
 
-  float channelOpen = smoothstep(0.22, 0.88, tooth + u_bloom * 0.32 - 0.15);
-  float grainDiff = 1.0 - u_granulation * 0.28 * (1.0 - tooth);
+  float poreOpen = (u_hasSurface == 1) ? mix(0.55, 1.25, u_surfAbsorb) * (0.75 + 0.65 * surfCavity + 0.35 * u_surfChannel) : 1.0;
+  float channelOpen = smoothstep(0.22, 0.88, tooth + u_bloom * 0.32 - 0.15) * clamp(poreOpen, 0.25, 1.35);
+  float grainDiff = 1.0 - (u_granulation + ((u_hasSurface == 1) ? u_surfResist * 0.25 : 0.0)) * 0.28 * (1.0 - tooth);
   float wickAmt = clamp(u_bloom * 0.22 * mob * channelOpen * grainDiff * u_dt * max(0.0, (bestW - water) * 2.5 + 0.25), 0.0, 0.26);
   if (wickAmt > 0.002 && bestPig.a > pigOut.a) {
     pigOut = mixPremulPaint(pigOut, bestPig, wickAmt, u_physicalMix);
@@ -591,11 +644,12 @@ void main() {
     pigOut.a = newA;
   }
 
-  if (u_granulation > 0.02 && pigOut.a > 0.04) {
+  float effGran = clamp(u_granulation + ((u_hasSurface == 1) ? u_surfRelief * 0.35 : 0.0), 0.0, 1.25);
+  if (effGran > 0.02 && pigOut.a > 0.04) {
     vec4 avgNbP = (pL_c + pR_c + pT_c + pB_c) * 0.25;
-    float valleyBias = clamp((0.52 - tooth) * u_granulation * 0.025 * mob, -0.015, 0.015);
+    float valleyBias = clamp(((0.52 - tooth) + surfCavity * 0.35) * effGran * 0.025 * mob, -0.015, 0.02);
     pigOut.a = clamp(pigOut.a + valleyBias * pigOut.a * (1.0 - pigOut.a), 0.0, 1.0);
-    pigOut.rgb = mix(pigOut.rgb, min(pigOut.rgb, avgNbP.rgb * 0.98 + pigOut.rgb * 0.02), u_granulation * 0.04 * (1.0 - tooth));
+    pigOut.rgb = mix(pigOut.rgb, min(pigOut.rgb, avgNbP.rgb * 0.98 + pigOut.rgb * 0.02), effGran * 0.04 * (1.0 - tooth + surfCavity * 0.35));
   }
 
   if (u_alphaLock == 1) {
@@ -867,7 +921,9 @@ export class GpuWatercolorSolver {
       'u_pigment', 'u_vel', 'u_tip', 'u_simOrigin', 'u_from', 'u_to', 'u_dir', 'u_radius',
       'u_color', 'u_opacity', 'u_flow', 'u_wetness', 'u_streamFlow', 'u_bloom', 'u_edge',
       'u_granulation', 'u_time', 'u_segLen', 'u_maxVel', 'u_isFloat', 'u_alphaLock',
-      'u_hasTip', 'u_isDab', 'u_rotCos', 'u_rotSin', 'u_tipPour', 'u_physicalMix'
+      'u_hasTip', 'u_isDab', 'u_rotCos', 'u_rotSin', 'u_tipPour', 'u_physicalMix',
+      'u_surfaceMap', 'u_hasSurface', 'u_surfaceInvScale', 'u_surfSlip',
+      'u_surfResist', 'u_surfChannel', 'u_surfRelief', 'u_pressure'
     ]);
     this.vortLocs = this._cacheLocs(this.progVort, ['u_vel', 'u_texel', 'u_uvClamp', 'u_maxVel', 'u_isFloat']);
     this.confDivLocs = this._cacheLocs(this.progConfDiv, [
@@ -879,7 +935,9 @@ export class GpuWatercolorSolver {
     this.flowEdgeLocs = this._cacheLocs(this.progFlowEdge, [
       'u_pigment', 'u_vel', 'u_press', 'u_texel', 'u_uvClamp', 'u_simOrigin',
       'u_wetness', 'u_streamFlow', 'u_bloom', 'u_edge', 'u_granulation',
-      'u_maxVel', 'u_dt', 'u_isFloat', 'u_alphaLock', 'u_physicalMix'
+      'u_maxVel', 'u_dt', 'u_isFloat', 'u_alphaLock', 'u_physicalMix',
+      'u_surfaceMap', 'u_hasSurface', 'u_surfaceInvScale', 'u_surfSlip',
+      'u_surfResist', 'u_surfChannel', 'u_surfRelief', 'u_surfAbsorb'
     ]);
     this.drySharpenLocs = this._cacheLocs(this.progDrySharpen, [
       'u_pigment', 'u_vel', 'u_texel', 'u_uvClamp', 'u_edge', 'u_wetness'
@@ -995,6 +1053,16 @@ export class GpuWatercolorSolver {
     gl.uniform1f(this.injectLocs.u_rotSin, 0.0);
     gl.uniform1f(this.injectLocs.u_tipPour, 0.5);
     gl.uniform1i(this.injectLocs.u_physicalMix, 0);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.tipTex);
+    gl.uniform1i(this.injectLocs.u_surfaceMap, 3);
+    gl.uniform1i(this.injectLocs.u_hasSurface, 0);
+    gl.uniform1f(this.injectLocs.u_surfaceInvScale, 1.0 / 320.0);
+    gl.uniform1f(this.injectLocs.u_surfSlip, 0.5);
+    gl.uniform1f(this.injectLocs.u_surfResist, 0.0);
+    gl.uniform1f(this.injectLocs.u_surfChannel, 0.0);
+    gl.uniform1f(this.injectLocs.u_surfRelief, 0.0);
+    gl.uniform1f(this.injectLocs.u_pressure, 1.0);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 
     // 5. progVort: workVelB -> workCurl
@@ -1065,6 +1133,16 @@ export class GpuWatercolorSolver {
     gl.uniform1i(this.flowEdgeLocs.u_isFloat, this.isFloatVel ? 1 : 0);
     gl.uniform1i(this.flowEdgeLocs.u_alphaLock, 0);
     gl.uniform1i(this.flowEdgeLocs.u_physicalMix, 0);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.tipTex);
+    gl.uniform1i(this.flowEdgeLocs.u_surfaceMap, 3);
+    gl.uniform1i(this.flowEdgeLocs.u_hasSurface, 0);
+    gl.uniform1f(this.flowEdgeLocs.u_surfaceInvScale, 1.0 / 320.0);
+    gl.uniform1f(this.flowEdgeLocs.u_surfSlip, 0.5);
+    gl.uniform1f(this.flowEdgeLocs.u_surfResist, 0.0);
+    gl.uniform1f(this.flowEdgeLocs.u_surfChannel, 0.0);
+    gl.uniform1f(this.flowEdgeLocs.u_surfRelief, 0.0);
+    gl.uniform1f(this.flowEdgeLocs.u_surfAbsorb, 0.5);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 
     // 9. progDrySharpen (MRT): workPigA + workVelA -> mrtWorkB
@@ -1681,6 +1759,21 @@ export class GpuWatercolorSolver {
     gl.uniform1f(this.injectLocs.u_tipPour, tipPour);
     gl.uniform1i(this.injectLocs.u_physicalMix, (engine.physicalColorMix !== false) ? 1 : 0);
 
+    const surfMgr = engine.surfaceManager;
+    const surfU = surfMgr ? surfMgr.getShaderUniforms() : null;
+    const surfTex = (surfU && surfU.active) ? surfMgr.ensureGpuTextures(gl) : { mapTex: null };
+    const hasSurf = !!(surfTex && surfTex.mapTex);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, hasSurf ? surfTex.mapTex : this.tipTex);
+    gl.uniform1i(this.injectLocs.u_surfaceMap, 3);
+    gl.uniform1i(this.injectLocs.u_hasSurface, hasSurf ? 1 : 0);
+    gl.uniform1f(this.injectLocs.u_surfaceInvScale, surfU ? surfU.invScale : 1.0 / 320.0);
+    gl.uniform1f(this.injectLocs.u_surfSlip, surfU ? surfU.slip : 0.5);
+    gl.uniform1f(this.injectLocs.u_surfResist, surfU ? surfU.resist : 0.0);
+    gl.uniform1f(this.injectLocs.u_surfChannel, surfU ? surfU.channel : 0.0);
+    gl.uniform1f(this.injectLocs.u_surfRelief, surfU ? surfU.relief : 0.0);
+    gl.uniform1f(this.injectLocs.u_pressure, (tipInfo && tipInfo.pressure !== undefined) ? tipInfo.pressure : (params.pressure ?? 1.0));
+
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     this._swapWork();
 
@@ -1821,6 +1914,21 @@ export class GpuWatercolorSolver {
       gl.uniform1i(this.flowEdgeLocs.u_isFloat, this.isFloatVel ? 1 : 0);
       gl.uniform1i(this.flowEdgeLocs.u_alphaLock, alphaLock);
       gl.uniform1i(this.flowEdgeLocs.u_physicalMix, (engine.physicalColorMix !== false) ? 1 : 0);
+
+      const surfMgr = engine.surfaceManager;
+      const surfU = surfMgr ? surfMgr.getShaderUniforms() : null;
+      const surfTex = (surfU && surfU.active) ? surfMgr.ensureGpuTextures(gl) : { mapTex: null };
+      const hasSurf = !!(surfTex && surfTex.mapTex);
+      gl.activeTexture(gl.TEXTURE3);
+      gl.bindTexture(gl.TEXTURE_2D, hasSurf ? surfTex.mapTex : this.tipTex);
+      gl.uniform1i(this.flowEdgeLocs.u_surfaceMap, 3);
+      gl.uniform1i(this.flowEdgeLocs.u_hasSurface, hasSurf ? 1 : 0);
+      gl.uniform1f(this.flowEdgeLocs.u_surfaceInvScale, surfU ? surfU.invScale : 1.0 / 320.0);
+      gl.uniform1f(this.flowEdgeLocs.u_surfSlip, surfU ? surfU.slip : 0.5);
+      gl.uniform1f(this.flowEdgeLocs.u_surfResist, surfU ? surfU.resist : 0.0);
+      gl.uniform1f(this.flowEdgeLocs.u_surfChannel, surfU ? surfU.channel : 0.0);
+      gl.uniform1f(this.flowEdgeLocs.u_surfRelief, surfU ? surfU.relief : 0.0);
+      gl.uniform1f(this.flowEdgeLocs.u_surfAbsorb, surfU ? surfU.absorb : 0.5);
 
       gl.drawArrays(gl.TRIANGLES, 0, 6);
       this._swapWork();

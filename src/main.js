@@ -105,6 +105,7 @@ class App {
             airbrush: 0.0,
             smudgeFlowBoost: 1.0,
             smudgePickup: 2.0,
+            smudgeAlpha: true,
             brushSharpen: 0.0,
             wireDensity: 30,
             wireRange: 4.0,
@@ -223,7 +224,7 @@ class App {
                 // Impasto
                 this.engine.brush.paintHeight = (tool === TOOLS.ERASER || tool === TOOLS.SMUDGE) ? 0 : (tipSettings.paintHeight || 0);
                 this.engine.brush.oiliness = (tool === TOOLS.ERASER || tool === TOOLS.SMUDGE) ? 0 : (tipSettings.oiliness ?? 0.5);
-                this.engine.brush.airbrush = (tool === TOOLS.ERASER || tool === TOOLS.SMUDGE) ? 0 : (tipSettings.airbrush || 0);
+                this.engine.brush.airbrush = (tool === TOOLS.ERASER) ? 0 : (tipSettings.airbrush || 0);
                 
                 // Spacing, Pressure, Jitter
                 this.engine.brush.spacing = tipSettings.spacing ?? 0.05;
@@ -238,6 +239,7 @@ class App {
                 // Smudge
                 this.engine.brush.smudgeFlowBoost = tipSettings.smudgeFlowBoost ?? 1.0;
                 this.engine.brush.smudgePickup = tipSettings.smudgePickup ?? 2.0;
+                this.engine.brush.smudgeAlpha = tipSettings.smudgeAlpha ?? true;
                 
                 // Sharpen
                 this.engine.brush.brushSharpen = tipSettings.brushSharpen ?? 0.0;
@@ -710,6 +712,7 @@ class App {
             'autosaveEnabled',
             'palette',
             'canvasBg',
+            'canvasSurface',
             'gridColor',
             'gridPattern',
             'gridSize',
@@ -877,6 +880,19 @@ class App {
             if (sgEl) sgEl.checked = true;
         }
         
+        const savedSurface = projSet.canvasSurface !== undefined ? projSet.canvasSurface : settings['canvasSurface'];
+        if (this.engine.surfaceManager) {
+            if (savedSurface) {
+                this.engine.surfaceManager.deserialize(savedSurface, () => {
+                    if (this.syncSurfaceUI) this.syncSurfaceUI();
+                    this.engine.refreshGrid();
+                });
+            } else {
+                this.engine.surfaceManager.applyPresetDefaults('none');
+            }
+            if (this.syncSurfaceUI) this.syncSurfaceUI();
+        }
+
         // Refresh grid textures & application styles based on settings loaded
         this.engine.setupBoard();
 
@@ -1737,12 +1753,16 @@ class App {
         // Toggle visibility of specific properties based on tool
         const heightCtrl = document.getElementById('height-control');
         const oilCtrl = document.getElementById('oiliness-control');
+        const smudgeAlphaCtrl = document.getElementById('smudge-alpha-control');
+        const smudgePickupCtrl = document.getElementById('smudge-pickup-control');
         const airCtrl = document.getElementById('airbrush-control');
         const advBtn = document.getElementById('btn-advanced-brush');
 
         if (heightCtrl) heightCtrl.style.display = (tool === TOOLS.BRUSH) ? 'block' : 'none';
         if (oilCtrl) oilCtrl.style.display = (tool === TOOLS.BRUSH) ? 'block' : 'none';
-        if (airCtrl) airCtrl.style.display = (tool === TOOLS.BRUSH) ? 'block' : 'none';
+        if (smudgeAlphaCtrl) smudgeAlphaCtrl.style.display = (tool === TOOLS.SMUDGE) ? 'block' : 'none';
+        if (smudgePickupCtrl) smudgePickupCtrl.style.display = (tool === TOOLS.SMUDGE) ? 'block' : 'none';
+        if (airCtrl) airCtrl.style.display = (tool === TOOLS.BRUSH || tool === TOOLS.SMUDGE) ? 'block' : 'none';
 
         const opacCtrl = document.getElementById('control-opacity');
         const flowLbl = document.getElementById('lbl-flow');
@@ -1839,6 +1859,22 @@ class App {
             if (aVal) aVal.innerText = `${Math.round((tipSettings.airbrush || 0) * 100)}%`;
         }
 
+        const smudgeAlphaEl = document.getElementById('brush-smudge-alpha');
+        if (smudgeAlphaEl) {
+            const isAlphaOn = (tipSettings.smudgeAlpha !== undefined) ? !!tipSettings.smudgeAlpha : true;
+            smudgeAlphaEl.value = isAlphaOn ? 1 : 0;
+            const valEl = document.getElementById('smudge-alpha-val');
+            if (valEl) valEl.innerText = isAlphaOn ? 'ON' : 'OFF';
+        }
+
+        const smudgePickupEl = document.getElementById('brush-smudge-pickup');
+        if (smudgePickupEl) {
+            const pVal = tipSettings.smudgePickup !== undefined ? tipSettings.smudgePickup : 2.0;
+            smudgePickupEl.value = pVal;
+            const valEl = document.getElementById('smudge-pickup-val');
+            if (valEl) valEl.innerText = pVal.toFixed(1);
+        }
+
         // Update Sensitivity UI
         const sSize = document.getElementById('speed-size');
         if (sSize) {
@@ -1876,14 +1912,6 @@ class App {
             smudgeBoost.value = bVal;
             const valEl = document.getElementById('adv-smudge-flow-boost-val');
             if (valEl) valEl.innerText = bVal.toFixed(1);
-        }
-        
-        const smudgePickup = document.getElementById('adv-smudge-pickup');
-        if (smudgePickup) {
-            const pVal = getVal('smudgePickup', 2.0);
-            smudgePickup.value = pVal;
-            const valEl = document.getElementById('adv-smudge-pickup-val');
-            if (valEl) valEl.innerText = pVal.toFixed(1);
         }
         
         const sharpen = document.getElementById('adv-brush-sharpen');
@@ -2161,6 +2189,7 @@ class App {
             smudgeFlowBoost: settings.smudgeFlowBoost ?? 1.0,
             _smudgeCalibratedV2: true,
             smudgePickup: settings.smudgePickup ?? 2.0,
+            smudgeAlpha: settings.smudgeAlpha ?? true,
             brushSharpen: settings.brushSharpen ?? 0.0,
             wireDensity: settings.wireDensity ?? 30,
             wireRange: settings.wireRange ?? 4.0,
