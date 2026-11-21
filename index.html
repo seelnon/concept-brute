@@ -257,13 +257,21 @@
              <!-- CUSTOM COLOR SELECTOR -->
              <div id="color-selector">
                 <div id="color-picker-square-wrap">
-                    <div id="sv-picker">
-                       <div class="sv-cursor"></div>
+                    <div id="sv-classic-wrap">
+                        <div id="sv-picker">
+                           <div class="sv-cursor"></div>
+                        </div>
+                        <input type="range" id="hue-slider" min="0" max="360" value="0">
                     </div>
-                    <input type="range" id="hue-slider" min="0" max="360" value="0">
+                    <div id="oklch-picker-wrap" class="hidden">
+                        <canvas id="oklch-2d-canvas" width="360" height="300"></canvas>
+                        <div id="oklch-1d-track" class="oklch-1d-track" title="OKLCH Lightness (0% - 100%)">
+                            <div id="oklch-1d-thumb" class="oklch-1d-thumb"></div>
+                        </div>
+                    </div>
                 </div>
                 <div id="color-picker-geo-wrap" class="hidden">
-                    <canvas id="color-geo-canvas" width="200" height="200"></canvas>
+                    <canvas id="color-geo-canvas" width="400" height="400"></canvas>
                     <div id="color-wheel-val-wrap" class="hidden" style="margin-top: 4px;">
                         <input type="range" id="color-wheel-val-slider" min="0" max="100" value="100">
                     </div>

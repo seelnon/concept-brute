@@ -26,7 +26,10 @@ import {
     getColorTemperature,
     getMaxOklchChroma,
     getPainterlyWarmCoolModel,
-    getContrastTextColor
+    getContrastTextColor,
+    oklchHueToHsvHue,
+    hsvHueToOklchHue,
+    oklchWheelColor
 } from './colorUtils.js';
 
 export const SYMMETRY_MODES = [
@@ -566,7 +569,7 @@ function buildSliderGradient(stopsCount, sampleFn) {
     return `linear-gradient(to right, ${stops.join(', ')})`;
 }
 
-export function getSliderDescriptors(packId, hex) {
+export function getSliderDescriptors(packId, hex, oklchOverride = null) {
     const { r, g, b } = hexToRgb(hex);
 
     if (packId === 'ryb') {
@@ -625,29 +628,36 @@ export function getSliderDescriptors(packId, hex) {
     }
 
     if (packId === 'oklch') {
-        const lch = rgbToOklch(r, g, b);
-        const maxC = Math.max(0.02, getMaxOklchChroma(lch.L, lch.H));
+        const rawLch = rgbToOklch(r, g, b);
+        const lch = oklchOverride
+            ? {
+                L: clamp(Number(oklchOverride.L), 0, 100),
+                C: clamp(Number(oklchOverride.C), 0, 0.37),
+                H: (((Number(oklchOverride.H) || 0) % 360) + 360) % 360
+            }
+            : rawLch;
+        const MAX_OKLCH_C = 0.37;
         const setL = (v) => rgbToHex(...Object.values(oklchToRgb(v, lch.C, lch.H)));
         const setC = (v) => rgbToHex(...Object.values(oklchToRgb(lch.L, v, lch.H)));
-        const setH = (v) => rgbToHex(...Object.values(oklchToRgb(lch.L, Math.max(0.03, lch.C), v)));
+        const setH = (v) => rgbToHex(...Object.values(oklchToRgb(lch.L, Math.max(0.06, lch.C), v)));
         return [
             {
                 key: 'oklch-l', label: 'OKLCH · L', min: 0, max: 100, step: 0.5, value: lch.L,
                 display: `${Math.round(lch.L)}%`,
-                grad: buildSliderGradient(7, t => setL(t * 100)),
+                grad: buildSliderGradient(9, t => setL(t * 100)),
                 apply: v => setL(v)
             },
             {
-                key: 'oklch-c', label: 'OKLCH · C', min: 0, max: maxC, step: 0.002, value: clamp(lch.C, 0, maxC),
+                key: 'oklch-c', label: 'OKLCH · C', min: 0, max: MAX_OKLCH_C, step: 0.002, value: clamp(lch.C, 0, MAX_OKLCH_C),
                 display: lch.C.toFixed(2),
-                grad: buildSliderGradient(7, t => setC(t * maxC)),
+                grad: buildSliderGradient(9, t => setC(t * MAX_OKLCH_C)),
                 apply: v => setC(v)
             },
             {
                 key: 'oklch-h', label: 'OKLCH · H', min: 0, max: 360, step: 1, value: lch.H,
                 display: `${Math.round(lch.H)}°`,
                 grad: buildSliderGradient(13, t => setH(t * 360)),
-                apply: v => setH(v)
+                apply: v => rgbToHex(...Object.values(oklchToRgb(lch.L, lch.C, v)))
             }
         ];
     }
@@ -822,6 +832,11 @@ export class PaletteStudio {
         this._ringCacheCanvas = null;
         this._wheelCacheKey = '';
         this._wheelCacheCanvas = null;
+        this._oklch2dRaster = null;
+        this._oklch2dRasterL = -999;
+        this._oklch2dMaxC = null;
+        this._oklchTarget = null;
+        this._ringAngleState = null;
         this._dockDragMode = null; // 'ring' | 'tri' | 'sq' | 'wheel'
         this._studioWheelDragIdx = -1;
         this._sliderLock = false;
@@ -842,15 +857,48 @@ export class PaletteStudio {
         this.syncColorUI(this.app.engine?.brush?.color || this.app.palette.baseColors[0]);
     }
 
+    _getDpr() {
+        return Math.min(3, Math.max(2, window.devicePixelRatio || 2));
+    }
+
+    _ensureOklchTarget(hex, { force = false } = {}) {
+        const clean = normalizeHex(hex, this.getActiveHex());
+        if (!force && this._oklchTarget && this._oklchTarget.hex === clean) {
+            return this._oklchTarget;
+        }
+        const { r, g, b } = hexToRgb(clean);
+        const lch = rgbToOklch(r, g, b);
+        const prevH = this._oklchTarget ? this._oklchTarget.H : 29.2;
+        this._oklchTarget = {
+            L: lch.L,
+            C: clamp(lch.C, 0, 0.37),
+            H: lch.C > 0.0025 ? lch.H : prevH,
+            hex: clean
+        };
+        return this._oklchTarget;
+    }
+
+    _commitOklchTarget(L, C, H, { updateBase = true } = {}) {
+        const nL = clamp(Number(L), 0, 100);
+        const nC = clamp(Number(C), 0, 0.37);
+        const nH = (((Number(H) || 0) % 360) + 360) % 360;
+        const rgb = oklchToRgb(nL, nC, nH);
+        const hex = rgbToHex(rgb.r, rgb.g, rgb.b);
+        this._oklchTarget = { L: nL, C: nC, H: nH, hex };
+        this.commitPickedHex(hex, { updateBase });
+    }
+
     _getWheelAngle() {
         const wheelSpace = this.app.palette.config.wheelSpace || 'ryb';
+        const clean = this.getActiveHex();
+        if (this._ringAngleState && this._ringAngleState.hex === clean && this._ringAngleState.wheelSpace === wheelSpace) {
+            return this._ringAngleState.angle;
+        }
         const rgbHue = this.app.hsv?.h ?? 0;
         if (wheelSpace === 'ryb') return rgbHueToRybHue(rgbHue);
         if (wheelSpace === 'oklch') {
-            const hex = this.getActiveHex();
-            const { r, g, b } = hexToRgb(hex);
-            const lch = rgbToOklch(r, g, b);
-            return lch.C > 0.008 ? lch.H : rgbHue;
+            const target = this._ensureOklchTarget(clean);
+            return target.C > 0.004 ? target.H : hsvHueToOklchHue(rgbHue);
         }
         return rgbHue;
     }
@@ -878,14 +926,15 @@ export class PaletteStudio {
 
     commitWheelHsv(wheelHueDeg, sPct, vPct, { updateBase = true } = {}) {
         const wheelSpace = this.app.palette.config.wheelSpace || 'ryb';
-        const rgb = wheelHsvToRgb(wheelHueDeg, sPct, vPct, wheelSpace);
+        const normAngle = ((wheelHueDeg % 360) + 360) % 360;
+        const rgb = wheelHsvToRgb(normAngle, sPct, vPct, wheelSpace);
         const hex = rgbToHex(rgb.r, rgb.g, rgb.b);
-        const rgbHsv = rgbToHsv(rgb.r, rgb.g, rgb.b);
-        // Preserve wheel hue even when saturation/value hits 0 so triangle/ring doesn't jump to 0 deg!
+        // Preserve wheel hue even when saturation/value hits 0 so triangle/ring doesn't jump to 0 deg
         const preservedRgbHue = wheelSpace === 'ryb'
-            ? rybHueToRgbHue(wheelHueDeg)
-            : (wheelSpace === 'oklch' ? rgbToHsv(...Object.values(oklchToRgb(74, 0.19, wheelHueDeg))).h : wheelHueDeg);
+            ? rybHueToRgbHue(normAngle)
+            : (wheelSpace === 'oklch' ? oklchHueToHsvHue(normAngle) : normAngle);
 
+        this._ringAngleState = { wheelSpace, angle: normAngle, hex };
         this.app.hsv = {
             h: ((preservedRgbHue % 360) + 360) % 360,
             s: clamp(sPct, 0, 100),
@@ -983,6 +1032,9 @@ export class PaletteStudio {
         const cfg = this.app.palette.config;
         const panelColor = document.getElementById('panel-color');
         const pickerSquareBox = document.getElementById('color-picker-square-wrap');
+        const svClassicWrap = document.getElementById('sv-classic-wrap');
+        const oklchPickerWrap = document.getElementById('oklch-picker-wrap');
+        const oklch2dCanvas = document.getElementById('oklch-2d-canvas');
         const pickerGeoBox = document.getElementById('color-picker-geo-wrap');
         const geoCanvas = document.getElementById('color-geo-canvas');
         const wheelValWrap = document.getElementById('color-wheel-val-wrap');
@@ -990,21 +1042,39 @@ export class PaletteStudio {
         const paletteGrid = document.getElementById('palette');
         const colorSelector = document.getElementById('color-selector');
 
+        const w = clamp(Number(cfg.panelWidth) || 204, 176, 360);
         if (panelColor) {
-            const w = clamp(Number(cfg.panelWidth) || 204, 176, 360);
             panelColor.style.width = `${w}px`;
             const texDrawer = document.getElementById('texture-settings');
             if (texDrawer) texDrawer.style.width = `${w}px`;
         }
 
         const shape = cfg.pickerShape || 'sv-square';
+        const isOklch = (cfg.wheelSpace || 'ryb') === 'oklch';
         const isGeo = (shape === 'ring-triangle' || shape === 'ring-square' || shape === 'wheel');
+        const dpr = this._getDpr();
+        const innerCssW = Math.max(168, w - 28);
+
         if (colorSelector) {
             colorSelector.classList.toggle('hidden', shape === 'none');
-            colorSelector.classList.toggle('geo-dark', isGeo);
+            colorSelector.classList.toggle('geo-dark', isGeo || (shape === 'sv-square' && isOklch));
         }
         if (pickerSquareBox) {
             pickerSquareBox.classList.toggle('hidden', shape !== 'sv-square');
+        }
+        if (svClassicWrap) {
+            svClassicWrap.classList.toggle('hidden', isOklch);
+        }
+        if (oklchPickerWrap) {
+            oklchPickerWrap.classList.toggle('hidden', !isOklch);
+        }
+        if (oklch2dCanvas) {
+            const bw = Math.round(innerCssW * dpr);
+            const bh = Math.round(innerCssW * (5 / 6) * dpr);
+            if (oklch2dCanvas.width !== bw || oklch2dCanvas.height !== bh) {
+                oklch2dCanvas.width = bw;
+                oklch2dCanvas.height = bh;
+            }
         }
         if (pickerGeoBox) {
             pickerGeoBox.classList.toggle('hidden', !isGeo);
@@ -1013,7 +1083,7 @@ export class PaletteStudio {
             wheelValWrap.classList.toggle('hidden', shape !== 'wheel');
         }
         if (geoCanvas) {
-            const size = 200;
+            const size = Math.round(innerCssW * dpr);
             if (geoCanvas.width !== size || geoCanvas.height !== size) {
                 geoCanvas.width = size;
                 geoCanvas.height = size;
@@ -1035,6 +1105,8 @@ export class PaletteStudio {
     _bindDockedPickers() {
         const svPicker = document.getElementById('sv-picker');
         const hueSlider = document.getElementById('hue-slider');
+        const oklch2d = document.getElementById('oklch-2d-canvas');
+        const oklch1d = document.getElementById('oklch-1d-track');
         const geoCanvas = document.getElementById('color-geo-canvas');
         const wheelValSlider = document.getElementById('color-wheel-val-slider');
         const hexInput = document.getElementById('palette-hex-input');
@@ -1074,11 +1146,75 @@ export class PaletteStudio {
             };
         }
 
+        if (oklch2d) {
+            const updateFromOklch2D = (e) => {
+                const rect = oklch2d.getBoundingClientRect();
+                const rx = clamp((e.clientX - rect.left) / (rect.width || 1), 0, 1);
+                const ry = clamp((e.clientY - rect.top) / (rect.height || 1), 0, 1);
+                const H = rx * 360;
+                const C = (1 - ry) * 0.37;
+                const target = this._ensureOklchTarget(this.getActiveHex());
+                this._commitOklchTarget(target.L, C, H);
+            };
+            oklch2d.onpointerdown = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                try { oklch2d.setPointerCapture(e.pointerId); } catch (_) {}
+                updateFromOklch2D(e);
+                const onMove = (pe) => updateFromOklch2D(pe);
+                const onUp = (pe) => {
+                    oklch2d.removeEventListener('pointermove', onMove);
+                    oklch2d.removeEventListener('pointerup', onUp);
+                    oklch2d.removeEventListener('pointercancel', onUp);
+                    oklch2d.removeEventListener('lostpointercapture', onUp);
+                    try { if (pe?.pointerId !== undefined) oklch2d.releasePointerCapture(pe.pointerId); } catch (_) {}
+                };
+                oklch2d.addEventListener('pointermove', onMove);
+                oklch2d.addEventListener('pointerup', onUp);
+                oklch2d.addEventListener('pointercancel', onUp);
+                oklch2d.addEventListener('lostpointercapture', onUp);
+            };
+        }
+
+        if (oklch1d) {
+            const updateFromOklch1D = (e) => {
+                const rect = oklch1d.getBoundingClientRect();
+                const ratio = clamp((e.clientX - rect.left) / (rect.width || 1), 0, 1);
+                const L = ratio * 100;
+                const target = this._ensureOklchTarget(this.getActiveHex());
+                this._commitOklchTarget(L, target.C, target.H);
+            };
+            oklch1d.onpointerdown = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                try { oklch1d.setPointerCapture(e.pointerId); } catch (_) {}
+                updateFromOklch1D(e);
+                const onMove = (pe) => updateFromOklch1D(pe);
+                const onUp = (pe) => {
+                    oklch1d.removeEventListener('pointermove', onMove);
+                    oklch1d.removeEventListener('pointerup', onUp);
+                    oklch1d.removeEventListener('pointercancel', onUp);
+                    oklch1d.removeEventListener('lostpointercapture', onUp);
+                    try { if (pe?.pointerId !== undefined) oklch1d.releasePointerCapture(pe.pointerId); } catch (_) {}
+                };
+                oklch1d.addEventListener('pointermove', onMove);
+                oklch1d.addEventListener('pointerup', onUp);
+                oklch1d.addEventListener('pointercancel', onUp);
+                oklch1d.addEventListener('lostpointercapture', onUp);
+            };
+        }
+
         if (wheelValSlider) {
             wheelValSlider.oninput = (e) => {
                 const val = parseFloat(e.target.value);
+                const safeVal = Number.isFinite(val) ? val : 100;
+                if ((this.app.palette.config.wheelSpace || 'ryb') === 'oklch') {
+                    const target = this._ensureOklchTarget(this.getActiveHex());
+                    this._commitOklchTarget(safeVal, target.C, target.H);
+                    return;
+                }
                 const angle = this._getWheelAngle();
-                this.commitWheelHsv(angle, this.app.hsv.s, Number.isFinite(val) ? val : 100);
+                this.commitWheelHsv(angle, this.app.hsv.s, safeVal);
             };
         }
 
@@ -1088,6 +1224,7 @@ export class PaletteStudio {
                 const nx = ((e.clientX - rect.left) / (rect.width || 1)) * 2 - 1;
                 const ny = ((e.clientY - rect.top) / (rect.height || 1)) * 2 - 1;
                 const shape = this.app.palette.config.pickerShape;
+                const wheelSpace = this.app.palette.config.wheelSpace || 'ryb';
                 const outerR = 0.94;
                 const innerR = 0.72;
                 const dist = Math.hypot(nx, ny);
@@ -1096,8 +1233,13 @@ export class PaletteStudio {
                     if (isStart) this._dockDragMode = 'wheel';
                     let deg = Math.atan2(ny, nx) * (180 / Math.PI);
                     if (deg < 0) deg += 360;
-                    const sat = clamp((dist / outerR) * 100, 0, 100);
-                    this.commitWheelHsv(deg, sat, this.app.hsv?.v ?? 100);
+                    const sat01 = clamp(dist / outerR, 0, 1);
+                    if (wheelSpace === 'oklch') {
+                        const target = this._ensureOklchTarget(this.getActiveHex());
+                        this._commitOklchTarget(target.L, sat01 * 0.34, deg);
+                    } else {
+                        this.commitWheelHsv(deg, sat01 * 100, this.app.hsv?.v ?? 100);
+                    }
                     return;
                 }
 
@@ -1177,6 +1319,8 @@ export class PaletteStudio {
 
     syncColorUI(hex, { preserveHsv = false } = {}) {
         const clean = normalizeHex(hex, this.getActiveHex());
+        const oklchTarget = this._ensureOklchTarget(clean);
+
         if (!preserveHsv) {
             const rgb = hexToRgb(clean);
             this.app.hsv = rgbToHsv(rgb.r, rgb.g, rgb.b);
@@ -1186,33 +1330,57 @@ export class PaletteStudio {
         const wheelAngle = this._getWheelAngle();
         const shape = this.app.palette.config.pickerShape || 'sv-square';
 
-        // Update SV square + hue bar
-        const svPicker = document.getElementById('sv-picker');
-        const hueSlider = document.getElementById('hue-slider');
-        if (svPicker && hueSlider) {
-            const pure = wheelHsvToRgb(wheelAngle, 100, 100, wheelSpace);
-            svPicker.style.backgroundColor = rgbToHex(pure.r, pure.g, pure.b);
-            const svCursor = svPicker.querySelector('.sv-cursor');
-            if (svCursor) {
-                svCursor.style.left = `${this.app.hsv.s}%`;
-                svCursor.style.top = `${100 - this.app.hsv.v}%`;
+        if (shape === 'sv-square') {
+            if (wheelSpace === 'oklch') {
+                this._drawOklch2DSurface(oklchTarget, clean);
+                const oklch1dTrack = document.getElementById('oklch-1d-track');
+                const oklch1dThumb = document.getElementById('oklch-1d-thumb');
+                if (oklch1dTrack) {
+                    oklch1dTrack.style.background = buildSliderGradient(9, t => {
+                        const r = oklchToRgb(t * 100, oklchTarget.C, oklchTarget.H);
+                        return rgbToHex(r.r, r.g, r.b);
+                    });
+                }
+                if (oklch1dThumb) {
+                    oklch1dThumb.style.left = `${clamp(oklchTarget.L, 0, 100)}%`;
+                }
+            } else {
+                const svPicker = document.getElementById('sv-picker');
+                const hueSlider = document.getElementById('hue-slider');
+                if (svPicker && hueSlider) {
+                    const pure = wheelHsvToRgb(wheelAngle, 100, 100, wheelSpace);
+                    svPicker.style.backgroundColor = rgbToHex(pure.r, pure.g, pure.b);
+                    const svCursor = svPicker.querySelector('.sv-cursor');
+                    if (svCursor) {
+                        svCursor.style.left = `${this.app.hsv.s}%`;
+                        svCursor.style.top = `${100 - this.app.hsv.v}%`;
+                    }
+                    hueSlider.value = Math.round(wheelAngle);
+                    hueSlider.style.background = buildSliderGradient(13, t => {
+                        const rgb = wheelAngleToRgb(t * 360, wheelSpace, 100, 100);
+                        return rgbToHex(rgb.r, rgb.g, rgb.b);
+                    });
+                }
             }
-            hueSlider.value = Math.round(wheelAngle);
-            hueSlider.style.background = buildSliderGradient(13, t => {
-                const rgb = wheelAngleToRgb(t * 360, wheelSpace, 100, 100);
-                return rgbToHex(rgb.r, rgb.g, rgb.b);
-            });
         }
 
         if (shape === 'ring-triangle' || shape === 'ring-square' || shape === 'wheel') {
-            this._drawDockedGeoCanvas(wheelAngle);
+            this._drawDockedGeoCanvas(wheelAngle, oklchTarget);
         }
 
         const wheelValSlider = document.getElementById('color-wheel-val-slider');
         if (wheelValSlider) {
-            wheelValSlider.value = Math.round(this.app.hsv.v);
-            const pure = wheelHsvToRgb(wheelAngle, this.app.hsv.s, 100, wheelSpace);
-            wheelValSlider.style.background = `linear-gradient(to right, #000000, ${rgbToHex(pure.r, pure.g, pure.b)})`;
+            if (wheelSpace === 'oklch') {
+                wheelValSlider.value = Math.round(oklchTarget.L);
+                wheelValSlider.style.background = buildSliderGradient(9, t => {
+                    const r = oklchToRgb(t * 100, oklchTarget.C, oklchTarget.H);
+                    return rgbToHex(r.r, r.g, r.b);
+                });
+            } else {
+                wheelValSlider.value = Math.round(this.app.hsv.v);
+                const pure = wheelHsvToRgb(wheelAngle, this.app.hsv.s, 100, wheelSpace);
+                wheelValSlider.style.background = `linear-gradient(to right, #000000, ${rgbToHex(pure.r, pure.g, pure.b)})`;
+            }
         }
 
         const hexInput = document.getElementById('palette-hex-input');
@@ -1229,6 +1397,114 @@ export class PaletteStudio {
         }
     }
 
+    _drawOklch2DSurface(oklchTarget, activeHex) {
+        const canvas = document.getElementById('oklch-2d-canvas');
+        if (!canvas) return;
+        const bw = canvas.width;
+        const bh = canvas.height;
+        if (bw <= 0 || bh <= 0) return;
+
+        const L_key = Math.round(clamp(oklchTarget.L, 0, 100) * 2) / 2;
+        const rw = 180;
+        const rh = 144;
+        const MAX_C = 0.37;
+
+        if (!this._oklch2dRaster || this._oklch2dRaster.width !== rw || this._oklch2dRasterL !== L_key) {
+            if (!this._oklch2dRaster) {
+                this._oklch2dRaster = document.createElement('canvas');
+                this._oklch2dRaster.width = rw;
+                this._oklch2dRaster.height = rh;
+            }
+            const rCtx = this._oklch2dRaster.getContext('2d');
+            const img = rCtx.createImageData(rw, rh);
+            const data = img.data;
+            const L01 = clamp(L_key / 100, 0, 1);
+            const maxCs = new Float32Array(rw);
+
+            for (let x = 0; x < rw; x++) {
+                const hueDeg = (x / (rw - 1)) * 360;
+                const rad = hueDeg * (Math.PI / 180);
+                const ca = Math.cos(rad);
+                const cb = Math.sin(rad);
+                const maxC = getMaxOklchChroma(L_key, hueDeg);
+                maxCs[x] = maxC;
+
+                for (let y = 0; y < rh; y++) {
+                    const targetC = (1 - y / (rh - 1)) * MAX_C;
+                    const actualC = targetC < maxC ? targetC : maxC;
+                    // Fast inline OKLab -> sRGB when already inside maxC gamut (0 binary loops)
+                    const a = actualC * ca;
+                    const b = actualC * cb;
+                    const l_ = L01 + 0.3963377774 * a + 0.2158037573 * b;
+                    const m_ = L01 - 0.1055613458 * a - 0.0638541728 * b;
+                    const s_ = L01 - 0.0894841775 * a - 1.2914855480 * b;
+                    const l = l_ * l_ * l_;
+                    const m = m_ * m_ * m_;
+                    const s = s_ * s_ * s_;
+                    const lr = clamp(+4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s, 0, 1);
+                    const lg = clamp(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s, 0, 1);
+                    const lb = clamp(-0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s, 0, 1);
+
+                    const sr = lr <= 0.0031308 ? 12.92 * lr : 1.055 * Math.pow(lr, 1 / 2.4) - 0.055;
+                    const sg = lg <= 0.0031308 ? 12.92 * lg : 1.055 * Math.pow(lg, 1 / 2.4) - 0.055;
+                    const sb = lb <= 0.0031308 ? 12.92 * lb : 1.055 * Math.pow(lb, 1 / 2.4) - 0.055;
+
+                    const idx = (y * rw + x) * 4;
+                    data[idx] = sr * 255;
+                    data[idx + 1] = sg * 255;
+                    data[idx + 2] = sb * 255;
+                    data[idx + 3] = 255;
+                }
+            }
+            rCtx.putImageData(img, 0, 0);
+            this._oklch2dRasterL = L_key;
+            this._oklch2dMaxC = maxCs;
+        }
+
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, bw, bh);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(this._oklch2dRaster, 0, 0, bw, bh);
+
+        // Draw crisp thin sRGB gamut boundary curve (no grey cutout!)
+        const maxCs = this._oklch2dMaxC;
+        if (maxCs && maxCs.length === rw) {
+            const dpr = bw / 180;
+            ctx.beginPath();
+            for (let x = 0; x < rw; x++) {
+                const px = (x / (rw - 1)) * bw;
+                const py = (1 - clamp(maxCs[x] / MAX_C, 0, 1)) * bh;
+                if (x === 0) ctx.moveTo(px, py);
+                else ctx.lineTo(px, py);
+            }
+            ctx.lineJoin = 'round';
+            ctx.strokeStyle = 'rgba(0, 0, 0, 0.38)';
+            ctx.lineWidth = Math.max(2, 1.8 * dpr);
+            ctx.stroke();
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.88)';
+            ctx.lineWidth = Math.max(1, 0.9 * dpr);
+            ctx.stroke();
+        }
+
+        // Reticle at unclamped (H, C) target
+        const scale = bw / 180;
+        const cx = clamp((oklchTarget.H / 360) * bw, 0, bw);
+        const cy = clamp((1 - clamp(oklchTarget.C / MAX_C, 0, 1)) * bh, 0, bh);
+        const rad = Math.max(5, 4.2 * scale);
+
+        ctx.beginPath();
+        ctx.arc(cx, cy, rad, 0, Math.PI * 2);
+        ctx.fillStyle = activeHex;
+        ctx.fill();
+        ctx.lineWidth = Math.max(2.5, 2.2 * scale);
+        ctx.strokeStyle = '#000000';
+        ctx.stroke();
+        ctx.lineWidth = Math.max(1.2, 1.1 * scale);
+        ctx.strokeStyle = '#ffffff';
+        ctx.stroke();
+    }
+
     _getCachedRingBitmap(size, wheelSpace) {
         const key = `${size}:${wheelSpace}`;
         if (this._ringCacheKey === key && this._ringCacheCanvas) {
@@ -1243,34 +1519,41 @@ export class PaletteStudio {
         const half = size * 0.5;
         const outerPx = half * 0.94;
         const innerPx = half * 0.72;
+        const scale = size / 200;
+        const bw = 1.05 * scale;
+        const feather = Math.max(0.85, 0.85 * scale);
+        const smooth01 = (t) => {
+            const x = clamp(t, 0, 1);
+            return x * x * (3 - 2 * x);
+        };
 
         for (let y = 0; y < size; y++) {
             const dy = y - half + 0.5;
             for (let x = 0; x < size; x++) {
                 const dx = x - half + 0.5;
                 const d = Math.hypot(dx, dy);
-                const idx = (y * size + x) * 4;
-                if (d >= innerPx - 1.2 && d <= outerPx + 1.2) {
-                    let deg = Math.atan2(dy, dx) * (180 / Math.PI);
-                    if (deg < 0) deg += 360;
-                    const rgb = wheelAngleToRgb(deg, wheelSpace, 100, 100);
-                    let alpha = 255;
-                    if (d < innerPx) alpha = Math.max(0, 1 - (innerPx - d) / 1.2) * 255;
-                    else if (d > outerPx) alpha = Math.max(0, 1 - (d - outerPx) / 1.2) * 255;
+                if (d < innerPx - bw - feather || d > outerPx + bw + feather) continue;
 
-                    // Crisp 1.5px black borders
-                    if (Math.abs(d - outerPx) < 1.0 || Math.abs(d - innerPx) < 1.0) {
-                        data[idx] = 0;
-                        data[idx + 1] = 0;
-                        data[idx + 2] = 0;
-                        data[idx + 3] = 255;
-                    } else {
-                        data[idx] = rgb.r;
-                        data[idx + 1] = rgb.g;
-                        data[idx + 2] = rgb.b;
-                        data[idx + 3] = alpha;
-                    }
-                }
+                const idx = (y * size + x) * 4;
+                let deg = Math.atan2(dy, dx) * (180 / Math.PI);
+                if (deg < 0) deg += 360;
+                const rgb = wheelAngleToRgb(deg, wheelSpace, 100, 100);
+
+                // Smooth outer & inner silhouette coverage
+                const outerCov = 1 - smooth01((d - (outerPx + bw - feather)) / (2 * feather));
+                const innerCov = smooth01((d - (innerPx - bw - feather)) / (2 * feather));
+                const cov = outerCov < innerCov ? outerCov : innerCov;
+                if (cov <= 0.002) continue;
+
+                // Smooth black border blend on both inner & outer edges of color band
+                const outerInk = smooth01((d - (outerPx - bw - feather)) / (2 * feather));
+                const innerInk = 1 - smooth01((d - (innerPx + bw - feather)) / (2 * feather));
+                const ink = outerInk > innerInk ? outerInk : innerInk;
+
+                data[idx] = rgb.r * (1 - ink);
+                data[idx + 1] = rgb.g * (1 - ink);
+                data[idx + 2] = rgb.b * (1 - ink);
+                data[idx + 3] = Math.round(cov * 255);
             }
         }
         ctx.putImageData(img, 0, 0);
@@ -1279,8 +1562,11 @@ export class PaletteStudio {
         return c;
     }
 
-    _getCachedWheelBitmap(size, wheelSpace) {
-        const key = `${size}:${wheelSpace}`;
+    _getCachedWheelBitmap(size, wheelSpace, oklchLightness = 70, studioWhiteCenter = false) {
+        const okKey = wheelSpace === 'oklch'
+            ? (studioWhiteCenter ? 'studio' : Math.round(clamp(oklchLightness, 0, 100)))
+            : 'v100';
+        const key = `${size}:${wheelSpace}:${okKey}`;
         if (this._wheelCacheKey === key && this._wheelCacheCanvas) {
             return this._wheelCacheCanvas;
         }
@@ -1292,30 +1578,37 @@ export class PaletteStudio {
         const data = img.data;
         const half = size * 0.5;
         const outerPx = half * 0.94;
+        const scale = size / 200;
+        const bw = 1.15 * scale;
+        const feather = Math.max(0.9, 0.9 * scale);
+        const smooth01 = (t) => {
+            const x = clamp(t, 0, 1);
+            return x * x * (3 - 2 * x);
+        };
 
         for (let y = 0; y < size; y++) {
             const dy = y - half + 0.5;
             for (let x = 0; x < size; x++) {
                 const dx = x - half + 0.5;
                 const d = Math.hypot(dx, dy);
+                if (d > outerPx + bw + feather) continue;
+
                 const idx = (y * size + x) * 4;
-                if (d <= outerPx + 1.2) {
-                    let deg = Math.atan2(dy, dx) * (180 / Math.PI);
-                    if (deg < 0) deg += 360;
-                    const sat = clamp((d / outerPx) * 100, 0, 100);
-                    const rgb = wheelAngleToRgb(deg, wheelSpace, sat, 100);
-                    if (Math.abs(d - outerPx) <= 1.2) {
-                        data[idx] = 0;
-                        data[idx + 1] = 0;
-                        data[idx + 2] = 0;
-                        data[idx + 3] = 255;
-                    } else {
-                        data[idx] = rgb.r;
-                        data[idx + 1] = rgb.g;
-                        data[idx + 2] = rgb.b;
-                        data[idx + 3] = 255;
-                    }
-                }
+                let deg = Math.atan2(dy, dx) * (180 / Math.PI);
+                if (deg < 0) deg += 360;
+                const sat01 = clamp(d / outerPx, 0, 1);
+                const rgb = wheelSpace === 'oklch'
+                    ? oklchWheelColor(deg, sat01, oklchLightness, studioWhiteCenter)
+                    : wheelAngleToRgb(deg, wheelSpace, sat01 * 100, 100);
+
+                const outerCov = 1 - smooth01((d - (outerPx + bw - feather)) / (2 * feather));
+                if (outerCov <= 0.002) continue;
+
+                const borderInk = smooth01((d - (outerPx - bw - feather)) / (2 * feather));
+                data[idx] = rgb.r * (1 - borderInk);
+                data[idx + 1] = rgb.g * (1 - borderInk);
+                data[idx + 2] = rgb.b * (1 - borderInk);
+                data[idx + 3] = Math.round(outerCov * 255);
             }
         }
         ctx.putImageData(img, 0, 0);
@@ -1324,67 +1617,78 @@ export class PaletteStudio {
         return c;
     }
 
-    _drawDockedGeoCanvas(wheelAngle) {
+    _drawDockedGeoCanvas(wheelAngle, oklchTarget = null) {
         const canvas = document.getElementById('color-geo-canvas');
         if (!canvas) return;
         const ctx = canvas.getContext('2d');
         const size = canvas.width;
         const half = size * 0.5;
+        const scale = size / 200;
         const shape = this.app.palette.config.pickerShape;
         const wheelSpace = this.app.palette.config.wheelSpace || 'ryb';
+        const target = oklchTarget || this._ensureOklchTarget(this.getActiveHex());
 
         ctx.clearRect(0, 0, size, size);
 
         if (shape === 'wheel') {
-            const disc = this._getCachedWheelBitmap(size, wheelSpace);
+            const isOkWheel = wheelSpace === 'oklch';
+            const disc = this._getCachedWheelBitmap(size, wheelSpace, isOkWheel ? target.L : 100, false);
             ctx.drawImage(disc, 0, 0);
 
             const outerPx = half * 0.94;
-            const val01 = clamp((this.app.hsv?.v ?? 100) / 100, 0, 1);
-            if (val01 < 0.995) {
+            const val01 = isOkWheel
+                ? clamp(target.L / 100, 0, 1)
+                : clamp((this.app.hsv?.v ?? 100) / 100, 0, 1);
+            if (!isOkWheel && val01 < 0.995) {
                 ctx.save();
                 ctx.beginPath();
-                ctx.arc(half, half, outerPx - 0.8, 0, Math.PI * 2);
+                ctx.arc(half, half, outerPx - 1.1 * scale, 0, Math.PI * 2);
                 ctx.fillStyle = `rgba(0, 0, 0, ${1 - val01})`;
                 ctx.fill();
                 ctx.restore();
             }
 
             const c = this.app.palette.baseColors;
-            // Draw symmetry lines and anchor nodes 1..6 on docked wheel
             for (let i = c.length - 1; i >= 0; i--) {
-                const rgb = hexToRgb(c[i]);
-                const wh = rgbToWheelHsv(rgb.r, rgb.g, rgb.b, wheelSpace);
-                const ang = wh.h * (Math.PI / 180);
-                const rPx = (wh.s / 100) * outerPx;
+                const isAct = (i === this.app.palette.activeIndex);
+                let ang, rPx;
+                if (isOkWheel) {
+                    const lch = isAct ? target : rgbToOklch(...Object.values(hexToRgb(c[i])));
+                    ang = lch.H * (Math.PI / 180);
+                    rPx = clamp(lch.C / 0.34, 0, 1) * outerPx;
+                } else {
+                    const rgb = hexToRgb(c[i]);
+                    const wh = rgbToWheelHsv(rgb.r, rgb.g, rgb.b, wheelSpace);
+                    ang = wh.h * (Math.PI / 180);
+                    rPx = (wh.s / 100) * outerPx;
+                }
                 const px = half + Math.cos(ang) * rPx;
                 const py = half + Math.sin(ang) * rPx;
 
                 ctx.beginPath();
                 ctx.moveTo(half, half);
                 ctx.lineTo(px, py);
-                const isAct = (i === this.app.palette.activeIndex);
                 ctx.strokeStyle = val01 < 0.45
                     ? (isAct ? '#ffffff' : 'rgba(255,255,255,0.45)')
                     : (isAct ? '#000000' : 'rgba(0,0,0,0.45)');
-                ctx.lineWidth = isAct ? 1.8 : 1;
+                ctx.lineWidth = (isAct ? 1.6 : 0.95) * scale;
                 ctx.stroke();
 
                 ctx.beginPath();
-                ctx.arc(px, py, i === this.app.palette.activeIndex ? 6 : 4, 0, Math.PI * 2);
+                ctx.arc(px, py, (isAct ? 5.6 : 3.8) * scale, 0, Math.PI * 2);
                 ctx.fillStyle = c[i];
                 ctx.fill();
-                ctx.lineWidth = i === this.app.palette.activeIndex ? 2 : 1.2;
+                ctx.lineWidth = (isAct ? 1.9 : 1.1) * scale;
                 ctx.strokeStyle = '#ffffff';
                 ctx.stroke();
-                ctx.lineWidth = 1;
+                ctx.lineWidth = 0.95 * scale;
                 ctx.strokeStyle = '#000000';
                 ctx.stroke();
             }
             return;
         }
 
-        // Draw cached outer hue ring
+        // Draw crisp HiDPI outer hue ring
         const ring = this._getCachedRingBitmap(size, wheelSpace);
         ctx.drawImage(ring, 0, 0);
 
@@ -1396,16 +1700,16 @@ export class PaletteStudio {
         const hx = half + Math.cos(rad) * ringMidPx;
         const hy = half + Math.sin(rad) * ringMidPx;
         ctx.beginPath();
-        ctx.arc(hx, hy, 5, 0, Math.PI * 2);
+        ctx.arc(hx, hy, 4.8 * scale, 0, Math.PI * 2);
         ctx.strokeStyle = '#000000';
-        ctx.lineWidth = 3;
+        ctx.lineWidth = 2.8 * scale;
         ctx.stroke();
         ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = 1.4 * scale;
         ctx.stroke();
 
         if (shape === 'ring-square') {
-            const halfSide = Math.floor((innerPx - 7) * Math.SQRT1_2);
+            const halfSide = Math.floor((innerPx - 7 * scale) * Math.SQRT1_2);
             const sx = Math.round(half - halfSide);
             const sy = Math.round(half - halfSide);
             const sw = halfSide * 2;
@@ -1426,27 +1730,27 @@ export class PaletteStudio {
             ctx.fillRect(sx, sy, sw, sw);
 
             ctx.strokeStyle = '#3d3d3d';
-            ctx.lineWidth = 3;
+            ctx.lineWidth = 2.4 * scale;
             ctx.strokeRect(sx, sy, sw, sw);
             ctx.strokeStyle = '#000000';
-            ctx.lineWidth = 1.5;
+            ctx.lineWidth = 1.3 * scale;
             ctx.strokeRect(sx, sy, sw, sw);
 
             const cx = sx + (this.app.hsv.s / 100) * sw;
             const cy = sy + (1 - this.app.hsv.v / 100) * sw;
             ctx.beginPath();
-            ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+            ctx.arc(cx, cy, 4.8 * scale, 0, Math.PI * 2);
             ctx.strokeStyle = '#000000';
-            ctx.lineWidth = 3;
+            ctx.lineWidth = 2.8 * scale;
             ctx.stroke();
             ctx.strokeStyle = '#ffffff';
-            ctx.lineWidth = 1.5;
+            ctx.lineWidth = 1.4 * scale;
             ctx.stroke();
             return;
         }
 
-        // 'ring-triangle' — fixed upright orientation (Pure Hue right, White top-left, Black bottom-left)
-        const rTri = innerPx - 5;
+        // 'ring-triangle' — fixed stationary orientation (Pure Hue right, White top-left, Black bottom-left)
+        const rTri = innerPx - 5 * scale;
         const cos60 = 0.5;
         const sin60 = 0.8660254037844386;
         const ax = half + rTri;
@@ -1457,10 +1761,10 @@ export class PaletteStudio {
         const cy = half + sin60 * rTri;
 
         const pure = wheelHsvToRgb(wheelAngle, 100, 100, wheelSpace);
-        const minX = Math.max(0, Math.floor(Math.min(ax, bx, cx)) - 1);
-        const maxX = Math.min(size - 1, Math.ceil(Math.max(ax, bx, cx)) + 1);
-        const minY = Math.max(0, Math.floor(Math.min(ay, by, cy)) - 1);
-        const maxY = Math.min(size - 1, Math.ceil(Math.max(ay, by, cy)) + 1);
+        const minX = Math.max(0, Math.floor(Math.min(ax, bx, cx)) - 2);
+        const maxX = Math.min(size - 1, Math.ceil(Math.max(ax, bx, cx)) + 2);
+        const minY = Math.max(0, Math.floor(Math.min(ay, by, cy)) - 2);
+        const maxY = Math.min(size - 1, Math.ceil(Math.max(ay, by, cy)) + 2);
         const bw = maxX - minX + 1;
         const bh = maxY - minY + 1;
 
@@ -1477,6 +1781,11 @@ export class PaletteStudio {
             const d = img.data;
             const invDet = 1 / det;
 
+            // Signed inward pixel distance for crisp SDF edge anti-aliasing
+            const lenBC = Math.hypot(cx - bx, cy - by) || 1;
+            const lenCA = Math.hypot(ax - cx, ay - cy) || 1;
+            const lenAB = Math.hypot(bx - ax, by - ay) || 1;
+
             for (let py = 0; py < bh; py++) {
                 const y = minY + py + 0.5;
                 for (let px = 0; px < bw; px++) {
@@ -1484,14 +1793,21 @@ export class PaletteStudio {
                     const u = ((by - cy) * (x - cx) + (cx - bx) * (y - cy)) * invDet;
                     const v = ((cy - ay) * (x - cx) + (ax - cx) * (y - cy)) * invDet;
                     const w = 1 - u - v;
-                    if (u >= -0.015 && v >= -0.015 && w >= -0.015) {
+
+                    const dU = u * Math.abs(det) / lenBC;
+                    const dV = v * Math.abs(det) / lenCA;
+                    const dW = w * Math.abs(det) / lenAB;
+                    const minEdge = dU < dV ? (dU < dW ? dU : dW) : (dV < dW ? dV : dW);
+
+                    if (minEdge >= -1.0 * scale) {
                         const uc = clamp(u, 0, 1);
                         const vc = clamp(v, 0, 1);
                         const idx = (py * bw + px) * 4;
+                        const cov = clamp((minEdge / (0.85 * scale)) + 0.5, 0, 1);
                         d[idx] = clamp(uc * pure.r + vc * 255, 0, 255);
                         d[idx + 1] = clamp(uc * pure.g + vc * 255, 0, 255);
                         d[idx + 2] = clamp(uc * pure.b + vc * 255, 0, 255);
-                        d[idx + 3] = 255;
+                        d[idx + 3] = Math.round(cov * 255);
                     }
                 }
             }
@@ -1499,17 +1815,20 @@ export class PaletteStudio {
             ctx.drawImage(this._triScratch, 0, 0);
         }
 
+        ctx.save();
         ctx.beginPath();
         ctx.moveTo(ax, ay);
         ctx.lineTo(bx, by);
         ctx.lineTo(cx, cy);
         ctx.closePath();
+        ctx.lineJoin = 'round';
         ctx.strokeStyle = '#3d3d3d';
-        ctx.lineWidth = 3;
+        ctx.lineWidth = 2.4 * scale;
         ctx.stroke();
         ctx.strokeStyle = '#000000';
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = 1.3 * scale;
         ctx.stroke();
+        ctx.restore();
 
         // Reticle at barycentric (u = S*V, v = V*(1-S), w = 1-V)
         const S01 = this.app.hsv.s / 100;
@@ -1521,12 +1840,12 @@ export class PaletteStudio {
         const ry = uRet * ay + vRet * by + wRet * cy;
 
         ctx.beginPath();
-        ctx.arc(rx, ry, 5, 0, Math.PI * 2);
+        ctx.arc(rx, ry, 4.8 * scale, 0, Math.PI * 2);
         ctx.strokeStyle = '#000000';
-        ctx.lineWidth = 3;
+        ctx.lineWidth = 2.8 * scale;
         ctx.stroke();
         ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = 1.4 * scale;
         ctx.stroke();
     }
 
@@ -1548,6 +1867,7 @@ export class PaletteStudio {
         container.classList.remove('hidden');
         container.innerHTML = '';
         const frag = document.createDocumentFragment();
+        const oklchOverride = this._ensureOklchTarget(hex);
 
         for (const pack of packs) {
             const group = document.createElement('div');
@@ -1558,7 +1878,7 @@ export class PaletteStudio {
                 hdr.textContent = pack.label;
                 group.appendChild(hdr);
             }
-            const descriptors = getSliderDescriptors(pack.id, hex);
+            const descriptors = getSliderDescriptors(pack.id, hex, pack.id === 'oklch' ? oklchOverride : null);
             for (const desc of descriptors) {
                 group.appendChild(this._createGradientSliderRow(desc, compact));
             }
@@ -1606,12 +1926,29 @@ export class PaletteStudio {
                 ? this._activeSliderDrag.startHex
                 : this.getActiveHex();
             const packId = desc.key.split('-')[0].replace('paint', 'painterly');
-            const freshList = getSliderDescriptors(packId, dragRef);
-            const fresh = freshList.find(d => d.key === desc.key) || desc;
-            const rawVal = fresh.min + ratio * (fresh.max - fresh.min);
+            const dragOk = (this._activeSliderDrag && this._activeSliderDrag.key === desc.key)
+                ? this._activeSliderDrag.startOklch
+                : this._ensureOklchTarget(dragRef);
+
             if (this._activeSliderDrag && this._activeSliderDrag.key === desc.key) {
                 this._activeSliderDrag.ratio = ratio;
             }
+
+            if (packId === 'oklch') {
+                const baseOk = dragOk || this._ensureOklchTarget(dragRef);
+                if (desc.key === 'oklch-l') {
+                    this._commitOklchTarget(ratio * 100, baseOk.C, baseOk.H, { updateBase: true });
+                } else if (desc.key === 'oklch-c') {
+                    this._commitOklchTarget(baseOk.L, ratio * 0.37, baseOk.H, { updateBase: true });
+                } else {
+                    this._commitOklchTarget(baseOk.L, baseOk.C, ratio * 360, { updateBase: true });
+                }
+                return;
+            }
+
+            const freshList = getSliderDescriptors(packId, dragRef);
+            const fresh = freshList.find(d => d.key === desc.key) || desc;
+            const rawVal = fresh.min + ratio * (fresh.max - fresh.min);
             const nextHex = fresh.apply(rawVal);
             this.commitPickedHex(nextHex, { updateBase: true });
         };
@@ -1619,9 +1956,11 @@ export class PaletteStudio {
         track.onpointerdown = (e) => {
             e.preventDefault();
             e.stopPropagation();
+            const activeHex = this.getActiveHex();
             this._activeSliderDrag = {
                 key: desc.key,
-                startHex: this.getActiveHex(),
+                startHex: activeHex,
+                startOklch: { ...this._ensureOklchTarget(activeHex) },
                 ratio: clamp((desc.value - desc.min) / (desc.max - desc.min || 1), 0, 1)
             };
             try { track.setPointerCapture(e.pointerId); } catch (_) {}
@@ -1650,17 +1989,21 @@ export class PaletteStudio {
         const rows = container.querySelectorAll('.cs-bar-row');
         if (!rows.length) return;
 
-        // Build lookup once per pack used inside container
         const cache = new Map();
+        const curOklch = this._ensureOklchTarget(hex);
+
         rows.forEach(row => {
             const key = row.dataset.sliderKey;
             if (!key) return;
             const isDraggingThis = this._activeSliderDrag && this._activeSliderDrag.key === key;
             const evalHex = isDraggingThis ? this._activeSliderDrag.startHex : hex;
+            const evalOklch = isDraggingThis ? this._activeSliderDrag.startOklch : curOklch;
             const packId = key.split('-')[0].replace('paint', 'painterly');
-            const cacheKey = `${packId}:${evalHex}`;
+            const cacheKey = packId === 'oklch'
+                ? `${packId}:${isDraggingThis ? 'drag' : 'live'}:${evalOklch.L.toFixed(1)}:${evalOklch.C.toFixed(3)}:${evalOklch.H.toFixed(1)}`
+                : `${packId}:${evalHex}`;
             if (!cache.has(cacheKey)) {
-                cache.set(cacheKey, getSliderDescriptors(packId, evalHex));
+                cache.set(cacheKey, getSliderDescriptors(packId, evalHex, packId === 'oklch' ? evalOklch : null));
             }
             const desc = cache.get(cacheKey).find(d => d.key === key);
             if (!desc) return;
@@ -1671,9 +2014,9 @@ export class PaletteStudio {
             if (track) track.style.background = desc.grad;
 
             if (isDraggingThis) {
-                const livePackKey = `${packId}:${hex}`;
+                const livePackKey = packId === 'oklch' ? 'oklch:live' : `${packId}:${hex}`;
                 if (!cache.has(livePackKey)) {
-                    cache.set(livePackKey, getSliderDescriptors(packId, hex));
+                    cache.set(livePackKey, getSliderDescriptors(packId, hex, packId === 'oklch' ? curOklch : null));
                 }
                 const liveDesc = cache.get(livePackKey).find(d => d.key === key) || desc;
                 if (val) val.textContent = liveDesc.display;
@@ -1723,9 +2066,18 @@ export class PaletteStudio {
                     let bestDist = 18;
                     for (let i = 0; i < 6; i++) {
                         const rgb = hexToRgb(palette.baseColors[i]);
-                        const wh = rgbToWheelHsv(rgb.r, rgb.g, rgb.b, wheelSpace);
-                        const ang = wh.h * (Math.PI / 180);
-                        const rPx = (wh.s / 100) * outerPx;
+                        let hDeg, sat01;
+                        if (wheelSpace === 'oklch') {
+                            const lch = rgbToOklch(rgb.r, rgb.g, rgb.b);
+                            hDeg = lch.H;
+                            sat01 = clamp(lch.C / 0.34, 0, 1);
+                        } else {
+                            const wh = rgbToWheelHsv(rgb.r, rgb.g, rgb.b, wheelSpace);
+                            hDeg = wh.h;
+                            sat01 = wh.s / 100;
+                        }
+                        const ang = hDeg * (Math.PI / 180);
+                        const rPx = sat01 * outerPx;
                         const nx = cx + Math.cos(ang) * rPx;
                         const ny = cy + Math.sin(ang) * rPx;
                         const dist = Math.hypot(x - nx, y - ny);
@@ -1743,11 +2095,22 @@ export class PaletteStudio {
                 const dy = y - cy;
                 let deg = Math.atan2(dy, dx) * (180 / Math.PI);
                 if (deg < 0) deg += 360;
-                const sat = clamp((Math.hypot(dx, dy) / outerPx) * 100, 0, 100);
-                const curRgb = hexToRgb(palette.baseColors[idx]);
-                const curV = Math.max(15, rgbToHsv(curRgb.r, curRgb.g, curRgb.b).v);
-                const outRgb = wheelHsvToRgb(deg, sat, curV, wheelSpace);
-                const nextHex = rgbToHex(outRgb.r, outRgb.g, outRgb.b);
+                const sat01 = clamp(Math.hypot(dx, dy) / outerPx, 0, 1);
+                let nextHex;
+                if (wheelSpace === 'oklch') {
+                    const curRgb = hexToRgb(palette.baseColors[idx]);
+                    const curL = clamp(rgbToOklch(curRgb.r, curRgb.g, curRgb.b).L, 38, 86);
+                    const outRgb = oklchToRgb(curL, sat01 * 0.34, deg);
+                    nextHex = rgbToHex(outRgb.r, outRgb.g, outRgb.b);
+                    if (idx === palette.activeIndex) {
+                        this._oklchTarget = { L: curL, C: sat01 * 0.34, H: deg, hex: nextHex };
+                    }
+                } else {
+                    const curRgb = hexToRgb(palette.baseColors[idx]);
+                    const curV = Math.max(15, rgbToHsv(curRgb.r, curRgb.g, curRgb.b).v);
+                    const outRgb = wheelHsvToRgb(deg, sat01 * 100, curV, wheelSpace);
+                    nextHex = rgbToHex(outRgb.r, outRgb.g, outRgb.b);
+                }
 
                 palette.setBaseColor(idx, nextHex);
                 this.app.setColor(nextHex);
@@ -2124,23 +2487,39 @@ export class PaletteStudio {
     _drawStudioHarmonyWheel() {
         const canvas = document.getElementById('cs-harmony-wheel');
         if (!canvas) return;
+        const dpr = this._getDpr();
+        const targetSize = Math.round(240 * dpr);
+        if (canvas.width !== targetSize || canvas.height !== targetSize) {
+            canvas.width = targetSize;
+            canvas.height = targetSize;
+        }
         const ctx = canvas.getContext('2d');
         const size = canvas.width;
         const half = size * 0.5;
+        const scale = size / 240;
         const outerPx = half * 0.88;
         const wheelSpace = this.app.palette.config.wheelSpace || 'ryb';
         const palette = this.app.palette;
 
         ctx.clearRect(0, 0, size, size);
-        const disc = this._getCachedWheelBitmap(size, wheelSpace);
+        const disc = this._getCachedWheelBitmap(size, wheelSpace, 72, true);
         ctx.drawImage(disc, 0, 0);
 
         const c = palette.baseColors;
         for (let i = c.length - 1; i >= 0; i--) {
             const rgb = hexToRgb(c[i]);
-            const wh = rgbToWheelHsv(rgb.r, rgb.g, rgb.b, wheelSpace);
-            const ang = wh.h * (Math.PI / 180);
-            const rPx = (wh.s / 100) * outerPx;
+            let hDeg, sat01;
+            if (wheelSpace === 'oklch') {
+                const lch = rgbToOklch(rgb.r, rgb.g, rgb.b);
+                hDeg = lch.H;
+                sat01 = clamp(lch.C / 0.34, 0, 1);
+            } else {
+                const wh = rgbToWheelHsv(rgb.r, rgb.g, rgb.b, wheelSpace);
+                hDeg = wh.h;
+                sat01 = wh.s / 100;
+            }
+            const ang = hDeg * (Math.PI / 180);
+            const rPx = sat01 * outerPx;
             const px = half + Math.cos(ang) * rPx;
             const py = half + Math.sin(ang) * rPx;
             const isActive = (i === palette.activeIndex);
@@ -2149,34 +2528,36 @@ export class PaletteStudio {
             ctx.moveTo(half, half);
             ctx.lineTo(px, py);
             ctx.strokeStyle = isActive ? '#000000' : 'rgba(0, 0, 0, 0.5)';
-            ctx.lineWidth = isActive ? 2.5 : 1.4;
+            ctx.lineWidth = (isActive ? 2.1 : 1.15) * scale;
             ctx.stroke();
 
-            const radius = isActive ? 12 : 9.5;
+            const radius = (isActive ? 10.5 : 8.2) * scale;
             ctx.beginPath();
             ctx.arc(px, py, radius, 0, Math.PI * 2);
             ctx.fillStyle = c[i];
             ctx.fill();
-            ctx.lineWidth = isActive ? 3 : 2;
+            ctx.lineWidth = (isActive ? 2.5 : 1.7) * scale;
             ctx.strokeStyle = '#ffffff';
             ctx.stroke();
-            ctx.lineWidth = 1.2;
+            ctx.lineWidth = 1.0 * scale;
             ctx.strokeStyle = '#000000';
             ctx.stroke();
 
             ctx.fillStyle = getContrastTextColor(c[i]);
-            ctx.font = 'bold 9px monospace';
+            ctx.font = `bold ${Math.round(8 * scale)}px monospace`;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillText(i === 0 ? '★' : String(i + 1), px, py + 0.5);
+            ctx.fillText(i === 0 ? '★' : String(i + 1), px, py + 0.5 * scale);
         }
 
         const readout = document.getElementById('cs-wheel-readout');
         if (readout) {
             const actHex = c[palette.activeIndex] || c[0];
             const actRgb = hexToRgb(actHex);
-            const wh = rgbToWheelHsv(actRgb.r, actRgb.g, actRgb.b, wheelSpace);
-            readout.textContent = `${wheelSpace.toUpperCase()} · ${Math.round(wh.h)}° · ${actHex}`;
+            const angle = wheelSpace === 'oklch'
+                ? this._ensureOklchTarget(actHex).H
+                : rgbToWheelHsv(actRgb.r, actRgb.g, actRgb.b, wheelSpace).h;
+            readout.textContent = `${wheelSpace.toUpperCase()} · ${Math.round(angle)}° · ${actHex}`;
         }
     }
 

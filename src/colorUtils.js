@@ -251,9 +251,13 @@ export function rgbToOklab(r, g, b) {
 
 export function oklabToRgb(L, a, b, gamutMap = true) {
     const L01 = clamp(L / 100, 0, 1);
+    if (gamutMap) {
+        if (L01 <= 0.001) return { r: 0, g: 0, b: 0 };
+        if (L01 >= 0.999) return { r: 255, g: 255, b: 255 };
+    }
     let raw = oklabToLinearSrgbRaw(L01, a, b);
 
-    if (gamutMap && !inLinearGamut(raw) && L01 > 0 && L01 < 1) {
+    if (gamutMap && !inLinearGamut(raw)) {
         // Chroma-preserving binary search back into sRGB gamut
         let lo = 0;
         let hi = 1;
@@ -426,52 +430,57 @@ export function rgbHueToRybHue(rgbHue) {
     return h;
 }
 
-// Fast 360-entry LUT mapping perceptual OKLCH Hue (0..359) -> full-vivid HSV Hue (0..359)
-// Ensures 100% saturation on the OKLCH wheel rim, crisp white center, and clean round-trip.
-let _oklchToHsvHueLut = null;
-function getOklchToHsvHueLut() {
-    if (_oklchToHsvHueLut) return _oklchToHsvHueLut;
-    const sampleCount = 720;
-    const pts = [];
-    for (let i = 0; i < sampleCount; i++) {
-        const hsvH = (i / sampleCount) * 360;
-        const rgb = hsvToRgb(hsvH, 100, 100);
-        const lch = rgbToOklch(rgb.r, rgb.g, rgb.b);
-        pts.push({ hsvH, okH: lch.H });
-    }
-    const lut = new Float32Array(360);
-    const circDist = (a, b) => {
-        let d = Math.abs(a - b) % 360;
-        return d > 180 ? 360 - d : d;
-    };
-    for (let targetOk = 0; targetOk < 360; targetOk++) {
-        let bestHsv = targetOk;
-        let bestErr = 999;
-        for (let i = 0; i < sampleCount; i++) {
-            const err = circDist(pts[i].okH, targetOk);
-            if (err < bestErr) {
-                bestErr = err;
-                bestHsv = pts[i].hsvH;
-            }
-        }
-        lut[targetOk] = bestHsv;
-    }
-    _oklchToHsvHueLut = lut;
-    return lut;
-}
+// Smooth, strictly monotonic perceptual OKLCH Hue (0..360) <-> Vivid HSV Hue (0..360)
+// Eliminates the #0000FF backward-fold crease (~264 deg) where raw HSV corners stalled.
+const OKLCH_TO_HSV_STOPS = [
+    [0, 340],    // Magenta-Rose
+    [29, 360],   // True sRGB Red (#FF0000)
+    [55, 390],   // Orange
+    [110, 420],  // Yellow (#FFFF00)
+    [142, 480],  // Green (#00FF00)
+    [195, 540],  // Cyan (#00FFFF)
+    [250, 570],  // Azure
+    [264, 600],  // Blue (#0000FF)
+    [294, 630],  // Indigo / Violet
+    [328, 660],  // Magenta (#FF00FF)
+    [360, 700]   // Wrap back to Rose
+];
 
 export function oklchHueToHsvHue(oklchHue) {
-    const lut = getOklchToHsvHueLut();
     const h = ((oklchHue % 360) + 360) % 360;
-    const i0 = Math.floor(h) % 360;
-    const i1 = (i0 + 1) % 360;
-    const frac = h - Math.floor(h);
-    const a = lut[i0];
-    let b = lut[i1];
-    let diff = b - a;
-    if (diff > 180) diff -= 360;
-    if (diff < -180) diff += 360;
-    return (((a + diff * frac) % 360) + 360) % 360;
+    for (let i = 0; i < OKLCH_TO_HSV_STOPS.length - 1; i++) {
+        const [a0, b0] = OKLCH_TO_HSV_STOPS[i];
+        const [a1, b1] = OKLCH_TO_HSV_STOPS[i + 1];
+        if (h >= a0 && h <= a1) {
+            const t = (h - a0) / (a1 - a0 || 1);
+            return (((b0 + (b1 - b0) * t) % 360) + 360) % 360;
+        }
+    }
+    return 340;
+}
+
+export function hsvHueToOklchHue(hsvHue) {
+    let h = ((hsvHue % 360) + 360) % 360;
+    if (h < 340) h += 360;
+    for (let i = 0; i < OKLCH_TO_HSV_STOPS.length - 1; i++) {
+        const [a0, b0] = OKLCH_TO_HSV_STOPS[i];
+        const [a1, b1] = OKLCH_TO_HSV_STOPS[i + 1];
+        if (h >= b0 && h <= b1) {
+            const t = (h - b0) / (b1 - b0 || 1);
+            return (((a0 + (a1 - a0) * t) % 360) + 360) % 360;
+        }
+    }
+    return h % 360;
+}
+
+// Seam-free pure perceptual OKLCH disc sampling for Harmony Wheel
+export function oklchWheelColor(deg, radius01, lightness = 70, studioWhiteCenter = false) {
+    const r = clamp(radius01, 0, 1);
+    const maxRimChroma = 0.34;
+    const L = studioWhiteCenter
+        ? clamp(97 - 27 * r, 0, 100)
+        : clamp(lightness, 0, 100);
+    return oklchToRgb(L, r * maxRimChroma, deg);
 }
 
 // Convert Wheel Degree (0..360) in chosen wheelSpace -> vivid or sat/val RGB
@@ -486,12 +495,12 @@ export function wheelAngleToRgb(deg, wheelSpace = 'ryb', sat = 100, val = 100) {
 }
 
 export function rgbToWheelHsv(r, g, b, wheelSpace = 'ryb') {
+    const hsv = rgbToHsv(r, g, b);
     if (wheelSpace === 'oklch') {
         const lch = rgbToOklch(r, g, b);
-        const hsv = rgbToHsv(r, g, b);
-        return { h: lch.C > 0.008 ? lch.H : hsv.h, s: hsv.s, v: hsv.v };
+        const h = lch.C > 0.004 ? lch.H : hsvHueToOklchHue(hsv.h);
+        return { h, s: hsv.s, v: hsv.v };
     }
-    const hsv = rgbToHsv(r, g, b);
     const h = wheelSpace === 'ryb' ? rgbHueToRybHue(hsv.h) : hsv.h;
     return { h, s: hsv.s, v: hsv.v };
 }
