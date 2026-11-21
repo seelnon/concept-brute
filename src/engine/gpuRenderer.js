@@ -85,6 +85,10 @@ uniform float u_cosR;
 uniform float u_sinR;
 uniform float u_isMirrored;
 
+uniform int u_useSurfaceBg;
+uniform float u_surfaceInvScale;
+uniform float u_surfaceBgOpacity;
+
 out vec4 outColor;
 
 void main() {
@@ -116,7 +120,15 @@ void main() {
         }
     }
 
-    if (u_useSolidColor == 1) {
+    if (u_useSurfaceBg == 1) {
+        vec3 texCol = texture(u_tex, v_worldPos * u_surfaceInvScale).rgb;
+        // Blend cleanly with user's chosen canvasBg color while letting dark/bright bg tint grain
+        vec3 baseBg = u_solidColor.rgb;
+        float bgLum = dot(baseBg, vec3(0.299, 0.587, 0.114));
+        vec3 tinted = mix(baseBg * texCol * 1.06, mix(baseBg, texCol, 0.85), clamp((1.0 - bgLum) * 0.4 + 0.5, 0.0, 1.0));
+        vec3 finalBg = mix(baseBg, tinted, u_surfaceBgOpacity);
+        outColor = vec4(clamp(finalBg, 0.0, 1.0), 1.0);
+    } else if (u_useSolidColor == 1) {
         outColor = vec4(u_solidColor.rgb * u_solidColor.a * u_opacity, u_solidColor.a * u_opacity);
     } else {
         vec2 uv = (u_excludeActive == 2) ? clamp(v_uv, u_uvClamp.xy, u_uvClamp.zw) : v_uv;
@@ -502,7 +514,10 @@ export class GPURenderer {
       u_excludeActive: gl.getUniformLocation(this.quadProgram, 'u_excludeActive'),
       u_excludeRect: gl.getUniformLocation(this.quadProgram, 'u_excludeRect'),
       u_uvClamp: gl.getUniformLocation(this.quadProgram, 'u_uvClamp'),
-      u_invDpr: gl.getUniformLocation(this.quadProgram, 'u_invDpr')
+      u_invDpr: gl.getUniformLocation(this.quadProgram, 'u_invDpr'),
+      u_useSurfaceBg: gl.getUniformLocation(this.quadProgram, 'u_useSurfaceBg'),
+      u_surfaceInvScale: gl.getUniformLocation(this.quadProgram, 'u_surfaceInvScale'),
+      u_surfaceBgOpacity: gl.getUniformLocation(this.quadProgram, 'u_surfaceBgOpacity')
     };
 
     // Cache uniform locations for gridProgram
@@ -682,6 +697,9 @@ export class GPURenderer {
       this.liquifySolver.dispose();
       this.liquifySolver = null;
     }
+    if (this.engine && this.engine.surfaceManager) {
+      this.engine.surfaceManager.dispose();
+    }
   }
 
   requestRender() {
@@ -755,7 +773,29 @@ export class GPURenderer {
     gl.uniform2f(this.quadLocs.u_boardHalfSize, engine.staticWidth * 0.5, engine.staticHeight * 0.5);
     gl.uniform1i(this.quadLocs.u_excludeActive, 0);
 
-    // 2. If Static Mode: Draw Drop Shadow, Brutalist Border, and Paper Background
+    // Compute visible world bounds early (for frustum culling + infinite tiled surface quad)
+    const c0 = engine._screenToWorld(0, 0);
+    const c1 = engine._screenToWorld(viewW, 0);
+    const c2 = engine._screenToWorld(0, viewH);
+    const c3 = engine._screenToWorld(viewW, viewH);
+    const pad = 256 / zoom;
+    const viewMinX = Math.min(c0.wx, c1.wx, c2.wx, c3.wx) - pad;
+    const viewMaxX = Math.max(c0.wx, c1.wx, c2.wx, c3.wx) + pad;
+    const viewMinY = Math.min(c0.wy, c1.wy, c2.wy, c3.wy) - pad;
+    const viewMaxY = Math.max(c0.wy, c1.wy, c2.wy, c3.wy) + pad;
+
+    // Resolve cached tiled surface GPU texture (0 allocations during painting)
+    const surfMgr = engine.surfaceManager;
+    const surfUniforms = surfMgr ? surfMgr.getShaderUniforms() : { active: false };
+    const surfTexPair = surfUniforms.active ? surfMgr.ensureGpuTextures(gl) : { colorTex: null, mapTex: null };
+    const hasSurfaceBg = !!(surfUniforms.active && surfTexPair.colorTex && surfUniforms.bgOpacity > 0.005);
+
+    gl.uniform1i(this.quadLocs.u_useSurfaceBg, 0);
+    gl.uniform1f(this.quadLocs.u_surfaceInvScale, surfUniforms.invScale || (1.0 / 320.0));
+    gl.uniform1f(this.quadLocs.u_surfaceBgOpacity, surfUniforms.bgOpacity || 0.0);
+
+    // 2. Static Mode: Drop Shadow, Brutalist Border, and Paper/Material Surface
+    //    Infinite Mode: Full-viewport tiled material quad (if active & visible)
     if (engine.isStatic) {
       const halfW = engine.staticWidth * 0.5;
       const halfH = engine.staticHeight * 0.5;
@@ -791,10 +831,28 @@ export class GPURenderer {
       );
       gl.drawArrays(gl.TRIANGLES, 0, 6);
 
-      // Paper Surface
+      // Paper / Material Surface
       gl.uniform4f(this.quadLocs.u_solidColor, bgRgb[0], bgRgb[1], bgRgb[2], 1.0);
+      if (hasSurfaceBg) {
+        gl.uniform1i(this.quadLocs.u_useSurfaceBg, 1);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, surfTexPair.colorTex);
+      }
       gl.uniform4f(this.quadLocs.u_rect, -halfW, -halfH, engine.staticWidth, engine.staticHeight);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
+      gl.uniform1i(this.quadLocs.u_useSurfaceBg, 0);
+    } else if (hasSurfaceBg) {
+      gl.uniform1i(this.quadLocs.u_mode, 0);
+      gl.uniform1i(this.quadLocs.u_useSolidColor, 1);
+      gl.uniform1i(this.quadLocs.u_useSurfaceBg, 1);
+      gl.uniform1f(this.quadLocs.u_opacity, 1.0);
+      gl.uniform1i(this.quadLocs.u_clipToBoard, 0);
+      gl.uniform4f(this.quadLocs.u_solidColor, bgRgb[0], bgRgb[1], bgRgb[2], 1.0);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, surfTexPair.colorTex);
+      gl.uniform4f(this.quadLocs.u_rect, viewMinX, viewMinY, viewMaxX - viewMinX, viewMaxY - viewMinY);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      gl.uniform1i(this.quadLocs.u_useSurfaceBg, 0);
     }
 
     // 3. Procedural World-Space Grid Shader (if visible)
@@ -825,17 +883,6 @@ export class GPURenderer {
       gl.drawArrays(gl.TRIANGLES, 0, 6);
       gl.useProgram(this.quadProgram);
     }
-
-    // Compute visible world bounds for fast frustum culling
-    const c0 = engine._screenToWorld(0, 0);
-    const c1 = engine._screenToWorld(viewW, 0);
-    const c2 = engine._screenToWorld(0, viewH);
-    const c3 = engine._screenToWorld(viewW, viewH);
-    const pad = 256 / zoom;
-    const viewMinX = Math.min(c0.wx, c1.wx, c2.wx, c3.wx) - pad;
-    const viewMaxX = Math.max(c0.wx, c1.wx, c2.wx, c3.wx) + pad;
-    const viewMinY = Math.min(c0.wy, c1.wy, c2.wy, c3.wy) - pad;
-    const viewMaxY = Math.max(c0.wy, c1.wy, c2.wy, c3.wy) + pad;
 
     // 4. Render Reference Images (Layer 0)
     const refLayerVisible = !engine.layerSettings[0] || engine.layerSettings[0].visible;
