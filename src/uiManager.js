@@ -1,6 +1,7 @@
 import { TOOLS, LAYERS_COUNT } from './constants.js';
 import { syncFluidSettingsFromTip } from './tools/fluidPaint.js';
 import { syncAirSettingsFromTip } from './tools/airPaint.js';
+import { syncSumiSettingsFromTip, updateSumiSubtoolUI, syncSumiTip, reDipSumi, forceDrySumi } from './tools/sumiPaint.js';
 import { SURFACE_PRESETS } from './engine/canvasSurfaceGpu.js';
 
 export function setupUI(app) {
@@ -48,6 +49,8 @@ export function setupUI(app) {
     document.getElementById('btn-liquify').onclick = () => app.setTool(TOOLS.LIQUIFY);
     document.getElementById('btn-fluid').onclick = () => app.setTool(TOOLS.FLUID);
     document.getElementById('btn-air').onclick = () => app.setTool(TOOLS.AIR);
+    const btnSumi = document.getElementById('btn-sumi');
+    if (btnSumi) btnSumi.onclick = () => app.setTool(TOOLS.SUMI);
 
     document.getElementById('btn-ref_move').onclick = () => app.setTool(TOOLS.REF_MOVE);
     document.getElementById('btn-save').onclick = () => {
@@ -1587,6 +1590,112 @@ export function setupUI(app) {
         chkFluidPhysicalMix.onchange = (e) => toggleCanvasPhysicalMix(!!e.target.checked);
     }
 
+    const chkSumiPhysicalMix = document.getElementById('chk-sumi-physical-mix');
+    if (chkSumiPhysicalMix) {
+        chkSumiPhysicalMix.onchange = (e) => toggleCanvasPhysicalMix(!!e.target.checked);
+    }
+
+    // Sumi-e Ink & Paper Brush Controls
+    const syncSumiLive = (rebuildTip = false) => {
+        if (app.getCurrentTipSettings) {
+            const ts = app.getCurrentTipSettings();
+            if (ts) syncSumiSettingsFromTip(ts);
+        }
+        if (rebuildTip && app.engine) {
+            syncSumiTip(app.engine);
+        }
+        if (app.engine && app.engine._updateBrushCursor) {
+            app.engine._updateBrushCursor();
+        }
+    };
+
+    const bindSumiSlider = (inputId, valId, settingKey, unit = '%', rebuildTip = false) => {
+        const el = document.getElementById(inputId);
+        if (!el) return;
+        el.oninput = (e) => {
+            const val = parseFloat(e.target.value);
+            const valEl = document.getElementById(valId);
+            if (valEl) valEl.innerText = `${Math.round(val)}${unit}`;
+            app.updateActiveSetting(settingKey, val);
+            syncSumiLive(rebuildTip);
+        };
+    };
+
+    const bindSumiCheck = (inputId, settingKey) => {
+        const el = document.getElementById(inputId);
+        if (!el) return;
+        el.onchange = (e) => {
+            app.updateActiveSetting(settingKey, !!e.target.checked);
+            syncSumiLive(false);
+        };
+    };
+
+    // Brush Textures sidebar Sumi sliders
+    bindSumiSlider('brush-sumi-span', 'sumi-span-val', 'sumiSpan', 'px', false);
+    bindSumiSlider('brush-sumi-bristles', 'sumi-bristles-val', 'sumiBristles', '', true);
+    bindSumiSlider('brush-sumi-split', 'sumi-split-val', 'sumiSplit', '%', false);
+
+    // Floating #panel-sumi sliders & subtools
+    bindSumiSlider('slider-sumi-ink', 'val-sumi-ink', 'sumiInk', '%', false);
+    bindSumiSlider('slider-sumi-water', 'val-sumi-water', 'sumiWater', '%', false);
+    bindSumiSlider('slider-sumi-bleed', 'val-sumi-bleed', 'sumiBleed', '%', false);
+
+    ['draw', 'water', 'blow', 'dry'].forEach(mode => {
+        const btn = document.getElementById(`btn-sumi-mode-${mode}`);
+        if (btn) {
+            btn.onclick = () => {
+                app.updateActiveSetting('sumiMode', mode);
+                syncSumiLive(false);
+                updateSumiSubtoolUI(mode);
+                app._status(`SUMI MODE: ${mode.toUpperCase()}`);
+            };
+        }
+    });
+
+    const btnSumiAutoReDip = document.getElementById('btn-sumi-auto-redip');
+    if (btnSumiAutoReDip) {
+        btnSumiAutoReDip.onclick = () => {
+            const ts = app.getCurrentTipSettings ? app.getCurrentTipSettings() : null;
+            const nextVal = !(ts && ts.sumiAutoReDip !== undefined ? !!ts.sumiAutoReDip : true);
+            app.updateActiveSetting('sumiAutoReDip', nextVal);
+            syncSumiLive(false);
+            btnSumiAutoReDip.classList.toggle('active-btn', nextVal);
+            btnSumiAutoReDip.innerText = nextVal ? 'AUTO DIP' : 'MANUAL DIP';
+        };
+    }
+
+    const btnSumiReDip = document.getElementById('btn-sumi-redip');
+    if (btnSumiReDip) {
+        btnSumiReDip.onclick = () => {
+            if (app.engine) reDipSumi(app.engine);
+            app._status('SUMI BRUSH RE-DIPPED');
+        };
+    }
+
+    const btnSumiDryNow = document.getElementById('btn-sumi-dry-now');
+    if (btnSumiDryNow) {
+        btnSumiDryNow.onclick = () => {
+            if (app.engine && forceDrySumi(app.engine)) {
+                app._status('SUMI WASH HEAT-DRIED');
+            }
+        };
+    }
+
+    // Advanced Sumi-e Physics Controls
+    bindSumiCheck('adv-sumi-deplete', 'sumiDeplete');
+    bindSumiCheck('adv-sumi-split-enabled', 'sumiSplitEnabled');
+    bindSumiCheck('adv-sumi-tilt', 'sumiTilt');
+    bindSumiCheck('adv-sumi-follow-stroke', 'sumiFollowStroke');
+    bindSumiSlider('adv-sumi-stiffness', 'adv-sumi-stiffness-val', 'sumiStiffness', '%', false);
+    bindSumiSlider('adv-sumi-glue', 'adv-sumi-glue-val', 'sumiGlue', '%', false);
+    bindSumiSlider('adv-sumi-warmth', 'adv-sumi-warmth-val', 'sumiWarmth', '', false);
+    bindSumiSlider('adv-sumi-evaporation', 'adv-sumi-evaporation-val', 'sumiEvaporation', '%', false);
+    bindSumiSlider('adv-sumi-capillarity', 'adv-sumi-capillarity-val', 'sumiCapillarity', '%', false);
+    bindSumiSlider('adv-sumi-backrun', 'adv-sumi-backrun-val', 'sumiBackrun', '%', false);
+    bindSumiSlider('adv-sumi-soot-snag', 'adv-sumi-soot-snag-val', 'sumiSootSnag', '%', false);
+    bindSumiSlider('adv-sumi-tip-angle', 'adv-sumi-tip-angle-val', 'sumiTipAngle', '°', false);
+    bindSumiSlider('adv-sumi-pressure-flow', 'adv-sumi-pressure-flow-val', 'sumiPressureFlow', '%', false);
+
     // Advanced Fluid Paint Dynamics
     const bindAdvFluidSlider = (inputId, valId, settingKey, unit = '%') => {
         const el = document.getElementById(inputId);
@@ -1648,6 +1757,8 @@ export function setupUI(app) {
     wireResetTipBtn('btn-fluid-reset-tip');
     wireSaveTipBtn('btn-air-save-tip', 'SAVE TIP');
     wireResetTipBtn('btn-air-reset-tip');
+    wireSaveTipBtn('btn-sumi-save-tip', 'SAVE TIP');
+    wireResetTipBtn('btn-sumi-reset-tip');
     wireSaveTipBtn('btn-adv-save-tip', 'SAVE TO TIP');
     wireResetTipBtn('btn-adv-reset-tip');
 

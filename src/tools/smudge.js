@@ -797,7 +797,9 @@ export function startSmudgeStroke(engine, worldPos) {
     ensureEngineSmudgeCanvas(engine);
     engine.smudgeDirty = false;
     engine.useGpuSmudge = false;
-    startBruteSmudgeStroke(engine, worldPos);
+    const airbrush = (engine.brush && engine.brush.airbrush) || 0;
+    const effectiveTip = airbrush > 0.005 ? getEffectiveSmudgeTip(engine.brush.tip, airbrush) : engine.brush.tip;
+    startBruteSmudgeStroke(engine, worldPos, effectiveTip);
     return;
   }
 

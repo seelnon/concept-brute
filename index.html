@@ -51,6 +51,9 @@
           <button id="btn-air" class="tool-btn" title="Watercolor (8) / (A)">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" stroke-linejoin="miter"><path d="M12 2s8 6 8 11a8 8 0 0 1-16 0c0-5 8-11 8-11z"/></svg>
           </button>
+          <button id="btn-sumi" class="tool-btn" title="Sumi-e Ink (9)">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" stroke-linejoin="miter"><path d="M18 3l3 3-9.5 9.5-3.5.5.5-3.5L18 3z"/><path d="M7.5 16.5c-2 .5-3.5 2-4 4 2-.5 3.5-1.5 4.5-3.5"/></svg>
+          </button>
 
           <button id="btn-ref_move" class="tool-btn" title="Ref Move" style="display: none;">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m5 9  -3 3 3 3"/><path d="M22 12H2"/><path d="m19 9 3 3-3 3"/><path d="m15 5-3-3-3 3"/><path d="M12 2v20"/><path d="m15 19-3 3-3-3"/></svg>
@@ -368,6 +371,31 @@
                     </div>
                     <input type="range" id="brush-airbrush" min="0" max="100" value="0" class="minimal-range" style="width: 100%;">
                   </div>
+
+                  <div id="sumi-span-control" class="brush-setting" style="display: none;">
+                    <div class="setting-label" style="display: flex; justify-content: space-between; align-items: center;">
+                      <span class="uppercase font-black" style="font-size: 9px; font-weight: 900;">INK SPAN</span>
+                      <span id="sumi-span-val" class="font-black" style="font-size: 9px; font-weight: 900;">550px</span>
+                    </div>
+                    <input type="range" id="brush-sumi-span" min="150" max="2400" step="50" value="550" class="minimal-range" style="width: 100%;">
+                  </div>
+
+                  <div id="sumi-bristles-control" class="brush-setting" style="display: none;">
+                    <div class="setting-label" style="display: flex; justify-content: space-between; align-items: center;">
+                      <span class="uppercase font-black" style="font-size: 9px; font-weight: 900;">BRISTLES</span>
+                      <span id="sumi-bristles-val" class="font-black" style="font-size: 9px; font-weight: 900;">28</span>
+                    </div>
+                    <input type="range" id="brush-sumi-bristles" min="8" max="48" step="1" value="28" class="minimal-range" style="width: 100%;">
+                  </div>
+
+                  <div id="sumi-split-control" class="brush-setting" style="display: none;">
+                    <div class="setting-label" style="display: flex; justify-content: space-between; align-items: center;">
+                      <span class="uppercase font-black" style="font-size: 9px; font-weight: 900;">SPLIT / DRY</span>
+                      <span id="sumi-split-val" class="font-black" style="font-size: 9px; font-weight: 900;">48%</span>
+                    </div>
+                    <input type="range" id="brush-sumi-split" min="0" max="100" step="1" value="48" class="minimal-range" style="width: 100%;">
+                  </div>
+
                   <button id="btn-advanced-brush" class="brutal-btn full-width" style="margin-top: 2px; font-size: 9px; height: 22px;">ADVANCED</button>
               </div>
              <div id="tip-palette">
@@ -595,12 +623,16 @@
                   </div>
                   <div class="settings-group">
                      <div style="display: flex; justify-content: space-between; align-items: center; gap: 4px; margin-bottom: 4px;">
-                        <label class="settings-label" style="margin: 0;">SURFACE TEXTURE (FLUID / AIR)</label>
+                        <label class="settings-label" style="margin: 0;">SURFACE TEXTURE (FLUID / AIR / SUMI)</label>
                         <button id="btn-surface-upload" class="mini-btn" style="padding: 2px 6px; font-size: 9px; font-weight: 900;">UPLOAD IMG</button>
                         <input type="file" id="input-surface-file" accept="image/*" style="display: none;">
                      </div>
                      <select id="settings-surface-type" class="full-width" style="border: 2px solid #000; font-family: inherit; font-size: 10px; font-weight: 800; padding: 3px 4px;">
                         <option value="none">FLAT / OFF (100% DIRECT)</option>
+                        <option value="raw_xuan">RAW XUAN (SHENG)</option>
+                        <option value="half_xuan">HALF-SIZED XUAN</option>
+                        <option value="sized_xuan">SIZED XUAN (SHU)</option>
+                        <option value="hemp">MULBERRY / HEMP (MA ZHI)</option>
                         <option value="paper">COLD-PRESS PAPER</option>
                         <option value="canvas">WOVEN LINEN CANVAS</option>
                         <option value="wood">OAK WOOD GRAIN</option>
@@ -1172,6 +1204,106 @@
                           <span id="adv-air-pressure-flow-val" style="font-size: 9px; font-weight: 900;">35%</span>
                       </div>
                       <input type="range" id="adv-air-pressure-flow" min="0" max="100" step="1" value="35" class="brutal-range" style="width: 100%;">
+                   </div>
+                </div>
+              </div>
+
+              <!-- SUMI-E BRUSH & PAPER PHYSICS CATEGORY -->
+              <div class="settings-category" id="cat-sumi" style="display: none;">
+                <div class="category-header">SUMI-E BRUSH &amp; PAPER PHYSICS</div>
+                <div class="category-content">
+                   <div class="settings-group">
+                      <div class="settings-row" style="margin-bottom: 5px;">
+                         <label class="settings-label">DEPLETE RESERVOIR</label>
+                         <div class="checkbox-wrapper">
+                            <input type="checkbox" id="adv-sumi-deplete" checked class="settings-input-check">
+                            <span class="checkbox-custom"></span>
+                         </div>
+                      </div>
+                      <div class="settings-row" style="margin-bottom: 5px;">
+                         <label class="settings-label">KASURE SPLIT</label>
+                         <div class="checkbox-wrapper">
+                            <input type="checkbox" id="adv-sumi-split-enabled" checked class="settings-input-check">
+                            <span class="checkbox-custom"></span>
+                         </div>
+                      </div>
+                      <div class="settings-row">
+                         <label class="settings-label">TILT / BEND</label>
+                         <div class="checkbox-wrapper">
+                            <input type="checkbox" id="adv-sumi-tilt" checked class="settings-input-check">
+                            <span class="checkbox-custom"></span>
+                         </div>
+                      </div>
+                   </div>
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">BRISTLE STIFFNESS</label>
+                          <span id="adv-sumi-stiffness-val" style="font-size: 9px; font-weight: 900;">60%</span>
+                      </div>
+                      <input type="range" id="adv-sumi-stiffness" min="10" max="100" step="1" value="60" class="brutal-range" style="width: 100%;">
+                   </div>
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">HIDE GLUE VISCOSITY</label>
+                          <span id="adv-sumi-glue-val" style="font-size: 9px; font-weight: 900;">42%</span>
+                      </div>
+                      <input type="range" id="adv-sumi-glue" min="0" max="100" step="1" value="42" class="brutal-range" style="width: 100%;">
+                   </div>
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">INK WARMTH (BLUE ↔ WARM)</label>
+                          <span id="adv-sumi-warmth-val" style="font-size: 9px; font-weight: 900;">12</span>
+                      </div>
+                      <input type="range" id="adv-sumi-warmth" min="-100" max="100" step="1" value="12" class="brutal-range" style="width: 100%;">
+                   </div>
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">EVAPORATION RATE</label>
+                          <span id="adv-sumi-evaporation-val" style="font-size: 9px; font-weight: 900;">28%</span>
+                      </div>
+                      <input type="range" id="adv-sumi-evaporation" min="0" max="100" step="1" value="28" class="brutal-range" style="width: 100%;">
+                   </div>
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">CAPILLARITY (NIJIMI)</label>
+                          <span id="adv-sumi-capillarity-val" style="font-size: 9px; font-weight: 900;">62%</span>
+                      </div>
+                      <input type="range" id="adv-sumi-capillarity" min="0" max="100" step="1" value="62" class="brutal-range" style="width: 100%;">
+                   </div>
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">BACKRUN RIM</label>
+                          <span id="adv-sumi-backrun-val" style="font-size: 9px; font-weight: 900;">68%</span>
+                      </div>
+                      <input type="range" id="adv-sumi-backrun" min="0" max="100" step="1" value="68" class="brutal-range" style="width: 100%;">
+                   </div>
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">SOOT SNAG (TOOTH)</label>
+                          <span id="adv-sumi-soot-snag-val" style="font-size: 9px; font-weight: 900;">55%</span>
+                      </div>
+                      <input type="range" id="adv-sumi-soot-snag" min="0" max="100" step="1" value="55" class="brutal-range" style="width: 100%;">
+                   </div>
+                   <div class="settings-group">
+                      <div class="settings-row" style="margin-bottom: 6px;">
+                         <label class="settings-label">FOLLOW STROKE ANGLE</label>
+                         <div class="checkbox-wrapper">
+                            <input type="checkbox" id="adv-sumi-follow-stroke" class="settings-input-check">
+                            <span class="checkbox-custom"></span>
+                         </div>
+                      </div>
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">TIP ANGLE OFFSET</label>
+                          <span id="adv-sumi-tip-angle-val" style="font-size: 9px; font-weight: 900;">0°</span>
+                      </div>
+                      <input type="range" id="adv-sumi-tip-angle" min="-180" max="180" step="5" value="0" class="brutal-range" style="width: 100%;">
+                   </div>
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">PRESSURE FLOW</label>
+                          <span id="adv-sumi-pressure-flow-val" style="font-size: 9px; font-weight: 900;">35%</span>
+                      </div>
+                      <input type="range" id="adv-sumi-pressure-flow" min="0" max="100" step="1" value="35" class="brutal-range" style="width: 100%;">
                    </div>
                 </div>
               </div>
@@ -1868,6 +2000,81 @@
           </div>
         </div>
 
+      </div>
+    </div>
+
+    <!-- SUMI-E INK FLOATING PANEL -->
+    <div id="panel-sumi" class="ui-panel hidden" style="width: 196px; left: 20px; top: 120px; z-index: 10002;">
+      <div id="handle-sumi" class="panel-handle" style="cursor: move; display: flex; justify-content: space-between; align-items: center; background: black; color: white; padding: 4px 8px;">
+        <span class="panel-title" style="font-size: 10px; font-weight: 900;">SUMI-E INK</span>
+        <button id="btn-sumi-collapse" class="panel-toggle" style="background: none; border: none; color: white; cursor: pointer; font-weight: bold;">_</button>
+      </div>
+      <div id="sumi-content" class="panel-content" style="padding: 8px; display: flex; flex-direction: column; gap: 6px;">
+        <!-- SUBTOOL MODES -->
+        <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 3px;">
+          <button id="btn-sumi-mode-draw" class="brutal-btn active-btn" style="font-size: 8px; height: 20px; padding: 0;">DRAW</button>
+          <button id="btn-sumi-mode-water" class="brutal-btn" style="font-size: 8px; height: 20px; padding: 0;">WATER</button>
+          <button id="btn-sumi-mode-blow" class="brutal-btn" style="font-size: 8px; height: 20px; padding: 0;">BLOW</button>
+          <button id="btn-sumi-mode-dry" class="brutal-btn" style="font-size: 8px; height: 20px; padding: 0;">DRY</button>
+        </div>
+
+        <!-- LIVE BRISTLE TUFT CROSS-SECTION + DIP/DRY CONTROLS -->
+        <div style="display: flex; gap: 6px; align-items: stretch; border: 1px solid black; padding: 4px; background: white;">
+          <canvas id="sumi-bristle-preview" width="80" height="80" style="width: 64px; height: 64px; border: 1px solid black; flex-shrink: 0; background: #f8f7f2;"></canvas>
+          <div style="flex: 1; display: flex; flex-direction: column; justify-content: space-between; gap: 3px; min-width: 0;">
+            <span id="sumi-bristle-state" style="font-size: 7px; font-weight: 900; letter-spacing: 0.03em; background: black; color: white; padding: 2px 4px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">LOAD 100%</span>
+            <button id="btn-sumi-auto-redip" class="brutal-btn active-btn" style="font-size: 7px; height: 18px; padding: 0 4px;">AUTO DIP</button>
+            <div style="display: flex; gap: 3px;">
+              <button id="btn-sumi-redip" class="brutal-btn" style="flex: 1; font-size: 7px; height: 18px; padding: 0 2px;">RE-DIP</button>
+              <button id="btn-sumi-dry-now" class="brutal-btn" style="flex: 1; font-size: 7px; height: 18px; padding: 0 2px;">DRY</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- INK CONCENTRATION -->
+        <div class="slider-container">
+          <div class="slider-header">
+            <label class="slider-label" style="font-size: 8px;">INK CONCENTRATION</label>
+            <span id="val-sumi-ink" class="slider-value" style="font-size: 8px; font-weight: bold;">78%</span>
+          </div>
+          <input type="range" id="slider-sumi-ink" min="0" max="100" value="78" class="brutal-range">
+        </div>
+
+        <!-- WATER CHARGE -->
+        <div class="slider-container">
+          <div class="slider-header">
+            <label class="slider-label" style="font-size: 8px;">WATER CHARGE</label>
+            <span id="val-sumi-water" class="slider-value" style="font-size: 8px; font-weight: bold;">65%</span>
+          </div>
+          <input type="range" id="slider-sumi-water" min="0" max="100" value="65" class="brutal-range">
+        </div>
+
+        <!-- PAPER BLEED -->
+        <div class="slider-container">
+          <div class="slider-header">
+            <label class="slider-label" style="font-size: 8px;">PAPER BLEED</label>
+            <span id="val-sumi-bleed" class="slider-value" style="font-size: 8px; font-weight: bold;">58%</span>
+          </div>
+          <input type="range" id="slider-sumi-bleed" min="0" max="100" value="58" class="brutal-range">
+        </div>
+
+        <!-- PHYSICAL PIGMENT MIXING CHECKBOX -->
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 4px; border: 1px solid black; padding: 5px 6px; background: white;">
+          <label for="chk-sumi-physical-mix" style="font-size: 8px; font-weight: bold; cursor: pointer; user-select: none;">PHYSICAL PIGMENT (Y+B=G)</label>
+          <input type="checkbox" id="chk-sumi-physical-mix" checked style="width: 14px; height: 14px; cursor: pointer; accent-color: black;">
+        </div>
+
+        <!-- PER-BRUSH-TIP PRESET CONTROLS -->
+        <div style="display: flex; flex-direction: column; gap: 4px; border-top: 2px solid black; padding-top: 6px; margin-top: 2px;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-size: 7px; font-weight: 900; letter-spacing: 0.04em;">TIP SETTINGS</span>
+            <span id="sumi-active-tip-label" style="font-size: 7px; font-weight: 900; background: black; color: white; padding: 1px 4px;">MAIN #1</span>
+          </div>
+          <div style="display: flex; gap: 4px;">
+            <button id="btn-sumi-save-tip" class="brutal-btn" style="flex: 1; font-size: 8px; height: 20px; background: black; color: white; padding: 0 4px;">SAVE TIP</button>
+            <button id="btn-sumi-reset-tip" class="brutal-btn" style="font-size: 8px; height: 20px; padding: 0 6px;">RESET</button>
+          </div>
+        </div>
       </div>
     </div>
 

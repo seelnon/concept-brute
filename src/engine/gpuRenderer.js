@@ -390,6 +390,11 @@ export class GPURenderer {
         this.airSolver.active = false;
         this.airSolver.ready = false;
       }
+      if (this.sumiSolver) {
+        this.sumiSolver.active = false;
+        this.sumiSolver.ready = false;
+      }
+      this.sumiOverlay = null;
       this.canvas.style.display = 'none';
       if (this.engine) {
         if (typeof this.engine._resetInteractionState === 'function') {
@@ -425,6 +430,8 @@ export class GPURenderer {
     this.smudgeSolver = null;
     this.smudgeOverlay = null;
     this.liquifySolver = null;
+    this.sumiSolver = null;
+    this.sumiOverlay = null;
 
     if (this.engine && this.engine.chunks) {
       this.engine.chunks.forEach(chunk => {
@@ -697,6 +704,11 @@ export class GPURenderer {
       this.liquifySolver.dispose();
       this.liquifySolver = null;
     }
+    if (this.sumiSolver) {
+      this.sumiSolver.dispose();
+      this.sumiSolver = null;
+    }
+    this.sumiOverlay = null;
     if (this.engine && this.engine.surfaceManager) {
       this.engine.surfaceManager.dispose();
     }
@@ -964,9 +976,10 @@ export class GPURenderer {
       gl.uniform1f(this.quadLocs.u_opacity, 1.0);
 
       const activeOverlay = (layer === engine.activeLayer)
-        ? (this.airOverlay && this.airOverlay.active && this.airOverlay.tex ? this.airOverlay
-          : (this.fluidOverlay && this.fluidOverlay.active && this.fluidOverlay.tex ? this.fluidOverlay
-            : (this.smudgeOverlay && this.smudgeOverlay.active && this.smudgeOverlay.tex ? this.smudgeOverlay : null)))
+        ? (this.sumiOverlay && this.sumiOverlay.active && this.sumiOverlay.tex ? this.sumiOverlay
+          : (this.airOverlay && this.airOverlay.active && this.airOverlay.tex ? this.airOverlay
+            : (this.fluidOverlay && this.fluidOverlay.active && this.fluidOverlay.tex ? this.fluidOverlay
+              : (this.smudgeOverlay && this.smudgeOverlay.active && this.smudgeOverlay.tex ? this.smudgeOverlay : null))))
         : null;
       const exX = activeOverlay ? (activeOverlay.exX ?? activeOverlay.x) : 0;
       const exY = activeOverlay ? (activeOverlay.exY ?? activeOverlay.y) : 0;

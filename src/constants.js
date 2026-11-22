@@ -16,5 +16,6 @@ export const TOOLS = {
   LIQUIFY: 'liquify',
   DEFORM: 'deform',
   FLUID: 'fluid',
-  AIR: 'air_paint'
+  AIR: 'air_paint',
+  SUMI: 'sumi'
 };

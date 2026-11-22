@@ -16,6 +16,7 @@ import {
 } from './tools/selection.js';
 import { paintSmudgeOnChunks } from './tools/smudge.js';
 import { airSettings } from './tools/airPaint.js';
+import { sumiSettings, flushSumiToChunks, cancelSumiStroke } from './tools/sumiPaint.js';
 import { isMobileDevice } from './colorUtils.js';
 import {
   backupChunkLayer,
@@ -280,8 +281,11 @@ export class Engine {
       return liquify.hasPendingLiquifyCommits(this);
   }
 
-  flushPendingGpuCommits() {
+  flushPendingGpuCommits(options = {}) {
       liquify.flushLiquifyGpuCommits(this);
+      if (!options.keepSumiSession) {
+          flushSumiToChunks(this, true);
+      }
   }
 
   whenGpuCommitsDone(cb) {
@@ -304,6 +308,9 @@ export class Engine {
           if (this.gpuRenderer && this.gpuRenderer.liquifySolver && this.gpuRenderer.liquifySolver.active) {
               this.gpuRenderer.liquifySolver.cancel(this);
           }
+      }
+      if (cancelActive) {
+          cancelSumiStroke(this);
       }
       if (this.activePointers) this.activePointers.clear();
       if (this._pointerTimes) this._pointerTimes.clear();
@@ -958,8 +965,8 @@ export class Engine {
           return;
       }
 
-      // Use coalesced events for smoother line input, but dispatch single frame for simulation brushes (Liquify, Fluid, Air)
-      const isSimulationBrush = this.brush.type === TOOLS.LIQUIFY || this.brush.type === TOOLS.FLUID || this.brush.type === TOOLS.AIR;
+      // Use coalesced events for smoother line input, but dispatch single frame for simulation brushes (Liquify, Fluid, Air, Sumi)
+      const isSimulationBrush = this.brush.type === TOOLS.LIQUIFY || this.brush.type === TOOLS.FLUID || this.brush.type === TOOLS.AIR || this.brush.type === TOOLS.SUMI;
       const rawEvents = e.getCoalescedEvents ? e.getCoalescedEvents() : null;
       const events = (rawEvents && rawEvents.length > 0) ? rawEvents : [e];
       
@@ -1517,7 +1524,7 @@ export class Engine {
             strokeCanv.style.opacity = '0';
         }
         chunk.strokeCanvas = strokeCanv;
-        const sCtx = strokeCanv.getContext('2d', { alpha: true });
+        const sCtx = strokeCanv.getContext('2d', { alpha: true, willReadFrequently: true });
         if (scale !== 1) {
             sCtx.scale(scale, scale);
         }
@@ -2779,7 +2786,7 @@ export class Engine {
     } else if (this.brush.type === TOOLS.WIREFRAME) {
         br = '50%';
         bgColor = 'transparent';
-    } else if (this.brush.type === TOOLS.AIR) {
+    } else if (this.brush.type === TOOLS.AIR || this.brush.type === TOOLS.SUMI) {
         if (this.brush.tip) {
             h = s;
             br = '0px';
@@ -2791,7 +2798,7 @@ export class Engine {
         } else {
             br = '50%';
             bgColor = 'transparent';
-            border = '1.5px dashed #333333';
+            border = this.brush.type === TOOLS.SUMI ? '1.5px dashed #111111' : '1.5px dashed #333333';
         }
     } else if (this.brush.type === TOOLS.BRUSH || this.brush.type === TOOLS.FLUID) {
         if (this.brush.tip) {
@@ -2975,7 +2982,9 @@ export class Engine {
 
     const airAngleOffset = (this.brush.type === TOOLS.AIR && this.brush.tip && !airSettings.followStroke)
         ? ((airSettings.tipAngle || 0) * Math.PI / 180)
-        : 0;
+        : ((this.brush.type === TOOLS.SUMI && this.brush.tip && !sumiSettings.followStroke)
+            ? ((sumiSettings.tipAngle || 0) * Math.PI / 180)
+            : 0);
     let transform = `translate3d(${mX - w * 0.5}px, ${mY - h * 0.5}px, 0) rotate(${this.rotation + airAngleOffset}rad)`;
     if (this.isMirrored) {
         transform += ' scaleX(-1)';
@@ -3674,7 +3683,8 @@ export class Engine {
         const sharpen = this.brush.brushSharpen || 0;
         // Round size for caching to prevent constant canvas/filter redevelopment overhead
         const cacheSize = this._getCacheSize(bSize);
-        const cacheKey = `${airbrush}_${cacheSize}_${sharpen}`;
+        const tipVer = this.brush.tip._tipVersion || 0;
+        const cacheKey = `${airbrush}_${cacheSize}_${sharpen}_${tipVer}`;
         if (!this._tipColorCache || this._tipColorCache.key !== cacheKey || this._tipColorCache.color !== color || this._tipColorCache.srcTip !== this.brush.tip) {
             this._updateTipCache(cacheSize, airbrush, color);
         }

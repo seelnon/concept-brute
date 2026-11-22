@@ -38,6 +38,13 @@ import {
   clearAirParticles,
   clearAirWetCacheForProject
 } from './airPaint.js';
+import {
+  warmSumiSolver,
+  startSumiPaintStroke,
+  paintSumiMove,
+  endSumiPaintStroke,
+  cancelSumiStroke
+} from './sumiPaint.js';
 import { wasmCore } from '../wasm/wasmBridge.js';
 
 const SCRATCH_SIZE = 128;
@@ -113,6 +120,8 @@ function createIsolatedGpuProxy(realGr) {
     set fluidSolver(v) { realGr.fluidSolver = v; },
     get airSolver() { return realGr.airSolver; },
     set airSolver(v) { realGr.airSolver = v; },
+    get sumiSolver() { return realGr.sumiSolver; },
+    set sumiSolver(v) { realGr.sumiSolver = v; },
     _compileShader(type, src) {
       return realGr._compileShader(type, src);
     },
@@ -269,6 +278,7 @@ function cleanupScratchResources(realEngine, scratchEngine, scratchChunk) {
   try { cancelSmudgeStroke(scratchEngine); } catch (_) {}
   try { cancelFluidAfterEffect(scratchEngine); } catch (_) {}
   try { cancelAirParticles(scratchEngine); } catch (_) {}
+  try { cancelSumiStroke(scratchEngine); } catch (_) {}
   try { cancelLiquifyStroke(scratchEngine); } catch (_) {}
   try { invalidateLiquifySession(realEngine); } catch (_) {}
   try {
@@ -483,6 +493,21 @@ export async function runPhantomToolsPrewarm(app, { onProgress, shouldAbort } = 
         paintAirIncrementally(scratchEngine, 1);
         paintAirIncrementally(scratchEngine, 2);
         endAirPaintStroke(scratchEngine);
+      }
+    },
+    {
+      label: 'SUMI',
+      run: () => {
+        scratchEngine.brush.type = TOOLS.SUMI;
+        scratchEngine.currentStrokeDirtyChunks.clear();
+        seedScratchPaint(scratchChunk, 1);
+        warmSumiSolver(realEngine);
+        scratchEngine.strokePoints = [p0, p1, p2];
+        startSumiPaintStroke(scratchEngine, p0);
+        paintSumiMove(scratchEngine, p1, 28, 0.85, scratchEngine.brush.color, 0.9);
+        paintSumiMove(scratchEngine, p2, 28, 0.85, scratchEngine.brush.color, 0.9);
+        endSumiPaintStroke(scratchEngine);
+        cancelSumiStroke(scratchEngine);
       }
     }
   ];

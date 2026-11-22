@@ -20,110 +20,240 @@ export const SURFACE_PRESETS = {
     channel: 0.00,
     relief: 0.00,
     absorb: 0.00,
+    sizing: 0.72,
+    seepRate: 0.45,
+    coarseness: 0.15,
+    capillarity: 0.35,
+    sootSnag: 0.25,
+    backrun: 0.55,
     scale: 320,
     bgOpacity: 0.00,
     tint: [255, 255, 255]
   },
+  raw_xuan: {
+    id: 'raw_xuan',
+    label: 'RAW XUAN (SHENG)',
+    hint: 'Unsized Xuan paper: rapid nijimi feathering, long bast fibers & rich dry splits.',
+    slip: 0.22,
+    resist: 0.52,
+    channel: 0.48,
+    relief: 0.54,
+    absorb: 0.92,
+    sizing: 0.18,
+    seepRate: 1.00,
+    coarseness: 0.52,
+    capillarity: 0.76,
+    sootSnag: 0.62,
+    backrun: 0.66,
+    scale: 340,
+    bgOpacity: 0.66,
+    tint: [245, 240, 228]
+  },
+  half_xuan: {
+    id: 'half_xuan',
+    label: 'HALF-SIZED XUAN',
+    hint: 'Ban Sheng Shu: balanced calligraphy ink bleed, luminous wash gradients & kasure.',
+    slip: 0.34,
+    resist: 0.42,
+    channel: 0.38,
+    relief: 0.44,
+    absorb: 0.68,
+    sizing: 0.52,
+    seepRate: 0.72,
+    coarseness: 0.42,
+    capillarity: 0.58,
+    sootSnag: 0.50,
+    backrun: 0.72,
+    scale: 320,
+    bgOpacity: 0.62,
+    tint: [246, 242, 232]
+  },
+  sized_xuan: {
+    id: 'sized_xuan',
+    label: 'SIZED XUAN (SHU)',
+    hint: 'Alum-sized silk Xuan: crisp brushwork, slow diffusion & pronounced backrun rims.',
+    slip: 0.64,
+    resist: 0.26,
+    channel: 0.20,
+    relief: 0.28,
+    absorb: 0.24,
+    sizing: 0.88,
+    seepRate: 0.28,
+    coarseness: 0.25,
+    capillarity: 0.26,
+    sootSnag: 0.28,
+    backrun: 0.86,
+    scale: 300,
+    bgOpacity: 0.56,
+    tint: [248, 245, 238]
+  },
+  hemp: {
+    id: 'hemp',
+    label: 'MULBERRY / HEMP (MA ZHI)',
+    hint: 'Coarse handmade bast fibers: dramatic tooth catching, heavy soot snagging & dry-brush splits.',
+    slip: 0.16,
+    resist: 0.80,
+    channel: 0.68,
+    relief: 0.82,
+    absorb: 0.86,
+    sizing: 0.28,
+    seepRate: 0.90,
+    coarseness: 0.85,
+    capillarity: 0.72,
+    sootSnag: 0.84,
+    backrun: 0.60,
+    scale: 380,
+    bgOpacity: 0.72,
+    tint: [236, 228, 210]
+  },
   paper: {
     id: 'paper',
-    label: 'PAPER',
+    label: 'COLD-PRESS PAPER',
     hint: 'Absorbent cold-press peaks catch light strokes & granulate.',
     slip: 0.24,
     resist: 0.56,
     channel: 0.22,
     relief: 0.58,
     absorb: 0.74,
+    sizing: 0.38,
+    seepRate: 0.78,
+    coarseness: 0.58,
+    capillarity: 0.60,
+    sootSnag: 0.64,
+    backrun: 0.70,
     scale: 340,
     bgOpacity: 0.62,
     tint: [242, 236, 224]
   },
   canvas: {
     id: 'canvas',
-    label: 'CANVAS',
+    label: 'WOVEN LINEN CANVAS',
     hint: 'Woven linen crown grabs thick paint; press harder to fill weave.',
     slip: 0.28,
     resist: 0.74,
     channel: 0.50,
     relief: 0.70,
     absorb: 0.54,
+    sizing: 0.62,
+    seepRate: 0.50,
+    coarseness: 0.72,
+    capillarity: 0.48,
+    sootSnag: 0.74,
+    backrun: 0.54,
     scale: 240,
     bgOpacity: 0.68,
     tint: [243, 238, 226]
   },
   wood: {
     id: 'wood',
-    label: 'WOOD',
+    label: 'OAK WOOD GRAIN',
     hint: 'Strong directional oak grain channels paint & water along vessels.',
     slip: 0.52,
     resist: 0.62,
     channel: 0.88,
     relief: 0.66,
     absorb: 0.34,
+    sizing: 0.70,
+    seepRate: 0.42,
+    coarseness: 0.66,
+    capillarity: 0.52,
+    sootSnag: 0.60,
+    backrun: 0.58,
     scale: 420,
     bgOpacity: 0.72,
     tint: [222, 195, 160]
   },
   stone: {
     id: 'stone',
-    label: 'STONE',
+    label: 'SLATE / STONE',
     hint: 'High relief slate with deep fractures that break dry brushstrokes.',
     slip: 0.16,
     resist: 0.86,
     channel: 0.66,
     relief: 0.88,
     absorb: 0.60,
+    sizing: 0.58,
+    seepRate: 0.56,
+    coarseness: 0.86,
+    capillarity: 0.46,
+    sootSnag: 0.82,
+    backrun: 0.74,
     scale: 380,
     bgOpacity: 0.74,
     tint: [212, 210, 204]
   },
   cloth: {
     id: 'cloth',
-    label: 'CLOTH',
+    label: 'TWILL CLOTH',
     hint: 'Diagonal twill threads wick wet pigment outward into fibers.',
     slip: 0.20,
     resist: 0.78,
     channel: 0.58,
     relief: 0.76,
     absorb: 0.85,
+    sizing: 0.24,
+    seepRate: 0.92,
+    coarseness: 0.76,
+    capillarity: 0.82,
+    sootSnag: 0.72,
+    backrun: 0.50,
     scale: 210,
     bgOpacity: 0.70,
     tint: [232, 226, 214]
   },
   ceramic: {
     id: 'ceramic',
-    label: 'CERAMIC',
+    label: 'GLAZED CERAMIC',
     hint: 'Glazed slick tiles let paint glide fast; hairline crazing catches edges.',
     slip: 0.86,
     resist: 0.16,
     channel: 0.18,
     relief: 0.24,
     absorb: 0.08,
+    sizing: 0.94,
+    seepRate: 0.18,
+    coarseness: 0.20,
+    capillarity: 0.16,
+    sootSnag: 0.18,
+    backrun: 0.82,
     scale: 360,
     bgOpacity: 0.58,
     tint: [245, 246, 242]
   },
   glass: {
     id: 'glass',
-    label: 'GLASS',
+    label: 'SLICK GLASS',
     hint: 'Ultra-slippery non-absorbent surface: paint hydroplanes & smears long.',
     slip: 0.96,
     resist: 0.04,
     channel: 0.02,
     relief: 0.06,
     absorb: 0.02,
+    sizing: 0.98,
+    seepRate: 0.08,
+    coarseness: 0.06,
+    capillarity: 0.08,
+    sootSnag: 0.06,
+    backrun: 0.68,
     scale: 400,
     bgOpacity: 0.44,
     tint: [234, 243, 248]
   },
   custom: {
     id: 'custom',
-    label: 'CUSTOM IMG',
+    label: 'CUSTOM UPLOADED IMAGE',
     hint: 'Auto-extracted height, slope & crevices from your uploaded photo.',
     slip: 0.32,
     resist: 0.62,
     channel: 0.42,
     relief: 0.66,
     absorb: 0.60,
+    sizing: 0.46,
+    seepRate: 0.68,
+    coarseness: 0.64,
+    capillarity: 0.58,
+    sootSnag: 0.62,
+    backrun: 0.66,
     scale: 380,
     bgOpacity: 0.78,
     tint: [255, 255, 255]
@@ -474,7 +604,23 @@ export function generateProceduralSurface(type = 'paper', opts = {}) {
       let h = 0.5;
       let crack = 0.0;
 
-      if (type === 'paper') {
+      if (type === 'raw_xuan' || type === 'half_xuan' || type === 'sized_xuan' || type === 'hemp') {
+        // Interwoven long bast fibers (toroidally tileable) + bamboo laid-screen rib marks
+        const fibFreqA = type === 'hemp' ? 14 : (type === 'sized_xuan' ? 20 : 16);
+        const fibFreqB = type === 'hemp' ? 12 : 18;
+        const fA = torusNoise(((u * 3.0 + v * 1.0) % 1.0 + 1.0) % 1.0, ((v * 18.0 - u * 6.0) % 1.0 + 1.0) % 1.0, fibFreqA, seed + 307);
+        const fB = torusNoise(((u * 2.0 - v * 2.0) % 1.0 + 1.0) % 1.0, ((u * 14.0 + v * 10.0) % 1.0 + 1.0) % 1.0, fibFreqB, seed + 419);
+        const fibStrands = Math.pow(clamp01(fA * 0.55 + fB * 0.45), type === 'hemp' ? 1.55 : 1.9);
+        // Horizontal laid bamboo screen lines (period 24 across tile)
+        const screenFreq = type === 'hemp' ? 16.0 : 28.0;
+        const laidScreen = 0.5 + 0.5 * Math.cos(v * Math.PI * 2.0 * screenFreq + (macroFbm - 0.5) * 0.8);
+        const chainLine = Math.pow(0.5 + 0.5 * Math.cos(u * Math.PI * 2.0 * 4.0), 8.0) * 0.14;
+        const deckle = torusFbm(u + macroFbm * 0.08, v + midFbm * 0.08, 12, 3, seed + 503);
+        const fiberGain = type === 'hemp' ? 0.50 : (type === 'sized_xuan' ? 0.20 : 0.36);
+        const screenGain = type === 'sized_xuan' ? 0.05 : 0.10;
+        h = deckle * 0.36 + fibStrands * fiberGain + fineNoise * 0.16 + laidScreen * screenGain + chainLine;
+        crack = smoothstep(0.42, 0.10, fibStrands * 0.7 + deckle * 0.3) * (type === 'hemp' ? 0.82 : 0.52);
+      } else if (type === 'paper') {
         // Cold-press cotton fiber deckle lumps + faint horizontal sheet creases
         const nWarp = macroFbm * 0.12;
         const nFine = torusFbm(u + nWarp, v + nWarp * 0.6, 24, 3, seed + 313);
@@ -561,7 +707,8 @@ export function generateProceduralSurface(type = 'paper', opts = {}) {
 
   const p4Start = performance.now();
   // PASS 4: Deterministic Mineral & Fiber Flecks / Specks (matches organic paper/stone inclusions)
-  const speckCount = type === 'paper' ? 320 : (type === 'stone' ? 460 : (type === 'cloth' ? 220 : (type === 'ceramic' ? 95 : 0)));
+  const isXuan = (type === 'raw_xuan' || type === 'half_xuan' || type === 'sized_xuan' || type === 'hemp');
+  const speckCount = type === 'hemp' ? 420 : (isXuan ? 240 : (type === 'paper' ? 320 : (type === 'stone' ? 460 : (type === 'cloth' ? 220 : (type === 'ceramic' ? 95 : 0)))));
   for (let s = 0; s < speckCount; s++) {
     const sx = (hash1(s, seed + 17) * res) | 0;
     const sy = (hash1(s, seed + 89) * res) | 0;
@@ -569,7 +716,14 @@ export function generateProceduralSurface(type = 'paper', opts = {}) {
     const kind = hash1(s, seed + 389);
 
     let sr = 72, sg = 68, sb = 64, sa = 0.55, dh = -0.04;
-    if (type === 'paper') {
+    if (isXuan) {
+      if (kind < 0.65) {
+        // Natural mulberry bark & straw fleck
+        sr = 124; sg = 104; sb = 78; sa = 0.26 + kind * 0.28; dh = 0.03;
+      } else {
+        sr = 78; sg = 70; sb = 60; sa = 0.24; dh = -0.04;
+      }
+    } else if (type === 'paper') {
       if (kind < 0.72) {
         // Dark pulp/mineral speck
         sr = 58; sg = 54; sb = 50; sa = 0.35 + kind * 0.4; dh = -0.05;
@@ -607,9 +761,9 @@ export function generateProceduralSurface(type = 'paper', opts = {}) {
     }
   }
 
-  const slopeGain = type === 'glass' ? 0.6 : (type === 'ceramic' ? 1.3 : 2.8);
-  const shadeStrength = type === 'glass' ? 0.05 : (type === 'ceramic' ? 0.10 : (type === 'paper' ? 0.14 : 0.24));
-  const crackAoStrength = type === 'paper' ? 0.16 : (type === 'ceramic' ? 0.22 : 0.30);
+  const slopeGain = type === 'glass' ? 0.6 : (type === 'ceramic' || type === 'sized_xuan' ? 1.3 : (type === 'hemp' ? 3.0 : 2.6));
+  const shadeStrength = type === 'glass' ? 0.05 : (type === 'ceramic' || type === 'sized_xuan' ? 0.09 : (type === 'paper' || isXuan ? 0.13 : 0.24));
+  const crackAoStrength = type === 'paper' || isXuan ? 0.15 : (type === 'ceramic' ? 0.22 : 0.30);
 
   const packed = finalizeSurfaceMaps(res, heightBuf, crackBuf, speckR, speckG, speckB, speckAmt, preset.tint, {
     invertHeight: !!opts.invertHeight,
@@ -992,6 +1146,40 @@ export class CanvasSurfaceManager {
       relief: clamp01(this.relief),
       absorb: clamp01(this.absorb),
       bgOpacity: clamp01(this.bgOpacity)
+    };
+  }
+
+  getSumiPhysicsParams() {
+    const p = SURFACE_PRESETS[this.type] || SURFACE_PRESETS.none;
+    if (!this.isActive) {
+      return {
+        active: false,
+        sizing: 0.25,
+        seepRate: 0.90,
+        coarseness: 0.42,
+        capillarity: 0.62,
+        sootSnag: 0.55,
+        backrun: 0.68,
+        slip: 0.45,
+        relief: 0.25,
+        channel: 0.20,
+        invScale: 1.0 / 340.0
+      };
+    }
+    const reliefRatio = p.relief > 0.05 ? (this.relief / p.relief) : (0.5 + this.relief);
+    const slipDelta = this.slip - p.slip;
+    return {
+      active: true,
+      sizing: clamp01((p.sizing ?? 0.45) + slipDelta * 0.45),
+      seepRate: clamp01((p.seepRate ?? 0.68) * clamp01(1.15 - slipDelta * 0.55) * 1.15),
+      coarseness: clamp01((p.coarseness ?? 0.50) * Math.max(0.25, Math.min(1.6, reliefRatio))),
+      capillarity: clamp01((p.capillarity ?? 0.55) + (this.channel - p.channel) * 0.35),
+      sootSnag: clamp01((p.sootSnag ?? 0.55) * Math.max(0.25, Math.min(1.6, reliefRatio))),
+      backrun: clamp01(p.backrun ?? 0.68),
+      slip: clamp01(this.slip),
+      relief: clamp01(this.relief),
+      channel: clamp01(this.channel),
+      invScale: 1.0 / Math.max(32.0, this.scale || 340.0)
     };
   }
 

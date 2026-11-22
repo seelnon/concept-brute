@@ -21,6 +21,7 @@ import { setupIgnoreSystem } from './ignore.js';
 import { TimelapseRecorder } from './recording.js';
 import { initFluidPaint, activateFluidPaint, deactivateFluidPaint, syncFluidSettingsFromTip, warmFluidSolver } from './tools/fluidPaint.js';
 import { initAirPaint, activateAirPaint, deactivateAirPaint, syncAirSettingsFromTip, warmAirSolver } from './tools/airPaint.js';
+import { initSumiPaint, activateSumiPaint, deactivateSumiPaint, syncSumiSettingsFromTip, syncSumiTip, warmSumiSolver, updateSumiSubtoolUI } from './tools/sumiPaint.js';
 import { ensureSmudgeBuffers, warmSmudgeSolver } from './tools/smudge.js';
 import { warmLiquifySolver } from './tools/liquify.js';
 import { acquireBackupCanvas, releaseBackupCanvas } from './engine/backupPool.js';
@@ -120,6 +121,27 @@ class App {
             airTipAngle: 0,
             airTipHardness: 55,
             airPressureFlow: 35,
+            sumiMode: 'draw',
+            sumiInk: 78,
+            sumiWater: 65,
+            sumiBleed: 58,
+            sumiBristles: 28,
+            sumiStiffness: 60,
+            sumiSplit: 48,
+            sumiSpan: 550,
+            sumiGlue: 42,
+            sumiWarmth: 12,
+            sumiEvaporation: 28,
+            sumiCapillarity: 62,
+            sumiBackrun: 68,
+            sumiSootSnag: 55,
+            sumiDeplete: true,
+            sumiSplitEnabled: true,
+            sumiTilt: true,
+            sumiAutoReDip: true,
+            sumiFollowStroke: false,
+            sumiTipAngle: 0,
+            sumiPressureFlow: 35,
             tip: null,
             spacing: 0.05,
             pressureEnabled: true,
@@ -184,6 +206,32 @@ class App {
     this.brushSettings[TOOLS.AIR].airTipHardness = 55;
     this.brushSettings[TOOLS.AIR].airPressureFlow = 35;
 
+    // Sumi-e default settings
+    this.brushSettings[TOOLS.SUMI].size = 40;
+    this.brushSettings[TOOLS.SUMI].opacity = 1.0;
+    this.brushSettings[TOOLS.SUMI].flow = 1.0;
+    this.brushSettings[TOOLS.SUMI].sumiMode = 'draw';
+    this.brushSettings[TOOLS.SUMI].sumiInk = 78;
+    this.brushSettings[TOOLS.SUMI].sumiWater = 65;
+    this.brushSettings[TOOLS.SUMI].sumiBleed = 58;
+    this.brushSettings[TOOLS.SUMI].sumiBristles = 28;
+    this.brushSettings[TOOLS.SUMI].sumiStiffness = 60;
+    this.brushSettings[TOOLS.SUMI].sumiSplit = 48;
+    this.brushSettings[TOOLS.SUMI].sumiSpan = 550;
+    this.brushSettings[TOOLS.SUMI].sumiGlue = 42;
+    this.brushSettings[TOOLS.SUMI].sumiWarmth = 12;
+    this.brushSettings[TOOLS.SUMI].sumiEvaporation = 28;
+    this.brushSettings[TOOLS.SUMI].sumiCapillarity = 62;
+    this.brushSettings[TOOLS.SUMI].sumiBackrun = 68;
+    this.brushSettings[TOOLS.SUMI].sumiSootSnag = 55;
+    this.brushSettings[TOOLS.SUMI].sumiDeplete = true;
+    this.brushSettings[TOOLS.SUMI].sumiSplitEnabled = true;
+    this.brushSettings[TOOLS.SUMI].sumiTilt = true;
+    this.brushSettings[TOOLS.SUMI].sumiAutoReDip = true;
+    this.brushSettings[TOOLS.SUMI].sumiFollowStroke = false;
+    this.brushSettings[TOOLS.SUMI].sumiTipAngle = 0;
+    this.brushSettings[TOOLS.SUMI].sumiPressureFlow = 35;
+
     this.tipManager = new TipManager(document.getElementById('panel-brush-tips'), (tip, height, oiliness, airbrush, skipStorage = false) => {
         const tool = this.activeTool;
         if (!tool) return;
@@ -198,7 +246,7 @@ class App {
             currentSettings.activeBankIndex = bankIdx;
             currentSettings.activeGeneratedIndex = genIdx;
             
-            if (tool === TOOLS.BRUSH || tool === TOOLS.ERASER || tool === TOOLS.SMUDGE || tool === TOOLS.WIREFRAME || tool === TOOLS.FLUID || tool === TOOLS.AIR) {
+            if (tool === TOOLS.BRUSH || tool === TOOLS.ERASER || tool === TOOLS.SMUDGE || tool === TOOLS.WIREFRAME || tool === TOOLS.FLUID || tool === TOOLS.AIR || tool === TOOLS.SUMI) {
                 if (tip && !tip._tipVersion) tip._tipVersion = 1;
                 this.engine.brush.tip = tip;
             }
@@ -258,11 +306,17 @@ class App {
                 if (tool === TOOLS.AIR) {
                     syncAirSettingsFromTip(tipSettings);
                 }
+
+                // Sumi-e Ink & Bristles
+                if (tool === TOOLS.SUMI) {
+                    syncSumiSettingsFromTip(tipSettings);
+                    syncSumiTip(this.engine);
+                }
             }
         }
 
         if (this.engine && !this.engine._isLoadingProject && !this._isSwitchingProject && !this._isPrewarming) {
-            if (tool === TOOLS.SMUDGE || tool === TOOLS.FLUID || tool === TOOLS.AIR) {
+            if (tool === TOOLS.SMUDGE || tool === TOOLS.FLUID || tool === TOOLS.AIR || tool === TOOLS.SUMI) {
                 if (this._tipWarmupTimer) clearTimeout(this._tipWarmupTimer);
                 this._tipWarmupTimer = setTimeout(() => {
                     this._tipWarmupTimer = null;
@@ -524,6 +578,8 @@ class App {
       warmFluidSolver(this.engine);
     } else if (tool === TOOLS.AIR) {
       warmAirSolver(this.engine);
+    } else if (tool === TOOLS.SUMI) {
+      warmSumiSolver(this.engine);
     }
   }
 
@@ -545,7 +601,7 @@ class App {
     if (btnNow) btnNow.disabled = false;
     if (ok) {
       this._allToolsPrewarmed = true;
-      if (statusEl) statusEl.innerText = 'ALL 8 TOOLS WARMED (READY)';
+      if (statusEl) statusEl.innerText = 'ALL 9 TOOLS WARMED (READY)';
       this._status('ALL TOOLS PREWARMED');
     } else if (statusEl) {
       statusEl.innerText = 'PREWARM INTERRUPTED';
@@ -628,12 +684,15 @@ class App {
     if (chkFluid) chkFluid.checked = isPhys;
     const chkAir = document.getElementById('chk-air-physical-mix');
     if (chkAir) chkAir.checked = isPhys;
+    const chkSumi = document.getElementById('chk-sumi-physical-mix');
+    if (chkSumi) chkSumi.checked = isPhys;
   }
 
   _setupUI() {
     setupUI(this);
     initFluidPaint(this);
     initAirPaint(this);
+    initSumiPaint(this);
     this.syncCanvasMixMode();
   }
 
@@ -1091,6 +1150,7 @@ class App {
           'panel-recording': [290, 480],
           'panel-fluid': [180, 310],
           'panel-air': [184, 340],
+          'panel-sumi': [196, 390],
           'panel-perf-monitor': [320, 440]
       };
       const fallback = defaults[id] || [220, 240];
@@ -1111,6 +1171,7 @@ class App {
           'panel-recording',
           'panel-fluid',
           'panel-air',
+          'panel-sumi',
           'panel-perf-monitor'
       ];
       const canvasContainer = document.getElementById('canvas-container');
@@ -1185,6 +1246,7 @@ class App {
           'panel-recording': { left: '340px', top: '180px' },
           'panel-fluid': { left: '20px', top: '120px' },
           'panel-air': { left: '20px', top: '120px' },
+          'panel-sumi': { left: '20px', top: '120px' },
           'panel-perf-monitor': { left: '280px', top: '80px' }
       };
       Object.entries(inlineDefaults).forEach(([id, coords]) => {
@@ -1259,6 +1321,9 @@ class App {
         case '8':
         case 'a':
           this.setTool(TOOLS.AIR);
+          break;
+        case '9':
+          this.setTool(TOOLS.SUMI);
           break;
         case 'i':
           if (this.engine.activeLayer === 0) {
@@ -1756,6 +1821,9 @@ class App {
         const smudgeAlphaCtrl = document.getElementById('smudge-alpha-control');
         const smudgePickupCtrl = document.getElementById('smudge-pickup-control');
         const airCtrl = document.getElementById('airbrush-control');
+        const sumiSpanCtrl = document.getElementById('sumi-span-control');
+        const sumiBristlesCtrl = document.getElementById('sumi-bristles-control');
+        const sumiSplitCtrl = document.getElementById('sumi-split-control');
         const advBtn = document.getElementById('btn-advanced-brush');
 
         if (heightCtrl) heightCtrl.style.display = (tool === TOOLS.BRUSH) ? 'block' : 'none';
@@ -1763,6 +1831,9 @@ class App {
         if (smudgeAlphaCtrl) smudgeAlphaCtrl.style.display = (tool === TOOLS.SMUDGE) ? 'block' : 'none';
         if (smudgePickupCtrl) smudgePickupCtrl.style.display = (tool === TOOLS.SMUDGE) ? 'block' : 'none';
         if (airCtrl) airCtrl.style.display = (tool === TOOLS.BRUSH || tool === TOOLS.SMUDGE) ? 'block' : 'none';
+        if (sumiSpanCtrl) sumiSpanCtrl.style.display = (tool === TOOLS.SUMI) ? 'block' : 'none';
+        if (sumiBristlesCtrl) sumiBristlesCtrl.style.display = (tool === TOOLS.SUMI) ? 'block' : 'none';
+        if (sumiSplitCtrl) sumiSplitCtrl.style.display = (tool === TOOLS.SUMI) ? 'block' : 'none';
 
         const opacCtrl = document.getElementById('control-opacity');
         const flowLbl = document.getElementById('lbl-flow');
@@ -1789,14 +1860,14 @@ class App {
         
         // Advanced settings button visibility
         if (advBtn) {
-            const hasAdv = (tool === TOOLS.BRUSH || tool === TOOLS.SMUDGE || tool === TOOLS.WIREFRAME || tool === TOOLS.ERASER || tool === TOOLS.FLUID || tool === TOOLS.AIR);
+            const hasAdv = (tool === TOOLS.BRUSH || tool === TOOLS.SMUDGE || tool === TOOLS.WIREFRAME || tool === TOOLS.ERASER || tool === TOOLS.FLUID || tool === TOOLS.AIR || tool === TOOLS.SUMI);
             advBtn.style.display = hasAdv ? 'block' : 'none';
         }
         const advTitle = document.querySelector('#panel-advanced-brush .panel-title');
         if (advTitle) {
             advTitle.innerText = (tool === TOOLS.ERASER)
                 ? 'ADVANCED ERASER'
-                : (tool === TOOLS.FLUID ? 'ADVANCED FLUID' : (tool === TOOLS.AIR ? 'ADVANCED WATERCOLOR' : 'ADVANCED BRUSH'));
+                : (tool === TOOLS.FLUID ? 'ADVANCED FLUID' : (tool === TOOLS.AIR ? 'ADVANCED WATERCOLOR' : (tool === TOOLS.SUMI ? 'ADVANCED SUMI-E' : 'ADVANCED BRUSH')));
         }
 
         // Update UI Sliders
@@ -2068,15 +2139,17 @@ class App {
         const catWireframe = document.getElementById('cat-wireframe');
         const catFluid = document.getElementById('cat-fluid');
         const catAir = document.getElementById('cat-air');
+        const catSumi = document.getElementById('cat-sumi');
         const catSpeedTuning = document.getElementById('cat-speed-tuning');
         
-        if (catPressure) catPressure.style.display = (tool === TOOLS.BRUSH || tool === TOOLS.SMUDGE || tool === TOOLS.WIREFRAME || tool === TOOLS.ERASER || tool === TOOLS.AIR || tool === TOOLS.FLUID) ? 'block' : 'none';
-        if (catJitter) catJitter.style.display = (tool === TOOLS.BRUSH || tool === TOOLS.SMUDGE || tool === TOOLS.WIREFRAME || tool === TOOLS.ERASER || tool === TOOLS.AIR || tool === TOOLS.FLUID) ? 'block' : 'none';
+        if (catPressure) catPressure.style.display = (tool === TOOLS.BRUSH || tool === TOOLS.SMUDGE || tool === TOOLS.WIREFRAME || tool === TOOLS.ERASER || tool === TOOLS.AIR || tool === TOOLS.FLUID || tool === TOOLS.SUMI) ? 'block' : 'none';
+        if (catJitter) catJitter.style.display = (tool === TOOLS.BRUSH || tool === TOOLS.SMUDGE || tool === TOOLS.WIREFRAME || tool === TOOLS.ERASER || tool === TOOLS.AIR || tool === TOOLS.FLUID || tool === TOOLS.SUMI) ? 'block' : 'none';
         if (catSmudge) catSmudge.style.display = (tool === TOOLS.BRUSH || tool === TOOLS.SMUDGE) ? 'block' : 'none';
         if (catWireframe) catWireframe.style.display = (tool === TOOLS.WIREFRAME) ? 'block' : 'none';
         if (catFluid) catFluid.style.display = (tool === TOOLS.FLUID) ? 'block' : 'none';
         if (catAir) catAir.style.display = (tool === TOOLS.AIR) ? 'block' : 'none';
-        if (catSpeedTuning) catSpeedTuning.style.display = (tool === TOOLS.BRUSH || tool === TOOLS.SMUDGE || tool === TOOLS.WIREFRAME || tool === TOOLS.ERASER || tool === TOOLS.AIR || tool === TOOLS.FLUID) ? 'block' : 'none';
+        if (catSumi) catSumi.style.display = (tool === TOOLS.SUMI) ? 'block' : 'none';
+        if (catSpeedTuning) catSpeedTuning.style.display = (tool === TOOLS.BRUSH || tool === TOOLS.SMUDGE || tool === TOOLS.WIREFRAME || tool === TOOLS.ERASER || tool === TOOLS.AIR || tool === TOOLS.FLUID || tool === TOOLS.SUMI) ? 'block' : 'none';
         
         // Fluidity and Bristles updating
         const fldEl = document.getElementById('slider-fluidity');
@@ -2136,7 +2209,44 @@ class App {
             syncAirSettingsFromTip(tipSettings);
         }
 
-        // Update active tip label badges in Advanced, Fluid, and Air panels
+        // Sync Sumi-e controls (Sidebar + Floating Panel + Advanced Category)
+        syncFluidUiSlider('brush-sumi-span', 'sumi-span-val', 'sumiSpan', 550, 'px');
+        syncFluidUiSlider('brush-sumi-bristles', 'sumi-bristles-val', 'sumiBristles', 28, '');
+        syncFluidUiSlider('brush-sumi-split', 'sumi-split-val', 'sumiSplit', 48, '%');
+        syncFluidUiSlider('slider-sumi-ink', 'val-sumi-ink', 'sumiInk', 78, '%');
+        syncFluidUiSlider('slider-sumi-water', 'val-sumi-water', 'sumiWater', 65, '%');
+        syncFluidUiSlider('slider-sumi-bleed', 'val-sumi-bleed', 'sumiBleed', 58, '%');
+        syncFluidUiSlider('adv-sumi-stiffness', 'adv-sumi-stiffness-val', 'sumiStiffness', 60, '%');
+        syncFluidUiSlider('adv-sumi-glue', 'adv-sumi-glue-val', 'sumiGlue', 42, '%');
+        syncFluidUiSlider('adv-sumi-warmth', 'adv-sumi-warmth-val', 'sumiWarmth', 12, '');
+        syncFluidUiSlider('adv-sumi-evaporation', 'adv-sumi-evaporation-val', 'sumiEvaporation', 28, '%');
+        syncFluidUiSlider('adv-sumi-capillarity', 'adv-sumi-capillarity-val', 'sumiCapillarity', 62, '%');
+        syncFluidUiSlider('adv-sumi-backrun', 'adv-sumi-backrun-val', 'sumiBackrun', 68, '%');
+        syncFluidUiSlider('adv-sumi-soot-snag', 'adv-sumi-soot-snag-val', 'sumiSootSnag', 55, '%');
+        syncFluidUiSlider('adv-sumi-tip-angle', 'adv-sumi-tip-angle-val', 'sumiTipAngle', 0, '°');
+        syncFluidUiSlider('adv-sumi-pressure-flow', 'adv-sumi-pressure-flow-val', 'sumiPressureFlow', 35, '%');
+
+        const chkSumiDeplete = document.getElementById('adv-sumi-deplete');
+        if (chkSumiDeplete) chkSumiDeplete.checked = getVal('sumiDeplete', true);
+        const chkSumiSplit = document.getElementById('adv-sumi-split-enabled');
+        if (chkSumiSplit) chkSumiSplit.checked = getVal('sumiSplitEnabled', true);
+        const chkSumiTilt = document.getElementById('adv-sumi-tilt');
+        if (chkSumiTilt) chkSumiTilt.checked = getVal('sumiTilt', true);
+        const chkSumiFollow = document.getElementById('adv-sumi-follow-stroke');
+        if (chkSumiFollow) chkSumiFollow.checked = !!getVal('sumiFollowStroke', false);
+        const btnAutoDip = document.getElementById('btn-sumi-auto-redip');
+        if (btnAutoDip) {
+            const autoDip = getVal('sumiAutoReDip', true);
+            btnAutoDip.classList.toggle('active-btn', !!autoDip);
+            btnAutoDip.innerText = autoDip ? 'AUTO DIP' : 'MANUAL DIP';
+        }
+        if (tool === TOOLS.SUMI) {
+            syncSumiSettingsFromTip(tipSettings);
+            updateSumiSubtoolUI(getVal('sumiMode', 'draw'));
+            syncSumiTip(this.engine);
+        }
+
+        // Update active tip label badges in Advanced, Fluid, Air, and Sumi panels
         let tipBadge = 'MAIN #1';
         if (this.tipManager) {
             if (this.tipManager.activeBankIndex >= 0) {
@@ -2151,6 +2261,8 @@ class App {
         if (fldTipLbl) fldTipLbl.innerText = tipBadge;
         const airTipLbl = document.getElementById('air-active-tip-label');
         if (airTipLbl) airTipLbl.innerText = tipBadge;
+        const sumiTipLbl = document.getElementById('sumi-active-tip-label');
+        if (sumiTipLbl) sumiTipLbl.innerText = tipBadge;
     }
   }
 
@@ -2227,7 +2339,28 @@ class App {
             fluidBristleContrast: settings.fluidBristleContrast ?? 65,
             fluidBleed: settings.fluidBleed ?? 50,
             fluidTipHardness: settings.fluidTipHardness ?? 50,
-            fluidPressureFlow: settings.fluidPressureFlow ?? 35
+            fluidPressureFlow: settings.fluidPressureFlow ?? 35,
+            sumiMode: settings.sumiMode ?? 'draw',
+            sumiInk: settings.sumiInk ?? 78,
+            sumiWater: settings.sumiWater ?? 65,
+            sumiBleed: settings.sumiBleed ?? 58,
+            sumiBristles: settings.sumiBristles ?? 28,
+            sumiStiffness: settings.sumiStiffness ?? 60,
+            sumiSplit: settings.sumiSplit ?? 48,
+            sumiSpan: settings.sumiSpan ?? 550,
+            sumiGlue: settings.sumiGlue ?? 42,
+            sumiWarmth: settings.sumiWarmth ?? 12,
+            sumiEvaporation: settings.sumiEvaporation ?? 28,
+            sumiCapillarity: settings.sumiCapillarity ?? 62,
+            sumiBackrun: settings.sumiBackrun ?? 68,
+            sumiSootSnag: settings.sumiSootSnag ?? 55,
+            sumiDeplete: settings.sumiDeplete ?? true,
+            sumiSplitEnabled: settings.sumiSplitEnabled ?? true,
+            sumiTilt: settings.sumiTilt ?? true,
+            sumiAutoReDip: settings.sumiAutoReDip ?? true,
+            sumiFollowStroke: settings.sumiFollowStroke ?? false,
+            sumiTipAngle: settings.sumiTipAngle ?? 0,
+            sumiPressureFlow: settings.sumiPressureFlow ?? 35
         };
     }
     return settings.tips[tipId];
@@ -2292,7 +2425,8 @@ class App {
         tool === TOOLS.SMUDGE ||
         tool === TOOLS.LIQUIFY ||
         tool === TOOLS.FLUID ||
-        tool === TOOLS.AIR
+        tool === TOOLS.AIR ||
+        tool === TOOLS.SUMI
     );
     if (tool === TOOLS.REF_MOVE) {
         if (this.engine.activeLayer !== 0) this.setLayer(0);
@@ -2303,7 +2437,7 @@ class App {
 
     const sensitivityGroup = document.querySelector('.sensitivity-group');
     if (sensitivityGroup) {
-        if (tool === TOOLS.BRUSH || tool === TOOLS.SMUDGE || tool === TOOLS.ERASER || tool === TOOLS.WIREFRAME || tool === TOOLS.FLUID || tool === TOOLS.AIR) {
+        if (tool === TOOLS.BRUSH || tool === TOOLS.SMUDGE || tool === TOOLS.ERASER || tool === TOOLS.WIREFRAME || tool === TOOLS.FLUID || tool === TOOLS.AIR || tool === TOOLS.SUMI) {
             sensitivityGroup.classList.remove('hidden');
         } else {
             sensitivityGroup.classList.add('hidden');
@@ -2337,7 +2471,7 @@ class App {
     if (
         this.engine &&
         !this.engine._isLoadingProject &&
-        (tool === TOOLS.LIQUIFY || tool === TOOLS.SMUDGE || tool === TOOLS.FLUID || tool === TOOLS.AIR)
+        (tool === TOOLS.LIQUIFY || tool === TOOLS.SMUDGE || tool === TOOLS.FLUID || tool === TOOLS.AIR || tool === TOOLS.SUMI)
     ) {
         this._toolWarmupTimer = setTimeout(() => {
             this._toolWarmupTimer = null;
@@ -2352,7 +2486,7 @@ class App {
     }
 
     // Restore this tool's specific active tip in the panel
-    if (this.tipManager && (tool === TOOLS.BRUSH || tool === TOOLS.WIREFRAME || tool === TOOLS.ERASER || tool === TOOLS.SMUDGE || tool === TOOLS.FLUID || tool === TOOLS.AIR)) {
+    if (this.tipManager && (tool === TOOLS.BRUSH || tool === TOOLS.WIREFRAME || tool === TOOLS.ERASER || tool === TOOLS.SMUDGE || tool === TOOLS.FLUID || tool === TOOLS.AIR || tool === TOOLS.SUMI)) {
         this.tipManager.activeBankIndex = settings.activeBankIndex !== undefined ? settings.activeBankIndex : 0;
         this.tipManager.activeGeneratedIndex = settings.activeGeneratedIndex !== undefined ? settings.activeGeneratedIndex : -1;
         this.tipManager._renderPalette(false);
@@ -2407,6 +2541,12 @@ class App {
     if (tool === TOOLS.AIR) {
         activateAirPaint(this);
     }
+    if (this.prevTool === TOOLS.SUMI && tool !== TOOLS.SUMI) {
+        deactivateSumiPaint(this);
+    }
+    if (tool === TOOLS.SUMI) {
+        activateSumiPaint(this);
+    }
 
     if (this.engine && this.engine._updateBrushCursor) {
         this.engine._updateBrushCursor();
@@ -2435,6 +2575,9 @@ class App {
 
   setLayer(index) {
     const prevLayer = this.engine.activeLayer;
+    if (prevLayer !== index && this.engine?.flushPendingGpuCommits) {
+        this.engine.flushPendingGpuCommits();
+    }
     this.engine.activeLayer = index;
 
     // Deselect reference when switching to paint layer
@@ -2545,6 +2688,10 @@ class App {
     if (this.activeTool === TOOLS.AIR && tipSettings) {
         syncAirSettingsFromTip(tipSettings);
     }
+    if (this.activeTool === TOOLS.SUMI && tipSettings) {
+        syncSumiSettingsFromTip(tipSettings);
+        syncSumiTip(this.engine);
+    }
     this._saveBrushSettings(true);
     let tipBadge = 'MAIN #1';
     if (this.tipManager) {
@@ -2610,6 +2757,31 @@ class App {
             settings.airTipAngle = 0;
             settings.airTipHardness = 55;
             settings.airPressureFlow = 35;
+        } else if (this.activeTool === TOOLS.SUMI) {
+            settings.size = 40;
+            settings.opacity = 1.0;
+            settings.flow = 1.0;
+            settings.sumiMode = 'draw';
+            settings.sumiInk = 78;
+            settings.sumiWater = 65;
+            settings.sumiBleed = 58;
+            settings.sumiBristles = 28;
+            settings.sumiStiffness = 60;
+            settings.sumiSplit = 48;
+            settings.sumiSpan = 550;
+            settings.sumiGlue = 42;
+            settings.sumiWarmth = 12;
+            settings.sumiEvaporation = 28;
+            settings.sumiCapillarity = 62;
+            settings.sumiBackrun = 68;
+            settings.sumiSootSnag = 55;
+            settings.sumiDeplete = true;
+            settings.sumiSplitEnabled = true;
+            settings.sumiTilt = true;
+            settings.sumiAutoReDip = true;
+            settings.sumiFollowStroke = false;
+            settings.sumiTipAngle = 0;
+            settings.sumiPressureFlow = 35;
         }
         if (settings.tips && settings.tips[tipId]) {
             delete settings.tips[tipId];
