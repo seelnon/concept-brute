@@ -36,7 +36,8 @@ export const fluidSettings = {
   bristleContrast: 65,
   bleed: 50,
   tipHardness: 50,
-  pressureFlow: 35
+  pressureFlow: 35,
+  heightShield: 65
 };
 
 export function syncFluidSettingsFromTip(tipSettings) {
@@ -57,6 +58,7 @@ export function syncFluidSettingsFromTip(tipSettings) {
   fluidSettings.bleed = tipSettings.fluidBleed ?? 50;
   fluidSettings.tipHardness = tipSettings.fluidTipHardness ?? 50;
   fluidSettings.pressureFlow = tipSettings.fluidPressureFlow ?? 35;
+  fluidSettings.heightShield = tipSettings.fluidHeightShield ?? 65;
 }
 
 // Reusable scratch buffers to eliminate per-frame allocations & GC stalls
@@ -197,6 +199,7 @@ export function initFluidPaint(app) {
   setupSlider('slider-fluid-retention', 'val-fluid-retention', 'retention', 'fluidRetention', 80);
   setupSlider('slider-fluid-pickup', 'val-fluid-pickup', 'pickup', 'fluidPickup', 80);
   setupSlider('slider-fluid-depth', 'val-fluid-depth', 'depth', 'fluidDepth', 30);
+  setupSlider('slider-fluid-height-shield', 'val-fluid-height-shield', 'heightShield', 'fluidHeightShield', 65);
   setupSlider('slider-fluid-gloss', 'val-fluid-gloss', 'gloss', 'fluidGloss', 100);
 
   setupCheckbox('chk-surface-shading', 'shading', 'fluidShading', true);
@@ -924,7 +927,8 @@ export function startFluidPaintStroke(engine, worldPos) {
     carriedB: baseColor.b,
     totalDist: 0.0,
     hasPainted: false,
-    time: Math.random() * 10.0
+    time: Math.random() * 10.0,
+    vFactor: 0.0
   };
 
   if (!useGpu) {
@@ -1128,6 +1132,7 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
       const coverWindow = Math.max(24.0, radius * 2.40);
       const bleedMult = 0.25 + bleedRatio * 1.50;
       const advSupply = 0.16 + 0.84 * paintSupply;
+      const speedHeightMod = Math.max(0.0, Math.min(2.2, 1.0 + (fb.vFactor || 0) * ((engine?.brush?.speedHeight ?? 0) / 100.0) * 1.4));
       solver.runStep(engine, {
         isTailFlush,
         minX: Math.min(minX, Math.min(from.x, to.x) - sweepR),
@@ -1178,7 +1183,9 @@ function runFluidStep(engine, fb, from, to, radius, opacity, baseColor, pressure
         isShading,
         depthRatio,
         glossRatio,
-        pressure: effPressure
+        pressure: effPressure,
+        heightShield: Math.max(0.0, Math.min(1.0, (fluidSettings.heightShield ?? 65) / 100.0)),
+        speedHeightMod
       });
 
       if (!isTailFlush) {
@@ -1779,7 +1786,7 @@ function runSmoothedBezier(engine, fb, a, ctrl, b, radius, opacity, baseColor, p
 /**
  * Continuous Fluid Paint Move Step
  */
-export function paintFluidOnChunks(engine, from, to, size, opacity, color, pressure = 1.0, currentTime = performance.now()) {
+export function paintFluidOnChunks(engine, from, to, size, opacity, color, pressure = 1.0, currentTime = performance.now(), vFactor = 0.0) {
   if (engine.perfMonitor) engine.perfMonitor.markPhase('fluid_step');
   if (!engine.activeFluidBrush) {
     startFluidPaintStroke(engine, from);
@@ -1787,6 +1794,7 @@ export function paintFluidOnChunks(engine, from, to, size, opacity, color, press
 
   const fb = engine.activeFluidBrush;
   fb.hasPainted = true;
+  fb.vFactor = vFactor || 0.0;
 
   const rawDx = to.x - from.x;
   const rawDy = to.y - from.y;

@@ -19,10 +19,11 @@
 
 import { GLSL_RYB_MIX } from '../colorUtils.js';
 import { backupChunkLayer } from '../engine/backupPool.js';
+import { GLSL_SURFACE_BIOME_SAMPLER } from '../engine/canvasSurfaceGpu.js';
 
 const TILE_SIZE = 256;
 const WORK_RES = 768;
-const MAX_POOL_TILES = 36;
+const MAX_POOL_TILES = 96;
 const MAX_INSTANCES = 4096;
 
 const QUAD_VS = `#version 300 es
@@ -135,7 +136,7 @@ void main() {
   float d = dist / max(0.001, v_radius);
   if (d >= 1.0) discard;
 
-  float falloff = pow(clamp(1.0 - d * d, 0.0, 1.0), 1.65);
+  float falloff = pow(clamp(1.0 - d * d, 0.0, 1.0), 1.30);
   float inkDep = falloff * v_inkW;
   float watDep = falloff * v_waterW;
   float contact = falloff * v_contactW;
@@ -143,6 +144,7 @@ void main() {
 }`;
 
 const SUMI_SURFACE_GLSL = `
+${GLSL_SURFACE_BIOME_SAMPLER}
 float sumiHash(vec2 p) {
   p = fract(p * vec2(123.34, 456.21) + 17.31);
   p += dot(p, p + 45.32);
@@ -179,15 +181,19 @@ vec4 sampleSumiSubstrate(vec2 worldPos) {
   float localGluePatch = smoothstep(0.25, 0.85, sumiNoise(p * 0.18 + 7.1));
 
   if (u_hasSurface == 1) {
-    vec4 s = texture(u_surfaceMap, worldPos * u_surfaceInvScale);
-    float surfH = s.r;
-    float cavity = s.a;
-    float h = clamp(mix(surfH, surfH * 0.72 + longFibers * 0.28, 0.35), 0.0, 1.0);
-    float openPore = clamp((1.0 - h * 0.65) * 0.58 + cavity * 0.42, 0.05, 1.0);
+    vec4 pore = sampleSurfacePoreBiome(u_poreMap, worldPos, u_surfaceInvScale, u_surfaceBiomeMix, u_surfaceAllowRotate, u_surfaceScaleSpread);
+    float h = clamp(pore.r * 0.72 + longFibers * 0.28, 0.0, 1.0);
+    float openPore = clamp(pore.g, 0.04, 1.0);
+    float sootBlock = clamp(mix(pore.b, h * 0.72 + longFibers * 0.18, 0.30), 0.06, 0.98);
+    float tooth = clamp(mix(pore.a, 0.45 + (h - 0.5) * (0.48 + u_coarseness * 0.85), 0.35), 0.0, 1.0);
+    if (u_useHeightmap == 1 && u_heightSource == 0) {
+      vec4 s = sampleSurfaceMapBiome(u_surfaceMap, worldPos, u_surfaceInvScale, u_surfaceBiomeMix, u_surfaceAllowRotate, u_surfaceScaleSpread);
+      h = clamp(mix(h, s.r, 0.48), 0.0, 1.0);
+      openPore = clamp(mix(openPore, (1.0 - s.r * 0.65) * 0.55 + s.a * 0.45, 0.35), 0.04, 1.0);
+      tooth = clamp(mix(tooth, 0.45 + (s.r - 0.5) * (0.48 + u_coarseness * 0.85) - s.a * 0.18, 0.50), 0.0, 1.0);
+    }
     float sizingMask = mix(1.0, 0.14, u_sizing);
     float perm = clamp(openPore * sizingMask * mix(0.76, 1.16, localGluePatch), 0.03, 1.0);
-    float sootBlock = clamp(h * 0.72 + longFibers * 0.18 + (1.0 - openPore) * 0.18, 0.06, 0.98);
-    float tooth = clamp(0.45 + (h - 0.5) * (0.48 + u_coarseness * 0.85) - cavity * 0.18, 0.0, 1.0);
     return vec4(h, perm, sootBlock, tooth);
   }
 
@@ -202,7 +208,7 @@ vec4 sampleSumiSubstrate(vec2 worldPos) {
 }
 `;
 
-// Re-wet previously fixed dryPig back into mobile surfPig on WATER strokes
+// Re-wet previously fixed dryPig back into mobile surfPig on WATER strokes scaled by u_inkAffection
 const REWET_FRAG = `#version 300 es
 precision highp float;
 
@@ -211,6 +217,7 @@ uniform sampler2D u_surfPig;
 uniform sampler2D u_dryPig;
 uniform float u_waterCharge;
 uniform float u_sizing;
+uniform float u_inkAffection;
 
 in vec2 v_uv;
 
@@ -223,8 +230,10 @@ void main() {
   vec4 dryPig = texture(u_dryPig, v_uv);
 
   float footSignal = min(1.0, max(stamp.b, stamp.g));
-  if (footSignal > 0.002 && dryPig.a > 0.0004) {
-    float liftFrac = clamp(footSignal * (0.18 + 0.36 * u_waterCharge) * (1.0 - u_sizing * 0.35), 0.0, 0.45);
+  float aff = clamp(u_inkAffection, 0.0, 1.0);
+  if (footSignal > 0.002 && dryPig.a > 0.0004 && aff > 0.004) {
+    float affScale = pow(aff, 1.20);
+    float liftFrac = clamp(footSignal * (0.18 + 0.36 * u_waterCharge) * (1.0 - u_sizing * 0.35) * affScale, 0.0, 0.45);
     float lifted = dryPig.a * liftFrac;
     dryPig.a = max(0.0, dryPig.a - lifted);
     float tot = surfPig.a + lifted;
@@ -246,9 +255,15 @@ uniform sampler2D u_surfPig;
 uniform sampler2D u_vel;
 uniform sampler2D u_strokeCov;
 uniform sampler2D u_surfaceMap;
+uniform sampler2D u_poreMap;
 
 uniform int u_hasSurface;
+uniform int u_useHeightmap;
+uniform int u_heightSource;
 uniform float u_surfaceInvScale;
+uniform float u_surfaceBiomeMix;
+uniform float u_surfaceAllowRotate;
+uniform float u_surfaceScaleSpread;
 uniform float u_sizing;
 uniform float u_coarseness;
 uniform float u_surfSlip;
@@ -259,6 +274,7 @@ uniform vec2 u_workOrigin;
 uniform vec2 u_brushVel;
 uniform float u_pressure;
 uniform float u_inkConcentration;
+uniform float u_inkAffection;
 uniform float u_waterCharge;
 uniform float u_glueVisc;
 uniform vec3 u_pigmentK;
@@ -310,10 +326,11 @@ void main() {
     // DRAW: true multi-tuft accumulation into wet surface puddle & velvety carbon core
     float waterGain = totalWatAdd * 0.42 * (0.28 + 0.72 * kTooth);
     float dilution = mix(1.18, 0.58, u_waterCharge);
-    float inkGain = totalInkAdd * 0.52 * kTooth * dilution * (0.35 + 0.85 * u_inkConcentration);
+    float inkGain = totalInkAdd * 0.52 * kTooth * dilution * (0.08 + 1.20 * u_inkConcentration);
 
     surf.r = clamp(surf.r + waterGain * (1.0 - surf.r * 0.28), 0.0, 3.0);
     surf.g = clamp(surf.g + inkGain * (0.15 + u_glueVisc * 0.65) * 0.55, 0.0, 2.0);
+    surf.b = max(surf.b, contactClamped * 0.92);
     surf.a = 0.0;
 
     if (inkGain > 0.0004) {
@@ -338,12 +355,15 @@ void main() {
     float velScale = mix(0.65, 1.35, u_surfSlip);
     vel.xy += u_brushVel * min(1.2, totalContact) * (1.2 + 1.8 * u_waterCharge) * velScale;
   } else if (u_mode == 1) {
-    // WATER: clean water wash & outward nijimi bleed
-    float waterGain = max(totalWatAdd, totalContact * 0.85) * (0.25 + 0.65 * u_waterCharge) * 0.62;
+    // WATER: clean water wash scaled genuinely by u_waterCharge + u_inkAffection
+    float watScaled = min(1.35, totalWatAdd) * (0.04 + 0.96 * u_waterCharge) * 0.42;
+    float touchFloor = contactClamped * (0.02 + 0.36 * u_waterCharge) * 0.25;
+    float waterGain = max(watScaled, touchFloor);
     surf.r = clamp(surf.r + waterGain * (1.0 - surf.r * 0.22), 0.0, 3.0);
     surf.g = max(0.0, surf.g * (1.0 - contactClamped * 0.20));
+    surf.b = mix(surf.b, clamp(u_inkAffection, 0.0, 1.0), clamp(contactClamped * 1.4, 0.0, 1.0));
     surf.a = 0.0;
-    vel.xy += u_brushVel * min(1.2, totalContact) * 2.4 * mix(0.75, 1.35, u_surfSlip);
+    vel.xy += u_brushVel * min(0.85, totalContact) * (0.55 + 1.35 * u_waterCharge) * mix(0.75, 1.35, u_surfSlip);
   } else if (u_mode == 2) {
     // BLOW: directional air impulse pushes wet ink & shallow-water underpaint
     float pushStrength = min(1.4, max(totalContact, totalWatAdd));
@@ -374,8 +394,15 @@ precision highp float;
 uniform sampler2D u_vel;
 uniform sampler2D u_surf;
 uniform sampler2D u_surfaceMap;
+uniform sampler2D u_poreMap;
+uniform sampler2D u_baseBg;
 uniform int u_hasSurface;
+uniform int u_useHeightmap;
+uniform int u_heightSource;
 uniform float u_surfaceInvScale;
+uniform float u_surfaceBiomeMix;
+uniform float u_surfaceAllowRotate;
+uniform float u_surfaceScaleSpread;
 uniform float u_sizing;
 uniform float u_coarseness;
 uniform float u_surfSlip;
@@ -404,17 +431,27 @@ void main() {
   float hU = texture(u_surf, clamp(v_uv + vec2(0.0, u_texel.y), u_uvClamp.xy, u_uvClamp.zw)).r;
   vec2 gradH = vec2(hR - hL, hU - hD) * 0.5;
 
-  // Paper fiber slope steers liquid gently along channels/valleys
+  // Pore/fiber channel steering + optional heightmap slope (Surface or Layer)
   vec2 gradP = vec2(0.0);
-  if (u_hasSurface == 1) {
-    vec4 s = texture(u_surfaceMap, worldPos * u_surfaceInvScale);
+  if (u_useHeightmap == 1 && u_heightSource == 1) {
+    vec4 bL = texture(u_baseBg, clamp(v_uv - vec2(u_texel.x, 0.0), u_uvClamp.xy, u_uvClamp.zw));
+    vec4 bR = texture(u_baseBg, clamp(v_uv + vec2(u_texel.x, 0.0), u_uvClamp.xy, u_uvClamp.zw));
+    vec4 bD = texture(u_baseBg, clamp(v_uv - vec2(0.0, u_texel.y), u_uvClamp.xy, u_uvClamp.zw));
+    vec4 bU = texture(u_baseBg, clamp(v_uv + vec2(0.0, u_texel.y), u_uvClamp.xy, u_uvClamp.zw));
+    float lL = bL.a * (0.35 + 0.65 * dot(bL.a > 0.002 ? (bL.rgb / bL.a) : vec3(0.0), vec3(0.299, 0.587, 0.114)));
+    float lR = bR.a * (0.35 + 0.65 * dot(bR.a > 0.002 ? (bR.rgb / bR.a) : vec3(0.0), vec3(0.299, 0.587, 0.114)));
+    float lD = bD.a * (0.35 + 0.65 * dot(bD.a > 0.002 ? (bD.rgb / bD.a) : vec3(0.0), vec3(0.299, 0.587, 0.114)));
+    float lU = bU.a * (0.35 + 0.65 * dot(bU.a > 0.002 ? (bU.rgb / bU.a) : vec3(0.0), vec3(0.299, 0.587, 0.114)));
+    gradP = vec2(lR - lL, lU - lD) * (1.8 + 1.4 * u_surfChannel);
+  } else if (u_useHeightmap == 1 && u_heightSource == 0 && u_hasSurface == 1) {
+    vec4 s = sampleSurfaceMapBiome(u_surfaceMap, worldPos, u_surfaceInvScale, u_surfaceBiomeMix, u_surfaceAllowRotate, u_surfaceScaleSpread);
     gradP = (s.gb - 0.5) * 2.0 * (0.4 + 1.2 * u_surfChannel);
   } else {
     float pL = sampleSumiSubstrate(worldPos - vec2(1.0, 0.0)).r;
     float pR = sampleSumiSubstrate(worldPos + vec2(1.0, 0.0)).r;
     float pD = sampleSumiSubstrate(worldPos - vec2(0.0, 1.0)).r;
     float pU = sampleSumiSubstrate(worldPos + vec2(0.0, 1.0)).r;
-    gradP = vec2(pR - pL, pU - pD) * 0.5;
+    gradP = vec2(pR - pL, pU - pD) * (0.35 + 0.55 * u_surfChannel);
   }
 
   float wetness = smoothstep(0.01, 0.15, surf.r);
@@ -526,8 +563,16 @@ void main() {
   float avgWater = 0.25 * (sL.r + sR.r + sB.r + sT.r);
   float waterLap = avgWater - surf.r;
 
-  // Surface fluid spreads smoothly where wet
-  float wetMask = smoothstep(0.005, 0.08, max(surf.r, avgWater));
+  // Surface fluid spreads smoothly where wet (sub-threshold film stays stationary to seep)
+  float wetMask = smoothstep(0.018, 0.14, max(surf.r, avgWater));
+  float wB_sum = sL.r + sR.r + sB.r + sT.r;
+  if (wB_sum > 0.001) {
+    float avgAff = (sL.b * sL.r + sR.b * sR.r + sB.b * sB.r + sT.b * sT.r) / wB_sum;
+    float affBlend = waterLap > 0.0
+      ? clamp(waterLap / max(0.001, surf.r + waterLap), 0.0, 0.85)
+      : (0.04 * wetMask);
+    surf.b = mix(surf.b, avgAff, affBlend);
+  }
   surf.r = max(0.0, surf.r + waterLap * 0.26 * wetMask);
 
   // Backrun / Coffee-ring edge pooling: outward capillary flow pulls suspended soot toward drying rim
@@ -572,15 +617,29 @@ void main() {
   outSurfPig = pig;
 }`;
 
-// Wet-mobilized advection & watercolor feathering of underlying parent layer paint (`ppBaseBg`)
+// Wet-mobilized advection & capillary Xuan fiber diffusion of underlying parent layer paint (`ppBaseBg`)
 const BASE_STEP_FRAG = `#version 300 es
 precision highp float;
 
 uniform sampler2D u_baseBg;
 uniform sampler2D u_surf;
 uniform sampler2D u_vel;
+uniform sampler2D u_pore;
+uniform sampler2D u_surfaceMap;
+uniform sampler2D u_poreMap;
+
+uniform int u_hasSurface;
+uniform int u_useHeightmap;
+uniform int u_heightSource;
+uniform float u_surfaceInvScale;
+uniform float u_surfaceBiomeMix;
+uniform float u_surfaceAllowRotate;
+uniform float u_surfaceScaleSpread;
+uniform float u_sizing;
+uniform float u_coarseness;
 uniform vec2 u_texel;
 uniform vec4 u_uvClamp;
+uniform vec2 u_workOrigin;
 uniform float u_dt;
 uniform float u_glueVisc;
 uniform int u_alphaLock;
@@ -588,31 +647,61 @@ uniform int u_alphaLock;
 in vec2 v_uv;
 out vec4 outBaseBg;
 
+${SUMI_SURFACE_GLSL}
+
 void main() {
   vec4 base = texture(u_baseBg, v_uv);
-  float w = texture(u_surf, v_uv).r;
-  if (w <= 0.018) {
+  vec4 surfData = texture(u_surf, v_uv);
+  float w = surfData.r + texture(u_pore, v_uv).r * 0.75;
+  if (w <= 0.015) {
     outBaseBg = base;
     return;
   }
 
-  float wetMob = smoothstep(0.018, 0.26, w);
+  // Scale baseBg advection (bending) and capillary bleed by surf.b affection
+  float aff = clamp(surfData.b, 0.0, 1.0);
+  if (aff <= 0.004) {
+    outBaseBg = base;
+    return;
+  }
+  float bendT = clamp((aff - 0.15) / 0.85, 0.0, 1.0);
+  float bendSmooth = bendT * bendT * (3.0 - 2.0 * bendT);
+  float bendScale = pow(bendSmooth, 1.4);
+  float bleedScale = pow(aff, 1.20);
+
+  float wetMob = smoothstep(0.015, 0.24, w);
   vec2 vel = texture(u_vel, v_uv).xy;
   vec2 backUv = clamp(v_uv - vel * u_texel * u_dt, u_uvClamp.xy, u_uvClamp.zw);
   vec4 advBase = texture(u_baseBg, backUv);
-  float advSurf = texture(u_surf, backUv).r;
-  float advMob = smoothstep(0.012, 0.20, advSurf);
-  float advW = clamp(length(vel) * 0.012 * wetMob * advMob, 0.0, 0.65);
-  vec4 mixed = mix(base, advBase, advW);
+  float advSurf = texture(u_surf, backUv).r + texture(u_pore, backUv).r * 0.75;
+  float advMob = smoothstep(0.010, 0.18, advSurf);
+  float advW = clamp(length(vel) * 0.020 * wetMob * advMob, 0.0, 0.52) * bendScale;
+  vec4 res = mix(base, advBase, advW);
 
-  vec4 bL = texture(u_baseBg, clamp(v_uv - vec2(u_texel.x, 0.0), u_uvClamp.xy, u_uvClamp.zw));
-  vec4 bR = texture(u_baseBg, clamp(v_uv + vec2(u_texel.x, 0.0), u_uvClamp.xy, u_uvClamp.zw));
-  vec4 bB = texture(u_baseBg, clamp(v_uv - vec2(0.0, u_texel.y), u_uvClamp.xy, u_uvClamp.zw));
-  vec4 bT = texture(u_baseBg, clamp(v_uv + vec2(0.0, u_texel.y), u_uvClamp.xy, u_uvClamp.zw));
-  vec4 avgN = (bL + bR + bB + bT) * 0.25;
+  // Capillary diffusion along Xuan paper pores when wetted so committed/evicted paint bleeds uniformly
+  vec2 worldPos = u_workOrigin + gl_FragCoord.xy;
+  float perm = sampleSumiSubstrate(worldPos).y;
 
-  float diffAmt = clamp(0.08 * wetMob * (0.35 + 0.65 * (1.0 - u_glueVisc * 0.5)), 0.0, 0.18);
-  vec4 res = mix(mixed, avgN, diffAmt);
+  vec2 uvL = clamp(v_uv - vec2(u_texel.x, 0.0), u_uvClamp.xy, u_uvClamp.zw);
+  vec2 uvR = clamp(v_uv + vec2(u_texel.x, 0.0), u_uvClamp.xy, u_uvClamp.zw);
+  vec2 uvB = clamp(v_uv - vec2(0.0, u_texel.y), u_uvClamp.xy, u_uvClamp.zw);
+  vec2 uvT = clamp(v_uv + vec2(0.0, u_texel.y), u_uvClamp.xy, u_uvClamp.zw);
+
+  float wL = smoothstep(0.012, 0.20, texture(u_surf, uvL).r + texture(u_pore, uvL).r * 0.75);
+  float wR = smoothstep(0.012, 0.20, texture(u_surf, uvR).r + texture(u_pore, uvR).r * 0.75);
+  float wB = smoothstep(0.012, 0.20, texture(u_surf, uvB).r + texture(u_pore, uvB).r * 0.75);
+  float wT = smoothstep(0.012, 0.20, texture(u_surf, uvT).r + texture(u_pore, uvT).r * 0.75);
+  float wSum = wL + wR + wB + wT;
+  if (wSum > 0.001) {
+    vec4 bAvg = (
+      texture(u_baseBg, uvL) * wL +
+      texture(u_baseBg, uvR) * wR +
+      texture(u_baseBg, uvB) * wB +
+      texture(u_baseBg, uvT) * wT
+    ) / wSum;
+    float diffRate = clamp(wetMob * (0.025 + 0.095 * perm) * (1.0 - u_glueVisc * 0.35), 0.0, 0.16) * bleedScale;
+    res = mix(res, bAvg, diffRate);
+  }
 
   if (u_alphaLock == 1) {
     if (base.a <= 0.002) {
@@ -634,9 +723,15 @@ uniform sampler2D u_surfPig;
 uniform sampler2D u_pore;
 uniform sampler2D u_porePig;
 uniform sampler2D u_surfaceMap;
+uniform sampler2D u_poreMap;
 
 uniform int u_hasSurface;
+uniform int u_useHeightmap;
+uniform int u_heightSource;
 uniform float u_surfaceInvScale;
+uniform float u_surfaceBiomeMix;
+uniform float u_surfaceAllowRotate;
+uniform float u_surfaceScaleSpread;
 uniform float u_sizing;
 uniform float u_coarseness;
 uniform float u_seepRate;
@@ -684,7 +779,7 @@ void main() {
   float sootBlock = sub.z;
 
   float poreCap = max(0.0, 1.35 - pore.r);
-  float seepWater = min(surf.r, surf.r * perm * u_seepRate * u_dt * (0.35 + poreCap) * 2.2);
+  float seepWater = min(surf.r, surf.r * (0.35 + 0.85 * perm) * u_seepRate * u_dt * (0.45 + poreCap) * 2.6);
 
   if (surf.r > 0.0001) {
     float seepRatio = clamp(seepWater / surf.r, 0.0, 1.0);
@@ -715,9 +810,15 @@ uniform sampler2D u_pore;
 uniform sampler2D u_porePig;
 uniform sampler2D u_dryPig;
 uniform sampler2D u_surfaceMap;
+uniform sampler2D u_poreMap;
 
 uniform int u_hasSurface;
+uniform int u_useHeightmap;
+uniform int u_heightSource;
 uniform float u_surfaceInvScale;
+uniform float u_surfaceBiomeMix;
+uniform float u_surfaceAllowRotate;
+uniform float u_surfaceScaleSpread;
 uniform float u_sizing;
 uniform float u_coarseness;
 uniform float u_capillarity;
@@ -857,14 +958,19 @@ uniform sampler2D u_porePig;
 uniform sampler2D u_dryPig;
 uniform sampler2D u_baseBg;
 uniform sampler2D u_surfaceMap;
+uniform sampler2D u_poreMap;
 
 uniform int u_hasSurface;
+uniform int u_useHeightmap;
+uniform int u_heightSource;
 uniform float u_surfaceInvScale;
+uniform float u_surfaceBiomeMix;
+uniform float u_surfaceAllowRotate;
+uniform float u_surfaceScaleSpread;
 uniform float u_coarseness;
 uniform float u_sizing;
 uniform vec2 u_workOrigin;
 
-uniform float u_sootDensity;
 uniform float u_inkWarmth;
 uniform int u_alphaLock;
 
@@ -922,7 +1028,8 @@ void main() {
     ? vec3(-0.08 * warmth, -0.02 * warmth, 0.11 * warmth)
     : vec3(0.10 * (-warmth), 0.02 * (-warmth), -0.08 * (-warmth));
 
-  float inkDensity = 0.65 + u_sootDensity * 1.45;
+  // Optical density is locked so changing Ink Concentration never retroactively alters existing strokes
+  float inkDensity = 1.781;
   vec3 K_dry = layerK(dryPig, warmShift) * 2.35 * inkDensity;
   vec3 K_wet = (layerK(porePig, warmShift) * 2.15 + layerK(surfPig, warmShift) * 1.85) * inkDensity;
   vec3 K_total = K_dry + K_wet;
@@ -1172,37 +1279,53 @@ export class GpuSumiSolver {
     this.locUnpremult = u(this.progUnpremult, ['u_tex']);
     this.locBristle = u(this.progBristle, ['u_invWorkRes']);
     this.locRewet = u(this.progRewet, [
-      'u_stamp', 'u_surfPig', 'u_dryPig', 'u_waterCharge', 'u_sizing'
+      'u_stamp', 'u_surfPig', 'u_dryPig', 'u_waterCharge', 'u_sizing', 'u_inkAffection'
     ]);
     this.locApply = u(this.progBrushApply, [
-      'u_stamp', 'u_surf', 'u_surfPig', 'u_vel', 'u_strokeCov', 'u_surfaceMap',
-      'u_hasSurface', 'u_surfaceInvScale', 'u_sizing', 'u_coarseness', 'u_surfSlip', 'u_surfChannel',
-      'u_mode', 'u_workOrigin', 'u_brushVel', 'u_pressure', 'u_inkConcentration', 'u_waterCharge',
+      'u_stamp', 'u_surf', 'u_surfPig', 'u_vel', 'u_strokeCov', 'u_surfaceMap', 'u_poreMap',
+      'u_hasSurface', 'u_useHeightmap', 'u_heightSource', 'u_surfaceInvScale',
+      'u_surfaceBiomeMix', 'u_surfaceAllowRotate', 'u_surfaceScaleSpread',
+      'u_sizing', 'u_coarseness', 'u_surfSlip', 'u_surfChannel',
+      'u_mode', 'u_workOrigin', 'u_brushVel', 'u_pressure', 'u_inkConcentration', 'u_inkAffection', 'u_waterCharge',
       'u_glueVisc', 'u_pigmentK', 'u_physicalMix', 'u_strokeId'
     ]);
     this.locVelAdv = u(this.progVelAdvect, [
-      'u_vel', 'u_surf', 'u_surfaceMap', 'u_hasSurface', 'u_surfaceInvScale',
+      'u_vel', 'u_surf', 'u_surfaceMap', 'u_poreMap', 'u_baseBg',
+      'u_hasSurface', 'u_useHeightmap', 'u_heightSource', 'u_surfaceInvScale',
+      'u_surfaceBiomeMix', 'u_surfaceAllowRotate', 'u_surfaceScaleSpread',
       'u_sizing', 'u_coarseness', 'u_surfSlip', 'u_surfChannel', 'u_texel', 'u_uvClamp', 'u_workOrigin', 'u_dt', 'u_glueVisc'
     ]);
     this.locDiv = u(this.progDiv, ['u_vel', 'u_texel', 'u_uvClamp']);
     this.locPress = u(this.progPress, ['u_press', 'u_div', 'u_texel', 'u_uvClamp']);
     this.locGradSub = u(this.progGradSub, ['u_press', 'u_vel', 'u_texel', 'u_uvClamp']);
     this.locSurfStep = u(this.progSurfStep, ['u_surf', 'u_surfPig', 'u_vel', 'u_texel', 'u_uvClamp', 'u_dt', 'u_backrunRim', 'u_evapRate', 'u_forceDry']);
-    this.locBaseStep = u(this.progBaseStep, ['u_baseBg', 'u_surf', 'u_vel', 'u_texel', 'u_uvClamp', 'u_dt', 'u_glueVisc', 'u_alphaLock']);
+    this.locBaseStep = u(this.progBaseStep, [
+      'u_baseBg', 'u_surf', 'u_vel', 'u_pore', 'u_surfaceMap', 'u_poreMap',
+      'u_hasSurface', 'u_useHeightmap', 'u_heightSource', 'u_surfaceInvScale',
+      'u_surfaceBiomeMix', 'u_surfaceAllowRotate', 'u_surfaceScaleSpread',
+      'u_sizing', 'u_coarseness',
+      'u_texel', 'u_uvClamp', 'u_workOrigin', 'u_dt', 'u_glueVisc', 'u_alphaLock'
+    ]);
     this.locSurfSeep = u(this.progSurfSeep, [
-      'u_surf', 'u_surfPig', 'u_pore', 'u_porePig', 'u_surfaceMap',
-      'u_hasSurface', 'u_surfaceInvScale', 'u_sizing', 'u_coarseness', 'u_seepRate', 'u_sootSnag',
+      'u_surf', 'u_surfPig', 'u_pore', 'u_porePig', 'u_surfaceMap', 'u_poreMap',
+      'u_hasSurface', 'u_useHeightmap', 'u_heightSource', 'u_surfaceInvScale',
+      'u_surfaceBiomeMix', 'u_surfaceAllowRotate', 'u_surfaceScaleSpread',
+      'u_sizing', 'u_coarseness', 'u_seepRate', 'u_sootSnag',
       'u_workOrigin', 'u_dt', 'u_forceDry'
     ]);
     this.locPerc = u(this.progPerc, [
-      'u_surf', 'u_surfPig', 'u_pore', 'u_porePig', 'u_dryPig', 'u_surfaceMap',
-      'u_hasSurface', 'u_surfaceInvScale', 'u_sizing', 'u_coarseness', 'u_capillarity',
+      'u_surf', 'u_surfPig', 'u_pore', 'u_porePig', 'u_dryPig', 'u_surfaceMap', 'u_poreMap',
+      'u_hasSurface', 'u_useHeightmap', 'u_heightSource', 'u_surfaceInvScale',
+      'u_surfaceBiomeMix', 'u_surfaceAllowRotate', 'u_surfaceScaleSpread',
+      'u_sizing', 'u_coarseness', 'u_capillarity',
       'u_evapRate', 'u_sootSnag', 'u_texel', 'u_uvClamp', 'u_workOrigin', 'u_dt', 'u_forceDry'
     ]);
     this.locComp = u(this.progComp, [
-      'u_surf', 'u_surfPig', 'u_pore', 'u_porePig', 'u_dryPig', 'u_baseBg', 'u_surfaceMap',
-      'u_hasSurface', 'u_surfaceInvScale', 'u_coarseness', 'u_sizing', 'u_workOrigin',
-      'u_sootDensity', 'u_inkWarmth', 'u_alphaLock'
+      'u_surf', 'u_surfPig', 'u_pore', 'u_porePig', 'u_dryPig', 'u_baseBg', 'u_surfaceMap', 'u_poreMap',
+      'u_hasSurface', 'u_useHeightmap', 'u_heightSource', 'u_surfaceInvScale',
+      'u_surfaceBiomeMix', 'u_surfaceAllowRotate', 'u_surfaceScaleSpread',
+      'u_coarseness', 'u_sizing', 'u_workOrigin',
+      'u_inkWarmth', 'u_alphaLock'
     ]);
 
     this.ready = true;
@@ -1224,6 +1347,7 @@ export class GpuSumiSolver {
       tx: 0, ty: 0, wx: 0, wy: 0,
       cpuDirty: false, dirty: false,
       minX: TILE_SIZE, minY: TILE_SIZE, maxX: 0, maxY: 0,
+      wetTicks: 0,
       lastUsed: 0
     };
   }
@@ -1243,6 +1367,7 @@ export class GpuSumiSolver {
       if (this.tilePool.length < MAX_POOL_TILES) {
         tile.cpuDirty = false;
         tile.dirty = false;
+        tile.wetTicks = 0;
         tile.minX = TILE_SIZE;
         tile.minY = TILE_SIZE;
         tile.maxX = 0;
@@ -1287,6 +1412,7 @@ export class GpuSumiSolver {
     this.activeTiles.delete(`${oldest.tx},${oldest.ty}`);
     oldest.cpuDirty = false;
     oldest.dirty = false;
+    oldest.wetTicks = 0;
     oldest.minX = TILE_SIZE;
     oldest.minY = TILE_SIZE;
     oldest.maxX = 0;
@@ -1320,6 +1446,7 @@ export class GpuSumiSolver {
     tile.wy = ty * TILE_SIZE;
     tile.cpuDirty = false;
     tile.dirty = false;
+    tile.wetTicks = 0;
     tile.minX = TILE_SIZE;
     tile.minY = TILE_SIZE;
     tile.maxX = 0;
@@ -1547,7 +1674,7 @@ export class GpuSumiSolver {
 
     for (let cx = sCX; cx <= eCX; cx++) {
       for (let cy = sCY; cy <= eCY; cy++) {
-        const chunk = engine.isStatic ? engine._getChunk(0, 0) : engine.chunks.get(`${cx},${cy}`);
+        const chunk = engine.isStatic ? engine._getChunk(0, 0) : engine._getChunk(cx, cy);
         if (!chunk) continue;
 
         if (!chunk.gpuTextures) chunk.gpuTextures = new Array(engine.layerSettings.length).fill(null);
@@ -1621,16 +1748,29 @@ export class GpuSumiSolver {
     const sp = surfMgr ? surfMgr.getSumiPhysicsParams() : null;
     const hasSurface = !!(sp && sp.active);
     let mapTex = null;
+    let poreTex = null;
     if (hasSurface) {
-      mapTex = surfMgr.ensureGpuTextures(gl).mapTex;
+      const texes = surfMgr.ensureGpuTextures(gl);
+      mapTex = texes.mapTex;
+      poreTex = texes.poreTex;
     }
     if (locs.u_surfaceMap) {
       gl.activeTexture(gl.TEXTURE6);
       gl.bindTexture(gl.TEXTURE_2D, mapTex || this.dummyTex);
       gl.uniform1i(locs.u_surfaceMap, 6);
     }
+    if (locs.u_poreMap) {
+      gl.activeTexture(gl.TEXTURE7);
+      gl.bindTexture(gl.TEXTURE_2D, poreTex || mapTex || this.dummyTex);
+      gl.uniform1i(locs.u_poreMap, 7);
+    }
     if (locs.u_hasSurface) gl.uniform1i(locs.u_hasSurface, (hasSurface && mapTex) ? 1 : 0);
+    if (locs.u_useHeightmap) gl.uniform1i(locs.u_useHeightmap, params?.useHeightmap ? 1 : 0);
+    if (locs.u_heightSource) gl.uniform1i(locs.u_heightSource, params?.heightSource === 'layer' ? 1 : 0);
     if (locs.u_surfaceInvScale) gl.uniform1f(locs.u_surfaceInvScale, sp ? sp.invScale : (1.0 / 340.0));
+    if (locs.u_surfaceBiomeMix) gl.uniform1f(locs.u_surfaceBiomeMix, sp ? sp.biomeMix : 0.88);
+    if (locs.u_surfaceAllowRotate) gl.uniform1f(locs.u_surfaceAllowRotate, sp ? sp.allowRotate : 1.0);
+    if (locs.u_surfaceScaleSpread) gl.uniform1f(locs.u_surfaceScaleSpread, sp ? sp.scaleSpread : 1.0);
     if (locs.u_sizing) gl.uniform1f(locs.u_sizing, sp ? sp.sizing : 0.25);
     if (locs.u_coarseness) gl.uniform1f(locs.u_coarseness, sp ? sp.coarseness : 0.42);
     if (locs.u_surfSlip) gl.uniform1f(locs.u_surfSlip, sp ? sp.slip : 0.45);
@@ -1680,6 +1820,9 @@ export class GpuSumiSolver {
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, this.ppSurf.read().tex);
     gl.uniform1i(this.locVelAdv.u_surf, 1);
+    gl.activeTexture(gl.TEXTURE8);
+    gl.bindTexture(gl.TEXTURE_2D, this.ppBaseBg.read().tex);
+    gl.uniform1i(this.locVelAdv.u_baseBg, 8);
     this._bindSurfaceUniforms(this.locVelAdv, engine, params);
     gl.uniform2f(this.locVelAdv.u_texel, texel, texel);
     gl.uniform4f(this.locVelAdv.u_uvClamp, minU, minV, maxU, maxV);
@@ -1741,8 +1884,13 @@ export class GpuSumiSolver {
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, this.ppVel.read().tex);
     gl.uniform1i(this.locBaseStep.u_vel, 2);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.ppPore.read().tex);
+    gl.uniform1i(this.locBaseStep.u_pore, 3);
+    this._bindSurfaceUniforms(this.locBaseStep, engine, params);
     gl.uniform2f(this.locBaseStep.u_texel, texel, texel);
     gl.uniform4f(this.locBaseStep.u_uvClamp, minU, minV, maxU, maxV);
+    gl.uniform2f(this.locBaseStep.u_workOrigin, workX, workY);
     gl.uniform1f(this.locBaseStep.u_dt, dt);
     gl.uniform1f(this.locBaseStep.u_glueVisc, glueVisc);
     gl.uniform1i(this.locBaseStep.u_alphaLock, alphaLock);
@@ -1894,7 +2042,6 @@ export class GpuSumiSolver {
     this._bindSurfaceUniforms(this.locComp, engine, params);
     gl.uniform2f(this.locComp.u_workOrigin, workX, workY);
 
-    gl.uniform1f(this.locComp.u_sootDensity, (params?.ink ?? 78) / 100);
     gl.uniform1f(this.locComp.u_inkWarmth, (params?.warmth ?? 12) / 100);
     gl.uniform1i(this.locComp.u_alphaLock, alphaLock ? 1 : 0);
 
@@ -1903,9 +2050,6 @@ export class GpuSumiSolver {
 
   beginStrokeSession(engine, worldPos, params = {}) {
     if (!this.ready || !this.gl || this.gl.isContextLost()) return false;
-    if (params && typeof params === 'object') {
-      this.lastParams = { ...params };
-    }
     const layer = engine.activeLayer;
     const projId = engine.currentProjectId || 'default';
 
@@ -1914,6 +2058,9 @@ export class GpuSumiSolver {
     } else if (this.active && this._hasCpuDirty) {
       // Ensure previous stroke's finished idle bleed is synced to Canvas2D BEFORE new Undo snapshot is taken
       this.syncTilesToCanvas2D(engine, this.lastParams || {});
+    }
+    if (params && typeof params === 'object') {
+      this.lastParams = { ...params };
     }
 
     this.layer = layer;
@@ -1932,59 +2079,48 @@ export class GpuSumiSolver {
     return true;
   }
 
-  stampAndStep(engine, segments, modeInt, brushVelWorld, pressure, pigmentK, params) {
-    if (!this.ready || !this.active || !segments || segments.length === 0) return;
-    if (params && typeof params === 'object') this.lastParams = { ...params };
-    const gl = this.gl;
-    if (!gl || gl.isContextLost()) return;
-
-    const count = Math.min(MAX_INSTANCES, segments.length);
-    let segMinX = Infinity, segMinY = Infinity, segMaxX = -Infinity, segMaxY = -Infinity;
-    for (let i = 0; i < count; i++) {
-      const s = segments[i];
-      const pad = s.r + 28;
-      segMinX = Math.min(segMinX, s.x0 - pad, s.x1 - pad);
-      segMaxX = Math.max(segMaxX, s.x0 + pad, s.x1 + pad);
-      segMinY = Math.min(segMinY, s.y0 - pad, s.y1 - pad);
-      segMaxY = Math.max(segMaxY, s.y0 + pad, s.y1 + pad);
+  _markWetTilesInBounds(minX, minY, maxX, maxY, ticks = 540) {
+    const tx0 = Math.floor(minX / TILE_SIZE);
+    const tx1 = Math.floor(maxX / TILE_SIZE);
+    const ty0 = Math.floor(minY / TILE_SIZE);
+    const ty1 = Math.floor(maxY / TILE_SIZE);
+    for (let tx = tx0; tx <= tx1; tx++) {
+      for (let ty = ty0; ty <= ty1; ty++) {
+        const t = this.activeTiles.get(`${tx},${ty}`);
+        if (t) {
+          t.wetTicks = Math.max(t.wetTicks || 0, ticks);
+        }
+      }
     }
+  }
 
-    this.dirtyMinX = Math.min(this.dirtyMinX, segMinX);
-    this.dirtyMinY = Math.min(this.dirtyMinY, segMinY);
-    this.dirtyMaxX = Math.max(this.dirtyMaxX, segMaxX);
-    this.dirtyMaxY = Math.max(this.dirtyMaxY, segMaxY);
+  _boxHasWetTiles(x0, y0, x1, y1) {
+    const tx0 = Math.floor(x0 / TILE_SIZE);
+    const tx1 = Math.floor((x1 - 1) / TILE_SIZE);
+    const ty0 = Math.floor(y0 / TILE_SIZE);
+    const ty1 = Math.floor((y1 - 1) / TILE_SIZE);
+    for (let tx = tx0; tx <= tx1; tx++) {
+      for (let ty = ty0; ty <= ty1; ty++) {
+        const t = this.activeTiles.get(`${tx},${ty}`);
+        if (t && t.wetTicks > 0) return true;
+      }
+    }
+    return false;
+  }
 
-    this.wetMinX = Math.min(this.wetMinX, segMinX);
-    this.wetMinY = Math.min(this.wetMinY, segMinY);
-    this.wetMaxX = Math.max(this.wetMaxX, segMaxX);
-    this.wetMaxY = Math.max(this.wetMaxY, segMaxY);
-    this._focusX = (segMinX + segMaxX) * 0.5;
-    this._focusY = (segMinY + segMaxY) * 0.5;
-
-    const apron = 4;
-    const needMinX = Math.floor(Math.min(segMinX, Math.max(this.wetMinX, segMinX - 180)) - apron);
-    const needMinY = Math.floor(Math.min(segMinY, Math.max(this.wetMinY, segMinY - 180)) - apron);
-    const needMaxX = Math.ceil(Math.max(segMaxX, Math.min(this.wetMaxX, segMaxX + 180)) + apron);
-    const needMaxY = Math.ceil(Math.max(segMaxY, Math.min(this.wetMaxY, segMaxY + 180)) + apron);
-
-    const spanX = needMaxX - needMinX;
-    const spanY = needMaxY - needMinY;
-    const boxW = Math.min(WORK_RES, Math.max(32, spanX));
-    const boxH = Math.min(WORK_RES, Math.max(32, spanY));
-    const workX = spanX > WORK_RES ? Math.floor(this._focusX - boxW * 0.5) : needMinX;
-    const workY = spanY > WORK_RES ? Math.floor(this._focusY - boxH * 0.5) : needMinY;
-
-    engine.strokeMinX = Math.min(engine.strokeMinX ?? Infinity, workX + apron);
-    engine.strokeMaxX = Math.max(engine.strokeMaxX ?? -Infinity, workX + boxW - apron);
-    engine.strokeMinY = Math.min(engine.strokeMinY ?? Infinity, workY + apron);
-    engine.strokeMaxY = Math.max(engine.strokeMaxY ?? -Infinity, workY + boxH - apron);
-
-    // Ensure overlapping chunks are backed up for Undo before any pixel changes
+  _stampAndStepWorkBox(engine, segments, count, workX, workY, boxW, boxH, apron, modeInt, brushVelWorld, pressure, pigmentK, params) {
+    const gl = this.gl;
     const layer = this.layer >= 0 ? this.layer : engine.activeLayer;
-    const sCX = engine.isStatic ? 0 : Math.floor((workX + apron) / engine.chunkSize);
-    const eCX = engine.isStatic ? 0 : Math.floor((workX + boxW - apron - 1) / engine.chunkSize);
-    const sCY = engine.isStatic ? 0 : Math.floor((workY + apron) / engine.chunkSize);
-    const eCY = engine.isStatic ? 0 : Math.floor((workY + boxH - apron - 1) / engine.chunkSize);
+
+    // Ensure overlapping chunks exist & are backed up for Undo before any pixel changes
+    const innerX = workX + apron;
+    const innerY = workY + apron;
+    const innerW = Math.max(1, boxW - apron * 2);
+    const innerH = Math.max(1, boxH - apron * 2);
+    const sCX = engine.isStatic ? 0 : Math.floor(innerX / engine.chunkSize);
+    const eCX = engine.isStatic ? 0 : Math.floor((innerX + innerW - 1) / engine.chunkSize);
+    const sCY = engine.isStatic ? 0 : Math.floor(innerY / engine.chunkSize);
+    const eCY = engine.isStatic ? 0 : Math.floor((innerY + innerH - 1) / engine.chunkSize);
     for (let cx = sCX; cx <= eCX; cx++) {
       for (let cy = sCY; cy <= eCY; cy++) {
         const chunk = engine.isStatic ? engine._getChunk(0, 0) : engine._getChunk(cx, cy);
@@ -2042,7 +2178,9 @@ export class GpuSumiSolver {
 
     gl.disable(gl.BLEND);
 
-    // PASS 1B: On WATER mode, re-wet fixed dryPig into mobile surfPig
+    const inkAffection = (params?.inkAffection ?? 35) / 100;
+
+    // PASS 1B: On WATER mode, re-wet fixed dryPig into mobile surfPig scaled by u_inkAffection
     if (modeInt === 1) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.mrtFbo);
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.ppSurfPig.write().tex, 0);
@@ -2064,6 +2202,7 @@ export class GpuSumiSolver {
       gl.uniform1f(this.locRewet.u_waterCharge, (params?.water ?? 65) / 100);
       const sp = engine?.surfaceManager ? engine.surfaceManager.getSumiPhysicsParams() : null;
       gl.uniform1f(this.locRewet.u_sizing, sp ? sp.sizing : 0.25);
+      gl.uniform1f(this.locRewet.u_inkAffection, inkAffection);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
 
       this.ppSurfPig.swap();
@@ -2101,6 +2240,7 @@ export class GpuSumiSolver {
     gl.uniform2f(this.locApply.u_brushVel, brushVelWorld.x, brushVelWorld.y);
     gl.uniform1f(this.locApply.u_pressure, pressure);
     gl.uniform1f(this.locApply.u_inkConcentration, (params?.ink ?? 78) / 100);
+    gl.uniform1f(this.locApply.u_inkAffection, inkAffection);
     gl.uniform1f(this.locApply.u_waterCharge, (params?.water ?? 65) / 100);
     gl.uniform1f(this.locApply.u_glueVisc, (params?.glue ?? 42) / 100);
     gl.uniform3f(this.locApply.u_pigmentK, pigmentK[0], pigmentK[1], pigmentK[2]);
@@ -2122,8 +2262,78 @@ export class GpuSumiSolver {
     this._runPhysicsOnWorkBox(engine, workX, workY, boxW, boxH, 0.016, false, params);
     this._compositeWorkBox(engine, workX, workY, boxW, boxH, params);
     this._storeTilesAndBlitChunks(engine, tiles, workX, workY, boxW, boxH, apron);
+  }
+
+  stampAndStep(engine, segments, modeInt, brushVelWorld, pressure, pigmentK, params) {
+    if (!this.ready || !this.active || !segments || segments.length === 0) return;
+    if (params && typeof params === 'object') this.lastParams = { ...params };
+    const gl = this.gl;
+    if (!gl || gl.isContextLost()) return;
+
+    const count = Math.min(MAX_INSTANCES, segments.length);
+    let segMinX = Infinity, segMinY = Infinity, segMaxX = -Infinity, segMaxY = -Infinity;
+    for (let i = 0; i < count; i++) {
+      const s = segments[i];
+      const pad = s.r + 20;
+      segMinX = Math.min(segMinX, s.x0 - pad, s.x1 - pad);
+      segMaxX = Math.max(segMaxX, s.x0 + pad, s.x1 + pad);
+      segMinY = Math.min(segMinY, s.y0 - pad, s.y1 - pad);
+      segMaxY = Math.max(segMaxY, s.y0 + pad, s.y1 + pad);
+    }
+
+    this.dirtyMinX = Math.min(this.dirtyMinX, segMinX);
+    this.dirtyMinY = Math.min(this.dirtyMinY, segMinY);
+    this.dirtyMaxX = Math.max(this.dirtyMaxX, segMaxX);
+    this.dirtyMaxY = Math.max(this.dirtyMaxY, segMaxY);
+
+    this.wetMinX = Math.min(this.wetMinX, segMinX);
+    this.wetMinY = Math.min(this.wetMinY, segMinY);
+    this.wetMaxX = Math.max(this.wetMaxX, segMaxX);
+    this.wetMaxY = Math.max(this.wetMaxY, segMaxY);
+    this._focusX = (segMinX + segMaxX) * 0.5;
+    this._focusY = (segMinY + segMaxY) * 0.5;
+
+    const minX = Math.floor(segMinX);
+    const minY = Math.floor(segMinY);
+    const maxX = Math.ceil(segMaxX);
+    const maxY = Math.ceil(segMaxY);
+    const apron = 16;
+    const spanX = maxX - minX;
+    const spanY = maxY - minY;
+
+    engine.strokeMinX = Math.min(engine.strokeMinX ?? Infinity, minX);
+    engine.strokeMaxX = Math.max(engine.strokeMaxX ?? -Infinity, maxX);
+    engine.strokeMinY = Math.min(engine.strokeMinY ?? Infinity, minY);
+    engine.strokeMaxY = Math.max(engine.strokeMaxY ?? -Infinity, maxY);
+
+    if (spanX <= WORK_RES - apron * 2 && spanY <= WORK_RES - apron * 2) {
+      const boxW = Math.max(48, spanX + apron * 2);
+      const boxH = Math.max(48, spanY + apron * 2);
+      const workX = minX - apron;
+      const workY = minY - apron;
+      this._stampAndStepWorkBox(
+        engine, segments, count, workX, workY, boxW, boxH, apron,
+        modeInt, brushVelWorld, pressure, pigmentK, params
+      );
+    } else {
+      // Large brush/swipe: tile stamp seamlessly across overlapping sub-boxes without clipping
+      const STEP_SPAN = 640;
+      for (let x = minX; x < maxX; x += STEP_SPAN) {
+        for (let y = minY; y < maxY; y += STEP_SPAN) {
+          const innerW = Math.min(STEP_SPAN, maxX - x);
+          const innerH = Math.min(STEP_SPAN, maxY - y);
+          const boxW = Math.min(WORK_RES, Math.max(48, innerW + apron * 2));
+          const boxH = Math.min(WORK_RES, Math.max(48, innerH + apron * 2));
+          this._stampAndStepWorkBox(
+            engine, segments, count, x - apron, y - apron, boxW, boxH, apron,
+            modeInt, brushVelWorld, pressure, pigmentK, params
+          );
+        }
+      }
+    }
 
     this.simActiveFrames = 540;
+    this._markWetTilesInBounds(minX - 64, minY - 64, maxX + 64, maxY + 64, 540);
   }
 
   stepSimulation(engine, dt = 0.016, forceDry = false, params = {}) {
@@ -2134,31 +2344,89 @@ export class GpuSumiSolver {
     if (!gl || gl.isContextLost()) return;
     if (this.wetMaxX <= this.wetMinX || this.wetMaxY <= this.wetMinY) return;
 
-    const apron = 4;
-    if (this.simActiveFrames > 340 && (this.simActiveFrames % 4) === 0) {
+    if (this.simActiveFrames > 180 && (this.simActiveFrames % 3) === 0) {
       this.wetMinX -= 1;
       this.wetMinY -= 1;
       this.wetMaxX += 1;
       this.wetMaxY += 1;
     }
-    this.dirtyMinX = Math.min(this.dirtyMinX, this.wetMinX);
-    this.dirtyMinY = Math.min(this.dirtyMinY, this.wetMinY);
-    this.dirtyMaxX = Math.max(this.dirtyMaxX, this.wetMaxX);
-    this.dirtyMaxY = Math.max(this.dirtyMaxY, this.wetMaxY);
 
-    const spanX = Math.ceil(this.wetMaxX - this.wetMinX) + apron * 2;
-    const spanY = Math.ceil(this.wetMaxY - this.wetMinY) + apron * 2;
-    const boxW = Math.min(WORK_RES, Math.max(32, spanX));
-    const boxH = Math.min(WORK_RES, Math.max(32, spanY));
-    const workX = spanX > WORK_RES ? Math.floor(this._focusX - boxW * 0.5) : Math.floor(this.wetMinX - apron);
-    const workY = spanY > WORK_RES ? Math.floor(this._focusY - boxH * 0.5) : Math.floor(this.wetMinY - apron);
+    // Tight bounds of tiles that are still actively wet (so dried far strokes cost zero time)
+    let actMinX = Infinity, actMinY = Infinity, actMaxX = -Infinity, actMaxY = -Infinity;
+    this.activeTiles.forEach((t) => {
+      if (t.wetTicks > 0) {
+        if (t.wx < actMinX) actMinX = t.wx;
+        if (t.wy < actMinY) actMinY = t.wy;
+        if (t.wx + TILE_SIZE > actMaxX) actMaxX = t.wx + TILE_SIZE;
+        if (t.wy + TILE_SIZE > actMaxY) actMaxY = t.wy + TILE_SIZE;
+      }
+    });
+    if (actMaxX <= actMinX || actMaxY <= actMinY) return;
 
-    const tiles = this._assembleWorkBox(engine, workX, workY, boxW, boxH);
-    if (tiles.length === 0) return;
+    const minX = Math.max(Math.floor(this.wetMinX), actMinX);
+    const minY = Math.max(Math.floor(this.wetMinY), actMinY);
+    const maxX = Math.min(Math.ceil(this.wetMaxX), actMaxX);
+    const maxY = Math.min(Math.ceil(this.wetMaxY), actMaxY);
+    if (maxX <= minX || maxY <= minY) return;
 
-    this._runPhysicsOnWorkBox(engine, workX, workY, boxW, boxH, dt, forceDry, activeParams);
-    this._compositeWorkBox(engine, workX, workY, boxW, boxH, activeParams);
-    this._storeTilesAndBlitChunks(engine, tiles, workX, workY, boxW, boxH, apron);
+    this.dirtyMinX = Math.min(this.dirtyMinX, minX);
+    this.dirtyMinY = Math.min(this.dirtyMinY, minY);
+    this.dirtyMaxX = Math.max(this.dirtyMaxX, maxX);
+    this.dirtyMaxY = Math.max(this.dirtyMaxY, maxY);
+
+    const apron = 20;
+    const spanX = maxX - minX;
+    const spanY = maxY - minY;
+
+    if (spanX <= WORK_RES - apron * 2 && spanY <= WORK_RES - apron * 2) {
+      const boxW = Math.min(WORK_RES, Math.max(48, spanX + apron * 2));
+      const boxH = Math.min(WORK_RES, Math.max(48, spanY + apron * 2));
+      const workX = minX - apron;
+      const workY = minY - apron;
+      const tiles = this._assembleWorkBox(engine, workX, workY, boxW, boxH);
+      if (tiles.length > 0) {
+        this._runPhysicsOnWorkBox(engine, workX, workY, boxW, boxH, dt, forceDry, activeParams);
+        this._compositeWorkBox(engine, workX, workY, boxW, boxH, activeParams);
+        this._storeTilesAndBlitChunks(engine, tiles, workX, workY, boxW, boxH, apron);
+      }
+    } else {
+      // Multi-box symmetric Gauss-Seidel sweep across ALL wet regions > 728px (no 768px freeze seams)
+      const STEP_SPAN = 640;
+      const xs = [];
+      for (let x = minX; x < maxX; x += STEP_SPAN) xs.push(x);
+      const ys = [];
+      for (let y = minY; y < maxY; y += STEP_SPAN) ys.push(y);
+      if ((this.simActiveFrames & 1) === 1) {
+        xs.reverse();
+        ys.reverse();
+      }
+
+      for (let xi = 0; xi < xs.length; xi++) {
+        const x = xs[xi];
+        const innerW = Math.min(STEP_SPAN, maxX - x);
+        const boxW = Math.min(WORK_RES, Math.max(48, innerW + apron * 2));
+        const workX = x - apron;
+        for (let yi = 0; yi < ys.length; yi++) {
+          const y = ys[yi];
+          const innerH = Math.min(STEP_SPAN, maxY - y);
+          const boxH = Math.min(WORK_RES, Math.max(48, innerH + apron * 2));
+          const workY = y - apron;
+
+          if (!this._boxHasWetTiles(x, y, x + innerW, y + innerH)) continue;
+
+          const tiles = this._assembleWorkBox(engine, workX, workY, boxW, boxH);
+          if (tiles.length === 0) continue;
+
+          this._runPhysicsOnWorkBox(engine, workX, workY, boxW, boxH, dt, forceDry, activeParams);
+          this._compositeWorkBox(engine, workX, workY, boxW, boxH, activeParams);
+          this._storeTilesAndBlitChunks(engine, tiles, workX, workY, boxW, boxH, apron);
+        }
+      }
+    }
+
+    this.activeTiles.forEach((t) => {
+      if (t.wetTicks > 0) t.wetTicks--;
+    });
   }
 
   hasCpuDirtyTiles() {
@@ -2211,7 +2479,6 @@ export class GpuSumiSolver {
     gl.uniform1i(this.locComp.u_baseBg, 5);
     this._bindSurfaceUniforms(this.locComp, engine, params);
     gl.uniform2f(this.locComp.u_workOrigin, t.wx, t.wy);
-    gl.uniform1f(this.locComp.u_sootDensity, (params?.ink ?? 78) / 100);
     gl.uniform1f(this.locComp.u_inkWarmth, (params?.warmth ?? 12) / 100);
     gl.uniform1i(this.locComp.u_alphaLock, alphaLock ? 1 : 0);
     gl.drawArrays(gl.TRIANGLES, 0, 6);

@@ -28,6 +28,9 @@ export const SURFACE_PRESETS = {
     backrun: 0.55,
     scale: 320,
     bgOpacity: 0.00,
+    biomeMix: 0.00,
+    allowRotate: 1.0,
+    scaleSpread: 1.0,
     tint: [255, 255, 255]
   },
   raw_xuan: {
@@ -47,6 +50,9 @@ export const SURFACE_PRESETS = {
     backrun: 0.66,
     scale: 340,
     bgOpacity: 0.66,
+    biomeMix: 0.88,
+    allowRotate: 1.0,
+    scaleSpread: 1.0,
     tint: [245, 240, 228]
   },
   half_xuan: {
@@ -66,6 +72,9 @@ export const SURFACE_PRESETS = {
     backrun: 0.72,
     scale: 320,
     bgOpacity: 0.62,
+    biomeMix: 0.88,
+    allowRotate: 1.0,
+    scaleSpread: 1.0,
     tint: [246, 242, 232]
   },
   sized_xuan: {
@@ -85,6 +94,9 @@ export const SURFACE_PRESETS = {
     backrun: 0.86,
     scale: 300,
     bgOpacity: 0.56,
+    biomeMix: 0.88,
+    allowRotate: 1.0,
+    scaleSpread: 1.0,
     tint: [248, 245, 238]
   },
   hemp: {
@@ -104,6 +116,9 @@ export const SURFACE_PRESETS = {
     backrun: 0.60,
     scale: 380,
     bgOpacity: 0.72,
+    biomeMix: 0.90,
+    allowRotate: 1.0,
+    scaleSpread: 1.0,
     tint: [236, 228, 210]
   },
   paper: {
@@ -123,6 +138,9 @@ export const SURFACE_PRESETS = {
     backrun: 0.70,
     scale: 340,
     bgOpacity: 0.62,
+    biomeMix: 0.88,
+    allowRotate: 1.0,
+    scaleSpread: 1.0,
     tint: [242, 236, 224]
   },
   canvas: {
@@ -142,6 +160,9 @@ export const SURFACE_PRESETS = {
     backrun: 0.54,
     scale: 240,
     bgOpacity: 0.68,
+    biomeMix: 0.75,
+    allowRotate: 0.0,
+    scaleSpread: 0.06,
     tint: [243, 238, 226]
   },
   wood: {
@@ -161,6 +182,9 @@ export const SURFACE_PRESETS = {
     backrun: 0.58,
     scale: 420,
     bgOpacity: 0.72,
+    biomeMix: 0.82,
+    allowRotate: 0.0,
+    scaleSpread: 0.22,
     tint: [222, 195, 160]
   },
   stone: {
@@ -180,6 +204,9 @@ export const SURFACE_PRESETS = {
     backrun: 0.74,
     scale: 380,
     bgOpacity: 0.74,
+    biomeMix: 0.88,
+    allowRotate: 1.0,
+    scaleSpread: 1.0,
     tint: [212, 210, 204]
   },
   cloth: {
@@ -199,6 +226,9 @@ export const SURFACE_PRESETS = {
     backrun: 0.50,
     scale: 210,
     bgOpacity: 0.70,
+    biomeMix: 0.75,
+    allowRotate: 0.0,
+    scaleSpread: 0.06,
     tint: [232, 226, 214]
   },
   ceramic: {
@@ -218,6 +248,9 @@ export const SURFACE_PRESETS = {
     backrun: 0.82,
     scale: 360,
     bgOpacity: 0.58,
+    biomeMix: 0.85,
+    allowRotate: 1.0,
+    scaleSpread: 0.85,
     tint: [245, 246, 242]
   },
   glass: {
@@ -237,6 +270,9 @@ export const SURFACE_PRESETS = {
     backrun: 0.68,
     scale: 400,
     bgOpacity: 0.44,
+    biomeMix: 0.85,
+    allowRotate: 1.0,
+    scaleSpread: 1.0,
     tint: [234, 243, 248]
   },
   custom: {
@@ -256,6 +292,9 @@ export const SURFACE_PRESETS = {
     backrun: 0.66,
     scale: 380,
     bgOpacity: 0.78,
+    biomeMix: 0.78,
+    allowRotate: 0.0,
+    scaleSpread: 0.16,
     tint: [255, 255, 255]
   }
 };
@@ -273,38 +312,38 @@ function smoothstep(e0, e1, x) {
   return t * t * (3.0 - 2.0 * t);
 }
 
-// Fast integer spatial hash [0..1)
+// Fast 32-bit integer spatial hash [0..1) using native Math.imul
 function hash2i(ix, iy, seed) {
-  let h = (ix * 374761393 + iy * 668265263 + seed * 1442695041) | 0;
-  h = ((h ^ (h >>> 13)) * 1274126177) | 0;
+  let h = (Math.imul(ix, 374761393) + Math.imul(iy, 668265263) + Math.imul(seed, 1442695041)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
   h = h ^ (h >>> 16);
-  return (h >>> 0) / 4294967296.0;
+  return (h >>> 0) * 2.3283064365386963e-10;
 }
 
 function hash1(i, seed) {
-  let h = (i * 1597334677 + seed * 3812015801) | 0;
-  h = ((h ^ (h >>> 15)) * 2246822519) | 0;
+  let h = (Math.imul(i, 1597334677) + Math.imul(seed, 3812015801)) | 0;
+  h = Math.imul(h ^ (h >>> 15), 2246822519);
   h = h ^ (h >>> 13);
-  return (h >>> 0) / 4294967296.0;
+  return (h >>> 0) * 2.3283064365386963e-10;
 }
 
 /**
  * Toroidal periodic value noise on [0..1) domain — repeats seamlessly at period boundary.
  */
 function torusNoise(u, v, period, seed) {
-  const px = u * period;
-  const py = v * period;
-  const x0 = Math.floor(px);
-  const y0 = Math.floor(py);
+  const px = (u + 16.0) * period;
+  const py = (v + 16.0) * period;
+  const x0 = px | 0;
+  const y0 = py | 0;
   const fx = px - x0;
   const fy = py - y0;
   const sx = fx * fx * (3.0 - 2.0 * fx);
   const sy = fy * fy * (3.0 - 2.0 * fy);
 
-  const ix0 = ((x0 % period) + period) % period;
-  const iy0 = ((y0 % period) + period) % period;
-  const ix1 = (ix0 + 1) % period;
-  const iy1 = (iy0 + 1) % period;
+  const ix0 = x0 % period;
+  const iy0 = y0 % period;
+  const ix1 = ix0 + 1 >= period ? 0 : ix0 + 1;
+  const iy1 = iy0 + 1 >= period ? 0 : iy0 + 1;
 
   const n00 = hash2i(ix0, iy0, seed);
   const n10 = hash2i(ix1, iy0, seed);
@@ -314,6 +353,46 @@ function torusNoise(u, v, period, seed) {
   const nx0 = n00 + (n10 - n00) * sx;
   const nx1 = n01 + (n11 - n01) * sx;
   return nx0 + (nx1 - nx0) * sy;
+}
+
+/**
+ * Independent anisotropic X/Y toroidal periodic noise on [0..1) domain.
+ */
+function torusNoise2(u, v, perX, perY, seed) {
+  const px = (u + 16.0) * perX;
+  const py = (v + 16.0) * perY;
+  const x0 = px | 0;
+  const y0 = py | 0;
+  const fx = px - x0;
+  const fy = py - y0;
+  const sx = fx * fx * (3.0 - 2.0 * fx);
+  const sy = fy * fy * (3.0 - 2.0 * fy);
+
+  const ix0 = x0 % perX;
+  const iy0 = y0 % perY;
+  const ix1 = ix0 + 1 >= perX ? 0 : ix0 + 1;
+  const iy1 = iy0 + 1 >= perY ? 0 : iy0 + 1;
+
+  const n00 = hash2i(ix0, iy0, seed);
+  const n10 = hash2i(ix1, iy0, seed);
+  const n01 = hash2i(ix0, iy1, seed);
+  const n11 = hash2i(ix1, iy1, seed);
+
+  const nx0 = n00 + (n10 - n00) * sx;
+  const nx1 = n01 + (n11 - n01) * sx;
+  return nx0 + (nx1 - nx0) * sy;
+}
+
+/**
+ * Integer-rotated anisotropic billow ridge bast fiber layer (100% seamless on [0..1)^2).
+ * Produces sinuous crisscrossing bast strands like sumi-test when given domain-warped (wu, wv).
+ */
+function torusBastFiber(wu, wv, kx, ky, perLong, perAcross, ridgePow, seed) {
+  const s = kx * wu + ky * wv;
+  const t = -ky * wu + kx * wv;
+  const n = torusNoise2(s, t, perLong, perAcross, seed);
+  const ridge = 1.0 - Math.abs(n * 2.0 - 1.0);
+  return ridge * ridge;
 }
 
 function torusFbm(u, v, basePeriod, octaves, seed) {
@@ -433,11 +512,14 @@ function finalizeSurfaceMaps(res, heightBuf, crackBuf, speckR, speckG, speckB, s
   const len = res * res;
   const mapRgba = new Uint8Array(len * 4);
   const colorRgba = new Uint8Array(len * 4);
+  const poreRgba = new Uint8Array(len * 4);
   const invert = !!opts.invertHeight;
   const slopeGain = opts.slopeGain !== undefined ? opts.slopeGain : 2.6;
   const shadeStrength = opts.shadeStrength !== undefined ? opts.shadeStrength : 0.22;
   const crackAoStrength = opts.crackAoStrength !== undefined ? opts.crackAoStrength : 0.28;
   const srcAlbedoRgba = opts.srcAlbedoRgba || null;
+  const poreBuf = opts.poreBuf || null;
+  const fiberBuf = opts.fiberBuf || null;
 
   // Compute robust percentile range [p2..p98] in O(N) so dynamic range fills 0..1 cleanly
   const hist = new Uint32Array(256);
@@ -483,7 +565,13 @@ function finalizeSurfaceMaps(res, heightBuf, crackBuf, speckR, speckG, speckB, s
     heightBuf[i] = hn;
   }
 
-  // Pass 5 & 6: Toroidal 3x3 Sobel Normal + Cavity + Lit Surface Albedo
+  // Compute macro-smoothed height field so Albedo leveling avoids muddy dark tile blotches
+  const macroHeight = new Float32Array(len);
+  const blurTmp = new Float32Array(len);
+  const macroR = Math.max(6, Math.round(res * 0.055));
+  boxBlurToroidal(heightBuf, macroHeight, blurTmp, res, res, macroR);
+
+  // Pass 5 & 6: Toroidal 3x3 Sobel Normal + Cavity + Pores/Fibers + Lit Surface Albedo
   const tr = tintRgb[0];
   const tg = tintRgb[1];
   const tb = tintRgb[2];
@@ -515,16 +603,27 @@ function finalizeSurfaceMaps(res, heightBuf, crackBuf, speckR, speckG, speckB, s
       const gy = ((bl + 2.0 * bc + br) - (tl + 2.0 * tc + trH)) * 0.25 * slopeGain;
 
       const cBase = crackBuf ? crackBuf[idx] : 0.0;
-      const cavity = clamp01(Math.max(cBase, smoothstep(0.50, 0.08, h) * 0.85));
+      const cavity = clamp01(Math.max(cBase, smoothstep(0.48, 0.08, h) * 0.82));
 
       mapRgba[idx4] = clampByte(h * 255.0);
       mapRgba[idx4 + 1] = clampByte((clamp01(gx * 0.5 + 0.5)) * 255.0);
       mapRgba[idx4 + 2] = clampByte((clamp01(gy * 0.5 + 0.5)) * 255.0);
       mapRgba[idx4 + 3] = clampByte(cavity * 255.0);
 
+      const fib = fiberBuf ? clamp01(fiberBuf[idx]) : h;
+      const openPore = poreBuf ? clamp01(poreBuf[idx]) : clamp01(Math.max(cBase, 1.0 - h * 0.72) * 0.78);
+      poreRgba[idx4] = clampByte(fib * 255.0);
+      poreRgba[idx4 + 1] = clampByte(openPore * 255.0);
+      poreRgba[idx4 + 2] = clampByte(clamp01(fib * 0.72 + (1.0 - openPore) * 0.28) * 255.0);
+      poreRgba[idx4 + 3] = clampByte(clamp01(0.45 + (fib - 0.5) * 0.65 - cavity * 0.12) * 255.0);
+
+      // High-pass balanced height for crisp background albedo without dark low-frequency repeating blobs
+      const hDetail = h - macroHeight[idx];
+      const hBalanced = 0.5 + hDetail * 0.90 + (macroHeight[idx] - 0.5) * 0.18;
+
       // Directional surface shading (-0.65, -0.76) from top-left light source
       const ndotl = -gx * 0.65 - gy * 0.76;
-      const shade = 1.0 + ndotl * shadeStrength - cavity * crackAoStrength * 0.45 + (h - 0.5) * shadeStrength * 0.45;
+      const shade = 1.0 + ndotl * shadeStrength - cavity * crackAoStrength * 0.38 + (hBalanced - 0.5) * shadeStrength * 0.55;
 
       let ar, ag, ab;
       if (srcAlbedoRgba) {
@@ -557,7 +656,7 @@ function finalizeSurfaceMaps(res, heightBuf, crackBuf, speckR, speckG, speckB, s
     }
   }
 
-  return { mapRgba, colorRgba };
+  return { mapRgba, colorRgba, poreRgba };
 }
 
 /**
@@ -574,6 +673,8 @@ export function generateProceduralSurface(type = 'paper', opts = {}) {
 
   const heightBuf = new Float32Array(len);
   const crackBuf = new Float32Array(len);
+  const fiberBuf = new Float32Array(len);
+  const poreBuf = new Float32Array(len);
   const speckR = new Float32Array(len);
   const speckG = new Float32Array(len);
   const speckB = new Float32Array(len);
@@ -587,7 +688,7 @@ export function generateProceduralSurface(type = 'paper', opts = {}) {
   const ceramicVor = type === 'ceramic' ? buildTorusVoronoiPoints(6, seed + 41) : null;
 
   const p1Start = performance.now();
-  // PASS 1 + PASS 2 + PASS 3 (Structure + Organic Undulation + Cracks/Creases)
+  // PASS 1 + PASS 2 + PASS 3 (Structure + Curved Domain-Warped Turbulence + Cracks/Pores)
   for (let y = 0; y < res; y++) {
     const v = y * invRes;
     const row = y * res;
@@ -596,112 +697,139 @@ export function generateProceduralSurface(type = 'paper', opts = {}) {
       const u = x * invRes;
       const idx = row + x;
 
-      // Pass 2 base multi-scale organic FBM field (toroidal, zero seams)
-      const macroFbm = torusFbm(u, v, 4, 3, seed + 7);
-      const midFbm = torusFbm(u, v, 16, 3, seed + 101);
+      // Multi-scale organic FBM + curved domain-warp coordinates (strictly toroidal)
+      const macroFbm = torusFbm(u, v, 4, 2, seed + 7);
+      const midFbm = torusNoise(u, v, 12, seed + 101) * 0.65 + torusNoise(u, v, 24, seed + 199) * 0.35;
       const fineNoise = torusNoise(u, v, 64, seed + 251);
+
+      const warpX = (macroFbm - 0.5) * 0.16;
+      const warpY = (torusFbm(u, v, 4, 2, seed + 43) - 0.5) * 0.16;
+      const wu = u + warpX;
+      const wv = v + warpY;
 
       let h = 0.5;
       let crack = 0.0;
+      let fib = 0.5;
+      let openPore = 0.35;
 
       if (type === 'raw_xuan' || type === 'half_xuan' || type === 'sized_xuan' || type === 'hemp') {
-        // Interwoven long bast fibers (toroidally tileable) + bamboo laid-screen rib marks
-        const fibFreqA = type === 'hemp' ? 14 : (type === 'sized_xuan' ? 20 : 16);
-        const fibFreqB = type === 'hemp' ? 12 : 18;
-        const fA = torusNoise(((u * 3.0 + v * 1.0) % 1.0 + 1.0) % 1.0, ((v * 18.0 - u * 6.0) % 1.0 + 1.0) % 1.0, fibFreqA, seed + 307);
-        const fB = torusNoise(((u * 2.0 - v * 2.0) % 1.0 + 1.0) % 1.0, ((u * 14.0 + v * 10.0) % 1.0 + 1.0) % 1.0, fibFreqB, seed + 419);
-        const fibStrands = Math.pow(clamp01(fA * 0.55 + fB * 0.45), type === 'hemp' ? 1.55 : 1.9);
-        // Horizontal laid bamboo screen lines (period 24 across tile)
-        const screenFreq = type === 'hemp' ? 16.0 : 28.0;
-        const laidScreen = 0.5 + 0.5 * Math.cos(v * Math.PI * 2.0 * screenFreq + (macroFbm - 0.5) * 0.8);
-        const chainLine = Math.pow(0.5 + 0.5 * Math.cos(u * Math.PI * 2.0 * 4.0), 8.0) * 0.14;
-        const deckle = torusFbm(u + macroFbm * 0.08, v + midFbm * 0.08, 12, 3, seed + 503);
-        const fiberGain = type === 'hemp' ? 0.50 : (type === 'sized_xuan' ? 0.20 : 0.36);
-        const screenGain = type === 'sized_xuan' ? 0.05 : 0.10;
-        h = deckle * 0.36 + fibStrands * fiberGain + fineNoise * 0.16 + laidScreen * screenGain + chainLine;
-        crack = smoothstep(0.42, 0.10, fibStrands * 0.7 + deckle * 0.3) * (type === 'hemp' ? 0.82 : 0.52);
+        // Organic curved bast fiber web matching sumi-test turbulence (zero vertical banding or lattice dots)
+        const coarseScale = type === 'hemp' ? 1 : 0;
+        const pL1 = type === 'sized_xuan' ? 3 : 2;
+        const pA1 = type === 'hemp' ? 8 : (type === 'sized_xuan' ? 13 : 10);
+        const f1 = torusBastFiber(wu, wv, 3, 1, pL1, pA1, 2.0, seed + 307);
+        const f2 = torusBastFiber(wu + 0.17, wv - 0.23, -1, 3, pL1, pA1, 2.0, seed + 419);
+        const f3 = torusBastFiber(wu - warpX * 0.35, wv + warpY * 0.35, 2, 3, pL1 + 1, pA1 + 3 + coarseScale, 2.0, seed + 503);
+        const f4 = torusBastFiber(wu + 0.31, wv + 0.11, 4, -1, pL1 + 2, pA1 + 5, 2.0, seed + 613);
+
+        const longFibers = clamp01(f1 * 0.32 + f2 * 0.32 + f3 * 0.22 + f4 * 0.14);
+        // Intra-tile natural pulp & fiber-pocket clusters (small/medium variation inside each sheet tile)
+        const pulpClusters = torusNoise(wu, wv, 16, seed + 709) * 0.65 + torusNoise(wu, wv, 32, seed + 823) * 0.35;
+        const sectorDensity = smoothstep(0.20, 0.82, macroFbm);
+
+        const fiberGain = type === 'hemp' ? 0.54 : (type === 'sized_xuan' ? 0.28 : 0.44);
+        const pulpGain = type === 'hemp' ? 0.28 : (type === 'sized_xuan' ? 0.38 : 0.34);
+        const microGain = type === 'sized_xuan' ? 0.20 : 0.16;
+
+        // Modulate fiber prominence gently across intra-tile sectors so clusters breathe organically
+        const modulatedFibers = longFibers * (0.76 + 0.44 * sectorDensity);
+        h = clamp01(modulatedFibers * fiberGain + pulpClusters * pulpGain + fineNoise * microGain + midFbm * 0.12);
+        crack = smoothstep(0.46, 0.10, longFibers * 0.68 + pulpClusters * 0.32) * (type === 'hemp' ? 0.80 : 0.48);
+        fib = clamp01(longFibers * 0.66 + pulpClusters * 0.22 + fineNoise * 0.12);
+        openPore = clamp01(((1.0 - longFibers * 0.68) * 0.62 + (1.0 - pulpClusters) * 0.38) * (1.0 - 0.78 * (preset.sizing ?? 0.35)) * (0.80 + 0.38 * (1.0 - sectorDensity)));
       } else if (type === 'paper') {
-        // Cold-press cotton fiber deckle lumps + faint horizontal sheet creases
-        const nWarp = macroFbm * 0.12;
-        const nFine = torusFbm(u + nWarp, v + nWarp * 0.6, 24, 3, seed + 313);
-        const tooth = torusFbm(u, v, 48, 2, seed + 409);
-        const creaseWarp = Math.sin(u * Math.PI * 2.0 * 1.0 + macroFbm * 2.5) * 0.028;
-        const creasePos = Math.abs(((v + creaseWarp + 0.25) % 1.0) - 0.5);
-        const creaseMask = smoothstep(0.012, 0.001, creasePos) * smoothstep(0.32, 0.72, midFbm);
-        h = 0.36 * macroFbm + 0.34 * nFine + 0.22 * tooth + 0.08 * fineNoise - creaseMask * 0.42;
-        crack = creaseMask * 0.85;
+        // Cold-press cotton pulp hills, intertwined short curved fibers & micro tooth pits
+        const f1 = torusBastFiber(wu, wv, 2, 1, 3, 10, 2.0, seed + 313);
+        const f2 = torusBastFiber(wu + 0.29, wv - 0.13, -1, 2, 3, 10, 2.0, seed + 409);
+        const fiberWeb = f1 * 0.5 + f2 * 0.5;
+        const cottonHills = torusFbm(wu, wv, 10, 3, seed + 521);
+        const tooth = torusFbm(wu, wv, 28, 2, seed + 641);
+        const pits = smoothstep(0.32, 0.08, cottonHills * 0.6 + tooth * 0.4);
+        h = cottonHills * 0.38 + tooth * 0.28 + fiberWeb * 0.22 + fineNoise * 0.12 - pits * 0.14;
+        crack = pits * 0.68;
+        fib = clamp01(fiberWeb * 0.52 + tooth * 0.34 + cottonHills * 0.14);
+        openPore = clamp01(pits * 0.55 + (1.0 - tooth) * 0.45);
       } else if (type === 'canvas') {
-        // Orthogonal woven linen warp & weft basket pattern
+        // Orthogonal woven linen warp & weft basket pattern with organic slub variation
         const warpFreq = 26.0;
-        const warpPhase = (u + (macroFbm - 0.5) * 0.012) * Math.PI * 2.0 * warpFreq;
-        const weftPhase = (v + (midFbm - 0.5) * 0.012) * Math.PI * 2.0 * warpFreq;
+        const warpPhase = (u + (macroFbm - 0.5) * 0.010) * Math.PI * 2.0 * warpFreq;
+        const weftPhase = (v + (midFbm - 0.5) * 0.010) * Math.PI * 2.0 * warpFreq;
+        const slub = 0.88 + 0.24 * torusNoise(u, v, 12, seed + 331);
         const tx = Math.cos(warpPhase);
         const ty = Math.cos(weftPhase);
         // Flatten crown and sharpen interstitial pockets like true primed linen
-        const threadX = Math.pow(Math.max(0.0, tx * 0.5 + 0.5), 0.72);
+        const threadX = Math.pow(Math.max(0.0, tx * 0.5 + 0.5), 0.72) * slub;
         const threadY = Math.pow(Math.max(0.0, ty * 0.5 + 0.5), 0.72);
         const basketCheck = Math.sin(warpPhase * 0.5) * Math.sin(weftPhase * 0.5);
-        const weave = Math.max(threadX, threadY) * 0.72 + (threadX * threadY) * 0.28 + basketCheck * 0.14;
+        const weave = Math.max(threadX, threadY) * 0.72 + (threadX * threadY) * 0.28 + basketCheck * 0.12;
         const pit = smoothstep(0.42, 0.08, weave);
-        h = weave * 0.74 + macroFbm * 0.14 + fineNoise * 0.12;
+        h = weave * 0.74 + midFbm * 0.12 + fineNoise * 0.14;
         crack = pit * 0.65;
+        fib = clamp01(h);
+        openPore = clamp01(pit * 0.75 + (1.0 - h) * 0.25);
       } else if (type === 'cloth') {
-        // Heavy 2/2 diagonal twill + fuzzy textile fibers
+        // Heavy 2/2 diagonal twill + fuzzy curved textile fibers
         const freq = 24.0;
-        const diagA = (2.0 * u + v + (macroFbm - 0.5) * 0.018) * Math.PI * 2.0 * freq;
-        const diagB = (u - 2.0 * v + (midFbm - 0.5) * 0.018) * Math.PI * 2.0 * freq;
+        const diagA = (2.0 * u + v + (macroFbm - 0.5) * 0.016) * Math.PI * 2.0 * freq;
+        const diagB = (u - 2.0 * v + (midFbm - 0.5) * 0.016) * Math.PI * 2.0 * freq;
         const ribA = Math.pow(Math.max(0.0, Math.cos(diagA) * 0.5 + 0.5), 0.65);
         const ribB = Math.pow(Math.max(0.0, Math.cos(diagB) * 0.5 + 0.5), 0.75);
         const twill = ribA * 0.62 + ribB * 0.38;
-        const fuzz = torusFbm(u * 1.5, v * 1.5, 48, 2, seed + 521);
-        h = twill * 0.65 + fuzz * 0.25 + macroFbm * 0.10;
+        const fuzz = torusFbm(wu, wv, 36, 2, seed + 521);
+        h = twill * 0.64 + fuzz * 0.26 + fineNoise * 0.10;
         crack = smoothstep(0.45, 0.12, twill) * 0.75;
+        fib = clamp01(h);
+        openPore = clamp01(crack * 0.75 + (1.0 - h) * 0.25);
       } else if (type === 'wood') {
-        // Stretched periodic timber rings + subtle oval knot + vessel pores
-        const ringWarp = (macroFbm - 0.5) * 0.26 + (midFbm - 0.5) * 0.07;
-        // Toroidal knot center around (0.35, 0.55)
-        let kdx = u - 0.35; if (kdx > 0.5) kdx -= 1.0; if (kdx < -0.5) kdx += 1.0;
-        let kdy = v - 0.55; if (kdy > 0.5) kdy -= 1.0; if (kdy < -0.5) kdy += 1.0;
-        const kDist = Math.hypot(kdx * 0.42, kdy * 1.6);
-        const knotPush = Math.exp(-kDist * kDist * 28.0) * 0.16;
-
-        const rVal = (v * 9.0 + ringWarp + knotPush) * Math.PI * 2.0;
-        const latewood = Math.pow(Math.sin(rVal) * 0.5 + 0.5, 1.8);
-        // Fine horizontal timber fibers stretched 8:1 along X
-        const fibers = torusNoise((u * 4.0) % 1.0, (v * 64.0) % 1.0, 16, seed + 619);
-        const vesselN = torusNoise((u * 3.0) % 1.0, (v * 40.0) % 1.0, 12, seed + 701);
+        // Stretched periodic timber rings with organic multi-wave warp & fine grain vessels
+        const ringWarp = (macroFbm - 0.5) * 0.32 + (midFbm - 0.5) * 0.09 + (torusNoise(u, v, 6, seed + 443) - 0.5) * 0.14;
+        const rVal = (v * 8.0 + ringWarp) * Math.PI * 2.0;
+        const latewood = Math.pow(Math.sin(rVal) * 0.5 + 0.5, 1.75);
+        // Fine horizontal curved timber fibers stretched along X
+        const fibers = torusNoise2(wu, wv, 4, 42, seed + 619);
+        const vesselN = torusNoise2(wu + 0.21, wv + 0.09, 3, 30, seed + 701);
         const pores = smoothstep(0.14, 0.02, vesselN) * (0.4 + 0.6 * latewood);
-        h = 0.42 + latewood * 0.34 + fibers * 0.18 + macroFbm * 0.08 - pores * 0.48;
-        crack = pores * 0.92;
+        h = 0.42 + latewood * 0.32 + fibers * 0.20 + midFbm * 0.08 - pores * 0.44;
+        crack = pores * 0.90;
+        fib = clamp01(0.35 + latewood * 0.35 + fibers * 0.30);
+        openPore = clamp01(pores * 0.85 + 0.15 * (1.0 - fibers));
       } else if (type === 'stone') {
         // Chiseled slate / travertine rock plateaus + sharp Voronoi fissures
-        const uW = (u + (macroFbm - 0.5) * 0.07 + 1.0) % 1.0;
-        const vW = (v + (midFbm - 0.5) * 0.07 + 1.0) % 1.0;
+        const uW = ((wu % 1.0) + 1.0) % 1.0;
+        const vW = ((wv % 1.0) + 1.0) % 1.0;
         const va = sampleTorusVoronoi(stoneVorA, uW, vW);
         const vb = sampleTorusVoronoi(stoneVorB, u, v);
         const majorCrack = smoothstep(0.055, 0.004, va.edge);
         const minorCrack = smoothstep(0.045, 0.005, vb.edge) * 0.55;
-        const plateau = va.tone * 0.24 + (1.0 - va.f1 * 0.35) * 0.25 + midFbm * 0.30 + fineNoise * 0.21;
-        h = plateau - majorCrack * 0.52 - minorCrack * 0.26;
+        const plateau = va.tone * 0.22 + (1.0 - va.f1 * 0.35) * 0.24 + midFbm * 0.32 + fineNoise * 0.22;
+        h = plateau - majorCrack * 0.50 - minorCrack * 0.25;
         crack = clamp01(majorCrack + minorCrack * 0.65);
+        fib = clamp01(h);
+        openPore = clamp01(crack * 0.82 + (1.0 - (preset.sizing ?? 0.7)) * 0.18);
       } else if (type === 'ceramic') {
         // Smooth porcelain glaze with subtle hairline craquelure fissures
-        const uW = (u + (macroFbm - 0.5) * 0.03 + 1.0) % 1.0;
-        const vW = (v + (midFbm - 0.5) * 0.03 + 1.0) % 1.0;
+        const uW = ((u + (macroFbm - 0.5) * 0.04) % 1.0 + 1.0) % 1.0;
+        const vW = ((v + (midFbm - 0.5) * 0.04) % 1.0 + 1.0) % 1.0;
         const vc = sampleTorusVoronoi(ceramicVor, uW, vW);
         const craze = smoothstep(0.024, 0.002, vc.edge);
-        const glazeWave = macroFbm * 0.38 + midFbm * 0.16 + 0.46;
+        const glazeWave = midFbm * 0.34 + macroFbm * 0.22 + 0.44;
         h = glazeWave - craze * 0.44;
         crack = craze * 0.90;
+        fib = clamp01(h);
+        openPore = clamp01(crack * 0.82 + (1.0 - (preset.sizing ?? 0.7)) * 0.18);
       } else if (type === 'glass') {
         // Ultra-smooth optical float ripple + faint micro silica texture
-        const wave = Math.sin((u * 2.0 + v * 1.0) * Math.PI * 2.0) * 0.06;
-        h = 0.50 + macroFbm * 0.28 + wave + fineNoise * 0.08;
+        const wave = Math.sin((wu * 2.0 + wv * 1.0) * Math.PI * 2.0) * 0.05;
+        h = 0.50 + midFbm * 0.28 + wave + fineNoise * 0.12;
         crack = 0.0;
+        fib = clamp01(h);
+        openPore = clamp01(crack * 0.82 + (1.0 - (preset.sizing ?? 0.7)) * 0.18);
       }
 
       heightBuf[idx] = h;
       crackBuf[idx] = crack;
+      fiberBuf[idx] = fib;
+      poreBuf[idx] = openPore;
     }
   }
 
@@ -769,7 +897,9 @@ export function generateProceduralSurface(type = 'paper', opts = {}) {
     invertHeight: !!opts.invertHeight,
     slopeGain,
     shadeStrength,
-    crackAoStrength
+    crackAoStrength,
+    fiberBuf,
+    poreBuf
   });
 
   const tEnd = performance.now();
@@ -778,6 +908,7 @@ export function generateProceduralSurface(type = 'paper', opts = {}) {
     height: res,
     colorRgba: packed.colorRgba,
     mapRgba: packed.mapRgba,
+    poreRgba: packed.poreRgba,
     heightBuf,
     genMs: Math.round((tEnd - tStart) * 10) / 10,
     passDetailMs: {
@@ -838,6 +969,8 @@ export function extractSurfaceFromRgba(srcRgba, width, height, opts = {}) {
   const tiledAlbedo = new Uint8Array(len * 4);
   const heightBuf = new Float32Array(len);
   const crackBuf = new Float32Array(len);
+  const fiberBuf = new Float32Array(len);
+  const poreBuf = new Float32Array(len);
   const half = res >> 1;
 
   for (let y = 0; y < height; y++) {
@@ -881,6 +1014,8 @@ export function extractSurfaceFromRgba(srcRgba, width, height, opts = {}) {
         const darkCrevice = clamp01((-relLum - 0.025) * 4.5);
         crackBuf[idx] = darkCrevice;
         heightBuf[idx] = 0.5 + relLum * 2.4 + (absLum - 0.5) * 0.30 - darkCrevice * 0.16;
+        fiberBuf[idx] = clamp01(0.5 + relLum * 2.8);
+        poreBuf[idx] = clamp01(0.22 + darkCrevice * 0.58 + Math.max(0.0, -relLum) * 1.4);
       } else {
         tiledAlbedo[idx4] = clampByte(rBuf[idx]);
         tiledAlbedo[idx4 + 1] = clampByte(gBuf[idx]);
@@ -891,6 +1026,8 @@ export function extractSurfaceFromRgba(srcRgba, width, height, opts = {}) {
         const darkCrevice = clamp01((-relLum - 0.025) * 4.5);
         crackBuf[idx] = darkCrevice;
         heightBuf[idx] = 0.5 + relLum * 2.4 + (lumBuf[idx] - 0.5) * 0.35 - darkCrevice * 0.16;
+        fiberBuf[idx] = clamp01(0.5 + relLum * 2.8);
+        poreBuf[idx] = clamp01(0.22 + darkCrevice * 0.58 + Math.max(0.0, -relLum) * 1.4);
       }
     }
   }
@@ -900,7 +1037,9 @@ export function extractSurfaceFromRgba(srcRgba, width, height, opts = {}) {
     slopeGain: 2.8,
     shadeStrength: 0.18,
     crackAoStrength: 0.15,
-    srcAlbedoRgba: tiledAlbedo
+    srcAlbedoRgba: tiledAlbedo,
+    fiberBuf,
+    poreBuf
   });
 
   const tEnd = performance.now();
@@ -909,6 +1048,7 @@ export function extractSurfaceFromRgba(srcRgba, width, height, opts = {}) {
     height,
     colorRgba: packed.colorRgba,
     mapRgba: packed.mapRgba,
+    poreRgba: packed.poreRgba,
     heightBuf,
     genMs: Math.round((tEnd - tStart) * 10) / 10
   };
@@ -942,6 +1082,7 @@ export class CanvasSurfaceManager {
     this.channel = 0.22;
     this.absorb = 0.74;
     this.bgOpacity = 0.62;
+    this.biomeMix = 0.88;
     this.seamless = true;
     this.invertHeight = false;
     this.seed = 1337;
@@ -953,16 +1094,19 @@ export class CanvasSurfaceManager {
     this.height = SURFACE_TILE_RES;
     this.colorRgba = null;
     this.mapRgba = null;
+    this.poreRgba = null;
     this.lastGenMs = 0;
     this.version = 0;
 
     this._colorCanvas = null;
     this._heightCanvas = null;
+    this._poreCanvas = null;
 
     // WebGL2 state bound per-context (rebuilt cleanly on context loss/restore)
     this._gl = null;
     this._glColorTex = null;
     this._glMapTex = null;
+    this._glPoreTex = null;
     this._uploadedVersion = -1;
   }
 
@@ -980,6 +1124,7 @@ export class CanvasSurfaceManager {
     this.absorb = p.absorb;
     this.scale = p.scale;
     this.bgOpacity = p.bgOpacity;
+    this.biomeMix = p.biomeMix !== undefined ? p.biomeMix : 0.88;
     this.rebuild();
   }
 
@@ -995,6 +1140,7 @@ export class CanvasSurfaceManager {
       this.absorb = p.absorb;
       this.scale = p.scale;
       this.bgOpacity = p.bgOpacity;
+      this.biomeMix = p.biomeMix !== undefined ? p.biomeMix : 0.78;
     }
     this.type = 'custom';
     this.rebuild();
@@ -1018,6 +1164,10 @@ export class CanvasSurfaceManager {
     if (this.type === 'none') {
       this.colorRgba = null;
       this.mapRgba = null;
+      this.poreRgba = null;
+      this._colorCanvas = null;
+      this._heightCanvas = null;
+      this._poreCanvas = null;
       this.lastGenMs = 0;
       this.version++;
       return;
@@ -1043,9 +1193,11 @@ export class CanvasSurfaceManager {
     this.height = result.height;
     this.colorRgba = result.colorRgba;
     this.mapRgba = result.mapRgba;
+    this.poreRgba = result.poreRgba || null;
     this.lastGenMs = result.genMs;
     this._colorCanvas = null;
     this._heightCanvas = null;
+    this._poreCanvas = null;
     this.version++;
   }
 
@@ -1088,20 +1240,46 @@ export class CanvasSurfaceManager {
     return this._heightCanvas;
   }
 
+  getPoreCanvas() {
+    if (!this.poreRgba) return null;
+    if (!this._poreCanvas) {
+      const len = this.width * this.height;
+      const vis = new Uint8Array(len * 4);
+      for (let i = 0; i < len; i++) {
+        const i4 = i * 4;
+        const fib = this.poreRgba[i4] / 255.0;
+        const openPore = this.poreRgba[i4 + 1] / 255.0;
+        const block = this.poreRgba[i4 + 2] / 255.0;
+        // High-clarity porous Xuan contrast like sumi-test: deep porous pockets & warm bast fibers
+        const vR = 26 + fib * 145 - openPore * 22 + block * 18;
+        const vG = 28 + fib * 150 + openPore * 18;
+        const vB = 26 + fib * 132 + openPore * 34;
+        vis[i4] = clampByte(vR);
+        vis[i4 + 1] = clampByte(vG);
+        vis[i4 + 2] = clampByte(vB);
+        vis[i4 + 3] = 255;
+      }
+      this._poreCanvas = this._updateCanvasFromBytes(null, vis);
+    }
+    return this._poreCanvas;
+  }
+
   ensureGpuTextures(gl) {
     if (!gl || !this.isActive || gl.isContextLost()) {
-      return { colorTex: null, mapTex: null };
+      return { colorTex: null, mapTex: null, poreTex: null };
     }
     if (this._gl && this._gl !== gl) {
       this._glColorTex = null;
       this._glMapTex = null;
+      this._glPoreTex = null;
       this._uploadedVersion = -1;
     }
     this._gl = gl;
 
-    if (!this._glColorTex || !this._glMapTex || this._uploadedVersion !== this.version) {
+    if (!this._glColorTex || !this._glMapTex || !this._glPoreTex || this._uploadedVersion !== this.version) {
       if (!this._glColorTex) this._glColorTex = gl.createTexture();
       if (!this._glMapTex) this._glMapTex = gl.createTexture();
+      if (!this._glPoreTex) this._glPoreTex = gl.createTexture();
 
       const uploadRepeat = (tex, bytes) => {
         gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -1116,15 +1294,17 @@ export class CanvasSurfaceManager {
 
       uploadRepeat(this._glColorTex, this.colorRgba);
       uploadRepeat(this._glMapTex, this.mapRgba);
+      uploadRepeat(this._glPoreTex, this.poreRgba || this.mapRgba);
       gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
       gl.bindTexture(gl.TEXTURE_2D, null);
       this._uploadedVersion = this.version;
     }
 
-    return { colorTex: this._glColorTex, mapTex: this._glMapTex };
+    return { colorTex: this._glColorTex, mapTex: this._glMapTex, poreTex: this._glPoreTex };
   }
 
   getShaderUniforms() {
+    const p = SURFACE_PRESETS[this.type] || SURFACE_PRESETS.none;
     if (!this.isActive) {
       return {
         active: false,
@@ -1134,7 +1314,10 @@ export class CanvasSurfaceManager {
         channel: 0.0,
         relief: 0.0,
         absorb: 0.0,
-        bgOpacity: 0.0
+        bgOpacity: 0.0,
+        biomeMix: 0.0,
+        allowRotate: 1.0,
+        scaleSpread: 1.0
       };
     }
     return {
@@ -1145,7 +1328,10 @@ export class CanvasSurfaceManager {
       channel: clamp01(this.channel),
       relief: clamp01(this.relief),
       absorb: clamp01(this.absorb),
-      bgOpacity: clamp01(this.bgOpacity)
+      bgOpacity: clamp01(this.bgOpacity),
+      biomeMix: clamp01(this.biomeMix !== undefined ? this.biomeMix : (p.biomeMix ?? 0.88)),
+      allowRotate: p.allowRotate !== undefined ? p.allowRotate : 1.0,
+      scaleSpread: p.scaleSpread !== undefined ? p.scaleSpread : 1.0
     };
   }
 
@@ -1163,7 +1349,10 @@ export class CanvasSurfaceManager {
         slip: 0.45,
         relief: 0.25,
         channel: 0.20,
-        invScale: 1.0 / 340.0
+        invScale: 1.0 / 340.0,
+        biomeMix: 0.0,
+        allowRotate: 1.0,
+        scaleSpread: 1.0
       };
     }
     const reliefRatio = p.relief > 0.05 ? (this.relief / p.relief) : (0.5 + this.relief);
@@ -1179,7 +1368,10 @@ export class CanvasSurfaceManager {
       slip: clamp01(this.slip),
       relief: clamp01(this.relief),
       channel: clamp01(this.channel),
-      invScale: 1.0 / Math.max(32.0, this.scale || 340.0)
+      invScale: 1.0 / Math.max(32.0, this.scale || 340.0),
+      biomeMix: clamp01(this.biomeMix !== undefined ? this.biomeMix : (p.biomeMix ?? 0.88)),
+      allowRotate: p.allowRotate !== undefined ? p.allowRotate : 1.0,
+      scaleSpread: p.scaleSpread !== undefined ? p.scaleSpread : 1.0
     };
   }
 
@@ -1193,6 +1385,7 @@ export class CanvasSurfaceManager {
       channel: this.channel,
       absorb: this.absorb,
       bgOpacity: this.bgOpacity,
+      biomeMix: this.biomeMix,
       seamless: this.seamless,
       invertHeight: this.invertHeight,
       seed: this.seed,
@@ -1217,6 +1410,7 @@ export class CanvasSurfaceManager {
     this.channel = Number.isFinite(data.channel) ? data.channel : def.channel;
     this.absorb = Number.isFinite(data.absorb) ? data.absorb : def.absorb;
     this.bgOpacity = Number.isFinite(data.bgOpacity) ? data.bgOpacity : def.bgOpacity;
+    this.biomeMix = Number.isFinite(data.biomeMix) ? data.biomeMix : (def.biomeMix !== undefined ? def.biomeMix : 0.88);
     this.seamless = data.seamless !== undefined ? !!data.seamless : true;
     this.invertHeight = !!data.invertHeight;
     this.seed = Number.isFinite(data.seed) ? (data.seed | 0) : 1337;
@@ -1236,10 +1430,225 @@ export class CanvasSurfaceManager {
     if (this._gl && !this._gl.isContextLost()) {
       if (this._glColorTex) this._gl.deleteTexture(this._glColorTex);
       if (this._glMapTex) this._gl.deleteTexture(this._glMapTex);
+      if (this._glPoreTex) this._gl.deleteTexture(this._glPoreTex);
     }
     this._gl = null;
     this._glColorTex = null;
     this._glMapTex = null;
+    this._glPoreTex = null;
     this._uploadedVersion = -1;
   }
 }
+
+/**
+ * Shared GLSL WebGL2 Multi-Scale "Sectors / Biomes" Aperiodic Surface Sampler.
+ * Combines Small (~1.85x), Medium (~1.0x), and Large (~0.50x) stochastic simplex sectors
+ * with domain-warped boundaries, continuous textureGrad() mipmapping (zero seams),
+ * exact 90-degree orthogonal normal rotation, and variance-preserving contrast blending.
+ */
+export const GLSL_SURFACE_BIOME_SAMPLER = `
+vec4 _sbHash4(vec2 p) {
+  vec4 p4 = fract(vec4(p.xyxy) * vec4(0.1031, 0.1030, 0.0973, 0.1099));
+  p4 += dot(p4, p4.wzxy + 33.33);
+  return fract((p4.xxyz + p4.yzzw) * p4.zywx);
+}
+
+float _sbHash21(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21) + 19.7);
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+
+float _sbNoise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(_sbHash21(i), _sbHash21(i + vec2(1.0, 0.0)), f.x),
+    mix(_sbHash21(i + vec2(0.0, 1.0)), _sbHash21(i + vec2(1.0, 1.0)), f.x),
+    f.y
+  );
+}
+
+vec2 _sbSymVec(vec2 v, int sym) {
+  if (sym == 1) return vec2(-v.y, v.x);
+  if (sym == 2) return vec2(-v.x, -v.y);
+  if (sym == 3) return vec2(v.y, -v.x);
+  if (sym == 4) return vec2(-v.x, v.y);
+  if (sym == 5) return vec2(v.y, v.x);
+  if (sym == 6) return vec2(v.x, -v.y);
+  if (sym == 7) return vec2(-v.y, -v.x);
+  return v;
+}
+
+vec2 _sbInvSymVec(vec2 v, int sym) {
+  if (sym == 1) return vec2(v.y, -v.x);
+  if (sym == 2) return vec2(-v.x, -v.y);
+  if (sym == 3) return vec2(-v.y, v.x);
+  if (sym == 4) return vec2(-v.x, v.y);
+  if (sym == 5) return vec2(v.y, v.x);
+  if (sym == 6) return vec2(v.x, -v.y);
+  if (sym == 7) return vec2(-v.y, -v.x);
+  return v;
+}
+
+struct _SbCellSample {
+  vec2 id0; vec2 id1; vec2 id2;
+  vec3 bw;
+  float macroA;
+  float macroB;
+};
+
+_SbCellSample _sbComputeSectors(vec2 uvBase, float biomeMix) {
+  float mA = _sbNoise(uvBase * 0.24 + vec2(4.2, 1.9));
+  float mB = _sbNoise(uvBase * 0.13 + vec2(19.7, 8.3));
+  vec2 warp = vec2(
+    _sbNoise(uvBase * 0.42 + vec2(3.1, 7.4)) - 0.5,
+    _sbNoise(uvBase * 0.42 + vec2(11.9, 2.3)) - 0.5
+  ) * (0.34 * biomeMix);
+
+  vec2 secP = uvBase * 0.72 + warp;
+  const float K1 = 0.366025404;
+  vec2 skew = secP + (secP.x + secP.y) * K1;
+  vec2 i = floor(skew);
+  vec2 f = skew - i;
+
+  vec2 o1 = (f.x >= f.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+  float w0 = (f.x >= f.y) ? (1.0 - f.x) : (1.0 - f.y);
+  float w1 = (f.x >= f.y) ? (f.x - f.y) : (f.y - f.x);
+  float w2 = (f.x >= f.y) ? f.y : f.x;
+
+  vec3 bw = pow(max(vec3(w0, w1, w2), 0.0), vec3(mix(1.0, 2.35, biomeMix)));
+  bw /= max(bw.x + bw.y + bw.z, 1e-5);
+
+  _SbCellSample res;
+  res.id0 = i;
+  res.id1 = i + o1;
+  res.id2 = i + vec2(1.0, 1.0);
+  res.bw = bw;
+  res.macroA = mA;
+  res.macroB = mB;
+  return res;
+}
+
+float _sbPickScale(float localHash, float macroA, float scaleSpread, float biomeMix) {
+  float sel = mix(localHash, macroA, 0.55);
+  float tier = 1.0;
+  if (sel < 0.32) {
+    tier = mix(0.50, 0.74, sel / 0.32);
+  } else if (sel < 0.70) {
+    tier = mix(0.88, 1.15, (sel - 0.32) / 0.38);
+  } else {
+    tier = mix(1.42, 2.02, (sel - 0.70) / 0.30);
+  }
+  return mix(1.0, tier, scaleSpread * biomeMix);
+}
+
+int _sbPickSym(float zHash, float allowRotate) {
+  if (allowRotate <= 0.5) return 0;
+  return int(floor(zHash * 8.0)) & 7;
+}
+
+vec3 sampleSurfaceColorBiome(sampler2D tex, vec2 worldPos, float invScale, float biomeMix, float allowRotate, float scaleSpread) {
+  vec2 uvBase = worldPos * invScale;
+  vec2 ddx = dFdx(uvBase);
+  vec2 ddy = dFdy(uvBase);
+  if (biomeMix <= 0.01) {
+    return textureGrad(tex, uvBase, ddx, ddy).rgb;
+  }
+
+  _SbCellSample sc = _sbComputeSectors(uvBase, biomeMix);
+  vec4 h0 = _sbHash4(sc.id0);
+  vec4 h1 = _sbHash4(sc.id1);
+  vec4 h2 = _sbHash4(sc.id2);
+
+  float s0 = _sbPickScale(h0.w, sc.macroA, scaleSpread, biomeMix);
+  float s1 = _sbPickScale(h1.w, sc.macroA, scaleSpread, biomeMix);
+  float s2 = _sbPickScale(h2.w, sc.macroA, scaleSpread, biomeMix);
+
+  int sym0 = _sbPickSym(h0.z, allowRotate);
+  int sym1 = _sbPickSym(h1.z, allowRotate);
+  int sym2 = _sbPickSym(h2.z, allowRotate);
+
+  vec3 c0 = textureGrad(tex, _sbSymVec(uvBase * s0 - 0.5, sym0) + 0.5 + h0.xy, _sbSymVec(ddx, sym0) * s0, _sbSymVec(ddy, sym0) * s0).rgb;
+  vec3 c1 = textureGrad(tex, _sbSymVec(uvBase * s1 - 0.5, sym1) + 0.5 + h1.xy, _sbSymVec(ddx, sym1) * s1, _sbSymVec(ddy, sym1) * s1).rgb;
+  vec3 c2 = textureGrad(tex, _sbSymVec(uvBase * s2 - 0.5, sym2) + 0.5 + h2.xy, _sbSymVec(ddx, sym2) * s2, _sbSymVec(ddy, sym2) * s2).rgb;
+
+  vec3 blended = c0 * sc.bw.x + c1 * sc.bw.y + c2 * sc.bw.z;
+  // Subtle variance preservation & organic large-scale macro paper cloud variation
+  vec3 tileAvg = textureLod(tex, vec2(0.5), 8.0).rgb;
+  float varGain = mix(1.0, min(1.55, inversesqrt(max(dot(sc.bw, sc.bw), 0.25))), biomeMix);
+  vec3 crisp = tileAvg + (blended - tileAvg) * varGain;
+  float macroCloud = ((sc.macroA - 0.5) * 0.022 + (sc.macroB - 0.5) * 0.018) * biomeMix;
+  return clamp(crisp + vec3(macroCloud), 0.0, 1.0);
+}
+
+vec4 sampleSurfaceMapBiome(sampler2D mapTex, vec2 worldPos, float invScale, float biomeMix, float allowRotate, float scaleSpread) {
+  vec2 uvBase = worldPos * invScale;
+  vec2 ddx = vec2(invScale, 0.0);
+  vec2 ddy = vec2(0.0, invScale);
+  if (biomeMix <= 0.01) {
+    return textureGrad(mapTex, uvBase, ddx, ddy);
+  }
+
+  _SbCellSample sc = _sbComputeSectors(uvBase, biomeMix);
+  vec4 h0 = _sbHash4(sc.id0);
+  vec4 h1 = _sbHash4(sc.id1);
+  vec4 h2 = _sbHash4(sc.id2);
+
+  float s0 = _sbPickScale(h0.w, sc.macroA, scaleSpread, biomeMix);
+  float s1 = _sbPickScale(h1.w, sc.macroA, scaleSpread, biomeMix);
+  float s2 = _sbPickScale(h2.w, sc.macroA, scaleSpread, biomeMix);
+
+  int sym0 = _sbPickSym(h0.z, allowRotate);
+  int sym1 = _sbPickSym(h1.z, allowRotate);
+  int sym2 = _sbPickSym(h2.z, allowRotate);
+
+  vec4 t0 = textureGrad(mapTex, _sbSymVec(uvBase * s0 - 0.5, sym0) + 0.5 + h0.xy, _sbSymVec(ddx, sym0) * s0, _sbSymVec(ddy, sym0) * s0);
+  vec4 t1 = textureGrad(mapTex, _sbSymVec(uvBase * s1 - 0.5, sym1) + 0.5 + h1.xy, _sbSymVec(ddx, sym1) * s1, _sbSymVec(ddy, sym1) * s1);
+  vec4 t2 = textureGrad(mapTex, _sbSymVec(uvBase * s2 - 0.5, sym2) + 0.5 + h2.xy, _sbSymVec(ddx, sym2) * s2, _sbSymVec(ddy, sym2) * s2);
+
+  float varGain = mix(1.0, min(1.55, inversesqrt(max(dot(sc.bw, sc.bw), 0.25))), biomeMix);
+  float hMix = t0.r * sc.bw.x + t1.r * sc.bw.y + t2.r * sc.bw.z;
+  float hOut = clamp(0.5 + (hMix - 0.5) * varGain + (sc.macroB - 0.5) * 0.08 * biomeMix, 0.0, 1.0);
+
+  vec2 g0 = _sbInvSymVec(t0.gb - 0.5, sym0);
+  vec2 g1 = _sbInvSymVec(t1.gb - 0.5, sym1);
+  vec2 g2 = _sbInvSymVec(t2.gb - 0.5, sym2);
+  vec2 gOut = clamp((g0 * sc.bw.x + g1 * sc.bw.y + g2 * sc.bw.z) * varGain + 0.5, 0.0, 1.0);
+
+  float cavOut = clamp(t0.a * sc.bw.x + t1.a * sc.bw.y + t2.a * sc.bw.z, 0.0, 1.0);
+  return vec4(hOut, gOut, cavOut);
+}
+
+vec4 sampleSurfacePoreBiome(sampler2D poreTex, vec2 worldPos, float invScale, float biomeMix, float allowRotate, float scaleSpread) {
+  vec2 uvBase = worldPos * invScale;
+  vec2 ddx = vec2(invScale, 0.0);
+  vec2 ddy = vec2(0.0, invScale);
+  if (biomeMix <= 0.01) {
+    return textureGrad(poreTex, uvBase, ddx, ddy);
+  }
+
+  _SbCellSample sc = _sbComputeSectors(uvBase, biomeMix);
+  vec4 h0 = _sbHash4(sc.id0);
+  vec4 h1 = _sbHash4(sc.id1);
+  vec4 h2 = _sbHash4(sc.id2);
+
+  float s0 = _sbPickScale(h0.w, sc.macroA, scaleSpread, biomeMix);
+  float s1 = _sbPickScale(h1.w, sc.macroA, scaleSpread, biomeMix);
+  float s2 = _sbPickScale(h2.w, sc.macroA, scaleSpread, biomeMix);
+
+  int sym0 = _sbPickSym(h0.z, allowRotate);
+  int sym1 = _sbPickSym(h1.z, allowRotate);
+  int sym2 = _sbPickSym(h2.z, allowRotate);
+
+  vec4 p0 = textureGrad(poreTex, _sbSymVec(uvBase * s0 - 0.5, sym0) + 0.5 + h0.xy, _sbSymVec(ddx, sym0) * s0, _sbSymVec(ddy, sym0) * s0);
+  vec4 p1 = textureGrad(poreTex, _sbSymVec(uvBase * s1 - 0.5, sym1) + 0.5 + h1.xy, _sbSymVec(ddx, sym1) * s1, _sbSymVec(ddy, sym1) * s1);
+  vec4 p2 = textureGrad(poreTex, _sbSymVec(uvBase * s2 - 0.5, sym2) + 0.5 + h2.xy, _sbSymVec(ddx, sym2) * s2, _sbSymVec(ddy, sym2) * s2);
+
+  vec4 pMix = p0 * sc.bw.x + p1 * sc.bw.y + p2 * sc.bw.z;
+  float varGain = mix(1.0, min(1.50, inversesqrt(max(dot(sc.bw, sc.bw), 0.25))), biomeMix);
+  return clamp(0.5 + (pMix - 0.5) * varGain, 0.0, 1.0);
+}
+`;
+

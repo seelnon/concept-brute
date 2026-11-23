@@ -50,6 +50,13 @@ export class TipManager {
     t.airTipAngle = saved.airTipAngle ?? 0;
     t.airTipHardness = saved.airTipHardness ?? 55;
     t.airPressureFlow = saved.airPressureFlow ?? 35;
+    t.airUseHeightmap = saved.airUseHeightmap ?? false;
+    t.airHeightSource = saved.airHeightSource || 'surface';
+    t.speedHeight = saved.speedHeight ?? 0;
+    t.speedWater = saved.speedWater ?? 0;
+    t.fluidHeightShield = saved.fluidHeightShield ?? 65;
+    t.sumiUseHeightmap = saved.sumiUseHeightmap ?? false;
+    t.sumiHeightSource = saved.sumiHeightSource || 'surface';
   }
 
   async init() {
@@ -800,7 +807,14 @@ export class TipManager {
           airFollowStroke: t.airFollowStroke ?? false,
           airTipAngle: t.airTipAngle ?? 0,
           airTipHardness: t.airTipHardness ?? 55,
-          airPressureFlow: t.airPressureFlow ?? 35
+          airPressureFlow: t.airPressureFlow ?? 35,
+          airUseHeightmap: t.airUseHeightmap ?? false,
+          airHeightSource: t.airHeightSource || 'surface',
+          speedHeight: t.speedHeight ?? 0,
+          speedWater: t.speedWater ?? 0,
+          fluidHeightShield: t.fluidHeightShield ?? 65,
+          sumiUseHeightmap: t.sumiUseHeightmap ?? false,
+          sumiHeightSource: t.sumiHeightSource || 'surface'
       }));
       localStorage.setItem('brushTips', JSON.stringify(mainData));
 
@@ -834,7 +848,14 @@ export class TipManager {
           airFollowStroke: t.airFollowStroke ?? false,
           airTipAngle: t.airTipAngle ?? 0,
           airTipHardness: t.airTipHardness ?? 55,
-          airPressureFlow: t.airPressureFlow ?? 35
+          airPressureFlow: t.airPressureFlow ?? 35,
+          airUseHeightmap: t.airUseHeightmap ?? false,
+          airHeightSource: t.airHeightSource || 'surface',
+          speedHeight: t.speedHeight ?? 0,
+          speedWater: t.speedWater ?? 0,
+          fluidHeightShield: t.fluidHeightShield ?? 65,
+          sumiUseHeightmap: t.sumiUseHeightmap ?? false,
+          sumiHeightSource: t.sumiHeightSource || 'surface'
       }));
       localStorage.setItem('brushTips_generated', JSON.stringify(genData));
 

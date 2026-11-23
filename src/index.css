@@ -434,6 +434,16 @@ button:focus, input:focus, select:focus, .tool-btn:focus, .brutal-btn:focus, .mi
     width: auto;
 }
 
+.brutal-btn.active-btn {
+    background-color: black;
+    color: white;
+}
+
+.brutal-btn.active-btn:hover {
+    background-color: #222;
+    color: white;
+}
+
 .container.export-mode {
     cursor: crosshair !important;
 }

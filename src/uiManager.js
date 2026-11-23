@@ -1,7 +1,7 @@
 import { TOOLS, LAYERS_COUNT } from './constants.js';
 import { syncFluidSettingsFromTip } from './tools/fluidPaint.js';
 import { syncAirSettingsFromTip } from './tools/airPaint.js';
-import { syncSumiSettingsFromTip, updateSumiSubtoolUI, syncSumiTip, reDipSumi, forceDrySumi } from './tools/sumiPaint.js';
+import { sumiSettings, syncSumiSettingsFromTip, updateSumiSubtoolUI, syncSumiTip, reDipSumi, forceDrySumi } from './tools/sumiPaint.js';
 import { SURFACE_PRESETS } from './engine/canvasSurfaceGpu.js';
 
 export function setupUI(app) {
@@ -550,7 +550,7 @@ export function setupUI(app) {
         }, 250);
     };
 
-    let surfacePreviewHeightMode = false;
+    let surfacePreviewMode = 'albedo'; // 'albedo' | 'height' | 'pores'
     const surfaceTypeEl = document.getElementById('settings-surface-type');
     const surfaceBoxEl = document.getElementById('surface-controls-box');
     const surfacePreviewEl = document.getElementById('surface-preview-canvas');
@@ -563,6 +563,7 @@ export function setupUI(app) {
     const surfaceSeamlessEl = document.getElementById('settings-surface-seamless');
     const surfaceInvertEl = document.getElementById('settings-surface-invert');
     const surfaceScaleEl = document.getElementById('settings-surface-scale');
+    const surfaceBiomeEl = document.getElementById('settings-surface-biome');
     const surfaceSlipEl = document.getElementById('settings-surface-slip');
     const surfaceReliefEl = document.getElementById('settings-surface-relief');
     const surfaceChannelEl = document.getElementById('settings-surface-channel');
@@ -582,6 +583,12 @@ export function setupUI(app) {
             surfaceScaleEl.value = Math.round(mgr.scale || 340);
             const vEl = document.getElementById('surface-scale-val');
             if (vEl) vEl.innerText = `${Math.round(mgr.scale || 340)}px`;
+        }
+        if (surfaceBiomeEl) {
+            const pct = Math.round((mgr.biomeMix ?? 0.88) * 100);
+            surfaceBiomeEl.value = pct;
+            const vEl = document.getElementById('surface-biome-val');
+            if (vEl) vEl.innerText = `${pct}%`;
         }
         if (surfaceSlipEl) {
             const pct = Math.round((mgr.slip ?? 0.24) * 100);
@@ -608,7 +615,9 @@ export function setupUI(app) {
             if (vEl) vEl.innerText = `${pct}%`;
         }
         if (surfacePreviewBtn) {
-            surfacePreviewBtn.innerText = surfacePreviewHeightMode ? 'ALBEDO' : 'HEIGHTMAP';
+            surfacePreviewBtn.innerText = surfacePreviewMode === 'albedo'
+                ? 'HEIGHTMAP'
+                : (surfacePreviewMode === 'height' ? 'PORES' : 'ALBEDO');
         }
         if (surfaceRegenBtn) {
             surfaceRegenBtn.style.display = mgr.type === 'custom' ? 'none' : '';
@@ -625,7 +634,12 @@ export function setupUI(app) {
             surfaceHintEl.innerText = pDef.hint || '';
         }
         if (surfacePreviewEl && mgr.isActive) {
-            const srcCanvas = surfacePreviewHeightMode ? mgr.getHeightCanvas() : mgr.getColorCanvas();
+            let srcCanvas = mgr.getColorCanvas();
+            if (surfacePreviewMode === 'height') {
+                srcCanvas = mgr.getHeightCanvas();
+            } else if (surfacePreviewMode === 'pores') {
+                srcCanvas = (typeof mgr.getPoreCanvas === 'function' ? mgr.getPoreCanvas() : null) || mgr.getHeightCanvas();
+            }
             if (srcCanvas) {
                 const pCtx = surfacePreviewEl.getContext('2d');
                 pCtx.clearRect(0, 0, surfacePreviewEl.width, surfacePreviewEl.height);
@@ -686,7 +700,9 @@ export function setupUI(app) {
 
     if (surfacePreviewBtn) {
         surfacePreviewBtn.onclick = () => {
-            surfacePreviewHeightMode = !surfacePreviewHeightMode;
+            surfacePreviewMode = surfacePreviewMode === 'albedo'
+                ? 'height'
+                : (surfacePreviewMode === 'height' ? 'pores' : 'albedo');
             app.syncSurfaceUI();
         };
     }
@@ -737,6 +753,19 @@ export function setupUI(app) {
             app.engine.refreshGrid();
         };
         surfaceScaleEl.onchange = () => queueSurfaceSettingsSave();
+    }
+
+    if (surfaceBiomeEl) {
+        surfaceBiomeEl.oninput = (e) => {
+            const mgr = app.engine?.surfaceManager;
+            if (!mgr) return;
+            const pct = parseInt(e.target.value, 10) || 0;
+            mgr.biomeMix = pct / 100;
+            const vEl = document.getElementById('surface-biome-val');
+            if (vEl) vEl.innerText = `${pct}%`;
+            app.engine.refreshGrid();
+        };
+        surfaceBiomeEl.onchange = () => queueSurfaceSettingsSave();
     }
 
     if (surfaceSlipEl) {
@@ -1159,6 +1188,22 @@ export function setupUI(app) {
         app.updateActiveSetting('speedHue', val);
     };
 
+    const sHeight = document.getElementById('speed-height');
+    if (sHeight) sHeight.oninput = (e) => {
+        const val = parseInt(e.target.value, 10) || 0;
+        const el = document.getElementById('s-height-val');
+        if (el) el.innerText = String(val);
+        app.updateActiveSetting('speedHeight', val);
+    };
+
+    const sWater = document.getElementById('speed-water');
+    if (sWater) sWater.oninput = (e) => {
+        const val = parseInt(e.target.value, 10) || 0;
+        const el = document.getElementById('s-water-val');
+        if (el) el.innerText = String(val);
+        app.updateActiveSetting('speedWater', val);
+    };
+
     const speedMaxSlider = document.getElementById('adv-speed-max');
     const speedMaxVal = document.getElementById('adv-speed-max-val');
     if (speedMaxSlider) {
@@ -1571,6 +1616,55 @@ export function setupUI(app) {
     bindAirSlider('adv-air-tip-hardness', 'adv-air-tip-hardness-val', 'airTipHardness', '%');
     bindAirSlider('adv-air-pressure-flow', 'adv-air-pressure-flow-val', 'airPressureFlow', '%');
 
+    const syncAirHeightUi = (useH, src) => {
+        const chkPanel = document.getElementById('chk-air-use-heightmap');
+        const chkAdv = document.getElementById('adv-air-use-heightmap');
+        const btnPanel = document.getElementById('btn-air-height-source');
+        const btnAdv = document.getElementById('adv-air-height-source');
+        const label = src === 'layer' ? 'LAYER' : 'SURFACE';
+        if (chkPanel) chkPanel.checked = !!useH;
+        if (chkAdv) chkAdv.checked = !!useH;
+        if (btnPanel) {
+            btnPanel.innerText = label;
+            btnPanel.style.opacity = useH ? '1' : '0.45';
+        }
+        if (btnAdv) {
+            btnAdv.innerText = label;
+            btnAdv.style.opacity = useH ? '1' : '0.45';
+        }
+    };
+
+    const bindAirHeightToggle = (elId) => {
+        const el = document.getElementById(elId);
+        if (!el) return;
+        el.onchange = (e) => {
+            const checked = !!e.target.checked;
+            const ts = app.getCurrentTipSettings ? app.getCurrentTipSettings() : null;
+            const src = (ts && ts.airHeightSource) || 'surface';
+            app.updateActiveSetting('airUseHeightmap', checked);
+            syncAirHeightUi(checked, src);
+            syncAirLive();
+        };
+    };
+    bindAirHeightToggle('chk-air-use-heightmap');
+    bindAirHeightToggle('adv-air-use-heightmap');
+
+    const bindAirSourceBtn = (btnId) => {
+        const btn = document.getElementById(btnId);
+        if (!btn) return;
+        btn.onclick = () => {
+            const ts = app.getCurrentTipSettings ? app.getCurrentTipSettings() : null;
+            const curSrc = (ts && ts.airHeightSource) || 'surface';
+            const nextSrc = curSrc === 'layer' ? 'surface' : 'layer';
+            const useH = !!(ts && ts.airUseHeightmap);
+            app.updateActiveSetting('airHeightSource', nextSrc);
+            syncAirHeightUi(useH, nextSrc);
+            syncAirLive();
+        };
+    };
+    bindAirSourceBtn('btn-air-height-source');
+    bindAirSourceBtn('adv-air-height-source');
+
     const toggleCanvasPhysicalMix = (checked) => {
         app.palette.config.canvasMixMode = checked ? 'physical' : 'digital';
         app.palette.saveConfig();
@@ -1636,7 +1730,17 @@ export function setupUI(app) {
     bindSumiSlider('brush-sumi-split', 'sumi-split-val', 'sumiSplit', '%', false);
 
     // Floating #panel-sumi sliders & subtools
-    bindSumiSlider('slider-sumi-ink', 'val-sumi-ink', 'sumiInk', '%', false);
+    const sliderSumiInk = document.getElementById('slider-sumi-ink');
+    if (sliderSumiInk) {
+        sliderSumiInk.oninput = (e) => {
+            const val = parseFloat(e.target.value);
+            const valEl = document.getElementById('val-sumi-ink');
+            if (valEl) valEl.innerText = `${Math.round(val)}%`;
+            const targetKey = sumiSettings.mode === 'water' ? 'sumiInkAffection' : 'sumiInk';
+            app.updateActiveSetting(targetKey, val);
+            syncSumiLive(false);
+        };
+    }
     bindSumiSlider('slider-sumi-water', 'val-sumi-water', 'sumiWater', '%', false);
     bindSumiSlider('slider-sumi-bleed', 'val-sumi-bleed', 'sumiBleed', '%', false);
 
@@ -1695,6 +1799,55 @@ export function setupUI(app) {
     bindSumiSlider('adv-sumi-soot-snag', 'adv-sumi-soot-snag-val', 'sumiSootSnag', '%', false);
     bindSumiSlider('adv-sumi-tip-angle', 'adv-sumi-tip-angle-val', 'sumiTipAngle', '°', false);
     bindSumiSlider('adv-sumi-pressure-flow', 'adv-sumi-pressure-flow-val', 'sumiPressureFlow', '%', false);
+
+    const syncSumiHeightUi = (useH, src) => {
+        const chkPanel = document.getElementById('chk-sumi-use-heightmap');
+        const chkAdv = document.getElementById('adv-sumi-use-heightmap');
+        const btnPanel = document.getElementById('btn-sumi-height-source');
+        const btnAdv = document.getElementById('adv-sumi-height-source');
+        const label = src === 'layer' ? 'LAYER' : 'SURFACE';
+        if (chkPanel) chkPanel.checked = !!useH;
+        if (chkAdv) chkAdv.checked = !!useH;
+        if (btnPanel) {
+            btnPanel.innerText = label;
+            btnPanel.style.opacity = useH ? '1' : '0.45';
+        }
+        if (btnAdv) {
+            btnAdv.innerText = label;
+            btnAdv.style.opacity = useH ? '1' : '0.45';
+        }
+    };
+
+    const bindSumiHeightToggle = (elId) => {
+        const el = document.getElementById(elId);
+        if (!el) return;
+        el.onchange = (e) => {
+            const checked = !!e.target.checked;
+            const ts = app.getCurrentTipSettings ? app.getCurrentTipSettings() : null;
+            const src = (ts && ts.sumiHeightSource) || 'surface';
+            app.updateActiveSetting('sumiUseHeightmap', checked);
+            syncSumiHeightUi(checked, src);
+            syncSumiLive(false);
+        };
+    };
+    bindSumiHeightToggle('chk-sumi-use-heightmap');
+    bindSumiHeightToggle('adv-sumi-use-heightmap');
+
+    const bindSumiSourceBtn = (btnId) => {
+        const btn = document.getElementById(btnId);
+        if (!btn) return;
+        btn.onclick = () => {
+            const ts = app.getCurrentTipSettings ? app.getCurrentTipSettings() : null;
+            const curSrc = (ts && ts.sumiHeightSource) || 'surface';
+            const nextSrc = curSrc === 'layer' ? 'surface' : 'layer';
+            const useH = !!(ts && ts.sumiUseHeightmap);
+            app.updateActiveSetting('sumiHeightSource', nextSrc);
+            syncSumiHeightUi(useH, nextSrc);
+            syncSumiLive(false);
+        };
+    };
+    bindSumiSourceBtn('btn-sumi-height-source');
+    bindSumiSourceBtn('adv-sumi-height-source');
 
     // Advanced Fluid Paint Dynamics
     const bindAdvFluidSlider = (inputId, valId, settingKey, unit = '%') => {

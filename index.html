@@ -163,6 +163,26 @@
               <input type="range" id="speed-hue" min="-100" max="100" value="-50" class="brutal-range s-range">
             </div>
           </div>
+          <div id="s-height-container" class="slider-container" style="display: none;">
+            <div class="slider-header">
+                <label class="slider-label" title="Speed Impasto Height Sensitivity">S-HEIGHT</label>
+                <span id="s-height-val" class="slider-value">0</span>
+            </div>
+            <div class="brutal-slider-wrapper">
+              <button class="slider-reset-arrow" data-target="speed-height" title="Reset to 0">▼</button>
+              <input type="range" id="speed-height" min="-100" max="100" value="0" class="brutal-range s-range">
+            </div>
+          </div>
+          <div id="s-water-container" class="slider-container" style="display: none;">
+            <div class="slider-header">
+                <label class="slider-label" title="Speed Water Sensitivity">S-WATER</label>
+                <span id="s-water-val" class="slider-value">0</span>
+            </div>
+            <div class="brutal-slider-wrapper">
+              <button class="slider-reset-arrow" data-target="speed-water" title="Reset to 0">▼</button>
+              <input type="range" id="speed-water" min="-100" max="100" value="0" class="brutal-range s-range">
+            </div>
+          </div>
         </div>
 
         
@@ -678,6 +698,13 @@
                      </div>
                      <div class="settings-group" style="margin-bottom: 6px;">
                         <div style="display: flex; justify-content: space-between; align-items: center;">
+                           <label class="settings-label">SECTOR BIOMES (S/M/L BREAKUP)</label>
+                           <span id="surface-biome-val" style="font-size: 9px; font-weight: 900;">88%</span>
+                        </div>
+                        <input type="range" id="settings-surface-biome" min="0" max="100" value="88" class="brutal-range" style="width: 100%;">
+                     </div>
+                     <div class="settings-group" style="margin-bottom: 6px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
                            <label class="settings-label">SLIP / GRIP</label>
                            <span id="surface-slip-val" style="font-size: 9px; font-weight: 900;">24% SLIP</span>
                         </div>
@@ -910,6 +937,8 @@
                     <div class="hotkey-item"><span>[6] or [G]</span> <span>LIQUIFY</span></div>
                     <div class="hotkey-item"><span>[7] or [F]</span> <span>FLUID PAINT</span></div>
                     <div class="hotkey-item"><span>[8] or [A]</span> <span>WATERCOLOR</span></div>
+                    <div class="hotkey-item"><span>[9] or [Q]</span> <span>SUMI-E INK</span></div>
+                    <div class="hotkey-item"><span>[SHIFT+1..4]</span> <span>SUMI DRAW/WATER/BLOW/DRY</span></div>
                     <div class="hotkey-item"><span>[I]</span> <span>REF LAYER &lt;-&gt; PAINT</span></div>
                     <div class="hotkey-item"><span>[ALT]</span> <span>EYEDROPPER PICK</span></div>
                     <div class="hotkey-item"><span>[[ / ]] / [W / E]</span> <span>BRUSH SIZE - / +</span></div>
@@ -1205,6 +1234,19 @@
                       </div>
                       <input type="range" id="adv-air-pressure-flow" min="0" max="100" step="1" value="35" class="brutal-range" style="width: 100%;">
                    </div>
+                   <div class="settings-group">
+                      <div class="settings-row" style="margin-bottom: 6px;">
+                         <label class="settings-label" title="Enable geometric heightmap slope collisions (default uses fiber &amp; pores only)">HEIGHTMAP COLLISION</label>
+                         <div class="checkbox-wrapper">
+                            <input type="checkbox" id="adv-air-use-heightmap" class="settings-input-check">
+                            <span class="checkbox-custom"></span>
+                         </div>
+                      </div>
+                      <div class="settings-row">
+                         <label class="settings-label">HEIGHT SOURCE</label>
+                         <button id="adv-air-height-source" class="brutal-btn" style="font-size: 8px; height: 20px; padding: 0 8px;">SURFACE</button>
+                      </div>
+                   </div>
                 </div>
               </div>
 
@@ -1304,6 +1346,19 @@
                           <span id="adv-sumi-pressure-flow-val" style="font-size: 9px; font-weight: 900;">35%</span>
                       </div>
                       <input type="range" id="adv-sumi-pressure-flow" min="0" max="100" step="1" value="35" class="brutal-range" style="width: 100%;">
+                   </div>
+                   <div class="settings-group">
+                      <div class="settings-row" style="margin-bottom: 6px;">
+                         <label class="settings-label" title="Enable geometric heightmap slope collisions (default uses Xuan fiber &amp; pores only)">HEIGHTMAP COLLISION</label>
+                         <div class="checkbox-wrapper">
+                            <input type="checkbox" id="adv-sumi-use-heightmap" class="settings-input-check">
+                            <span class="checkbox-custom"></span>
+                         </div>
+                      </div>
+                      <div class="settings-row">
+                         <label class="settings-label">HEIGHT SOURCE</label>
+                         <button id="adv-sumi-height-source" class="brutal-btn" style="font-size: 8px; height: 20px; padding: 0 8px;">SURFACE</button>
+                      </div>
                    </div>
                 </div>
               </div>
@@ -1881,6 +1936,15 @@
             <input type="range" id="slider-fluid-depth" min="0" max="100" value="30" class="brutal-range">
           </div>
 
+          <!-- HEIGHT SHIELD (IMPASTO <-> SURFACE TEXTURE) -->
+          <div class="slider-container">
+            <div class="slider-header">
+              <label class="slider-label" style="font-size: 8px;" title="Thick impasto progressively shields surface heightmap resistance">HEIGHT SHIELD</label>
+              <span id="val-fluid-height-shield" class="slider-value" style="font-size: 8px; font-weight: bold;">65%</span>
+            </div>
+            <input type="range" id="slider-fluid-height-shield" min="0" max="100" value="65" class="brutal-range">
+          </div>
+
           <!-- SPECULAR GLOSS -->
           <div class="slider-container">
             <div class="slider-header">
@@ -1981,6 +2045,15 @@
             <input type="range" id="slider-air-tip-pour" min="0" max="100" value="100" class="brutal-range">
           </div>
 
+          <!-- SURFACE HEIGHTMAP COLLISION & SOURCE -->
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 4px; border: 1px solid black; padding: 5px 6px; background: white;">
+            <label for="chk-air-use-heightmap" style="font-size: 8px; font-weight: bold; cursor: pointer; user-select: none;" title="Collide watercolor with geometric heightmap (fibers &amp; pores stay always on)">HEIGHTMAP</label>
+            <div style="display: flex; align-items: center; gap: 4px;">
+              <button id="btn-air-height-source" class="brutal-btn" style="font-size: 7px; height: 17px; padding: 0 5px;" title="Toggle heightmap source: Surface texture vs Active layer paint">SURFACE</button>
+              <input type="checkbox" id="chk-air-use-heightmap" style="width: 14px; height: 14px; cursor: pointer; accent-color: black;">
+            </div>
+          </div>
+
           <!-- PHYSICAL PIGMENT MIXING CHECKBOX -->
           <div style="display: flex; align-items: center; justify-content: space-between; gap: 4px; border: 1px solid black; padding: 6px; background: white;">
             <label for="chk-air-physical-mix" style="font-size: 8px; font-weight: bold; cursor: pointer; user-select: none;">PHYSICAL PIGMENT (Y+B=G)</label>
@@ -2034,7 +2107,7 @@
         <!-- INK CONCENTRATION -->
         <div class="slider-container">
           <div class="slider-header">
-            <label class="slider-label" style="font-size: 8px;">INK CONCENTRATION</label>
+            <label id="label-sumi-ink" class="slider-label" style="font-size: 8px;">INK CONCENTRATION</label>
             <span id="val-sumi-ink" class="slider-value" style="font-size: 8px; font-weight: bold;">78%</span>
           </div>
           <input type="range" id="slider-sumi-ink" min="0" max="100" value="78" class="brutal-range">
@@ -2056,6 +2129,15 @@
             <span id="val-sumi-bleed" class="slider-value" style="font-size: 8px; font-weight: bold;">58%</span>
           </div>
           <input type="range" id="slider-sumi-bleed" min="0" max="100" value="58" class="brutal-range">
+        </div>
+
+        <!-- SURFACE HEIGHTMAP COLLISION & SOURCE -->
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 4px; border: 1px solid black; padding: 5px 6px; background: white;">
+          <label for="chk-sumi-use-heightmap" style="font-size: 8px; font-weight: bold; cursor: pointer; user-select: none;" title="Collide sumi ink with geometric heightmap (fibers &amp; pores stay always on)">HEIGHTMAP</label>
+          <div style="display: flex; align-items: center; gap: 4px;">
+            <button id="btn-sumi-height-source" class="brutal-btn" style="font-size: 7px; height: 17px; padding: 0 5px;" title="Toggle heightmap source: Surface texture vs Active layer paint">SURFACE</button>
+            <input type="checkbox" id="chk-sumi-use-heightmap" style="width: 14px; height: 14px; cursor: pointer; accent-color: black;">
+          </div>
         </div>
 
         <!-- PHYSICAL PIGMENT MIXING CHECKBOX -->

@@ -645,7 +645,8 @@ export function _moveStroke(e) {
       size: dynamicSize,
       opacity: opacMod,
       color: color,
-      pressure: pressure
+      pressure: pressure,
+      vFactor: vFactor
   };
 
   if (this.brush.type === TOOLS.WIREFRAME) {
@@ -662,7 +663,7 @@ export function _moveStroke(e) {
       const spacingRatio = this.brush.spacing !== undefined ? this.brush.spacing : 0.05;
       const minFluidDist = Math.max(0.8, Math.min(Math.max(10.0, dynamicSize * 0.65), dynamicSize * Math.max(0.02, spacingRatio * 0.85)));
       if (dist >= minFluidDist) {
-          paintFluidOnChunks(this, lastP, worldTo, dynamicSize, opacMod, color, pressure, currentTime);
+          paintFluidOnChunks(this, lastP, worldTo, dynamicSize, opacMod, color, pressure, currentTime, vFactor);
           this.strokePoints.push(worldPos);
       }
   } else if (this.brush.type === TOOLS.AIR) {
@@ -710,7 +711,7 @@ export function _moveStroke(e) {
           this.strokePoints.push(worldPos);
       }
   } else if (this.brush.type === TOOLS.SUMI) {
-      paintSumiMove(this, worldTo, dynamicSize, opacMod, color, this.lastPressure || pressure, e);
+      paintSumiMove(this, worldTo, dynamicSize, opacMod, color, this.lastPressure || pressure, e, vFactor);
       this.strokePoints.push(worldPos);
   } else {
       this.strokePoints.push(worldPos);

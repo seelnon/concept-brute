@@ -13,6 +13,7 @@
 
 import { backupChunkLayer } from '../engine/backupPool.js';
 import { GLSL_RYB_MIX } from '../colorUtils.js';
+import { GLSL_SURFACE_BIOME_SAMPLER } from '../engine/canvasSurfaceGpu.js';
 
 const TILE_SIZE = 256;
 const WORK_SIZE = 1024;
@@ -178,13 +179,19 @@ uniform int u_physicalMix;
 uniform sampler2D u_surfaceMap;
 uniform int u_hasSurface;
 uniform float u_surfaceInvScale;
+uniform float u_surfaceBiomeMix;
+uniform float u_surfaceAllowRotate;
+uniform float u_surfaceScaleSpread;
 uniform float u_surfSlip;
 uniform float u_surfResist;
 uniform float u_surfChannel;
 uniform float u_surfRelief;
 uniform float u_pressure;
+uniform float u_heightShield;
+uniform float u_speedHeightMod;
 
 ${GLSL_RYB_MIX}
+${GLSL_SURFACE_BIOME_SAMPLER}
 
 layout(location = 0) out vec4 outPaint;
 layout(location = 1) out vec4 outState;
@@ -270,7 +277,7 @@ void main() {
   }
 
   vec4 surf = (u_hasSurface == 1)
-    ? texture(u_surfaceMap, worldPos * u_surfaceInvScale)
+    ? sampleSurfaceMapBiome(u_surfaceMap, worldPos, u_surfaceInvScale, u_surfaceBiomeMix, u_surfaceAllowRotate, u_surfaceScaleSpread)
     : vec4(0.5, 0.5, 0.5, 0.0);
   float sHeight = surf.r;
   vec2 sSlope = (surf.gb - 0.5) * 2.0;
@@ -332,13 +339,15 @@ void main() {
 
     float localDist = u_prevDistTotal + u_safeDist * tSeg;
     float prevCov = (localDist - srcS.b >= 0.0 && localDist - srcS.b < u_coverWindow) ? srcS.g : 0.0;
+    float hShield = clamp(1.0 - (wetH / max(2.5, 22.0 - 16.0 * u_heightShield)) * (0.20 + 1.05 * u_heightShield), 0.0, 1.0);
+    float effSurfMod = hShield * u_speedHeightMod;
 
     if (u_hasSurface == 1 && u_surfResist > 0.01) {
       float workEffort = clamp(u_pressure * 0.50 + u_paintSupply * 0.32 + prevCov * 0.38 + wetA * 0.34, 0.0, 1.35);
       float valleyFloor = clamp((1.0 - workEffort * 0.78) * u_surfResist * 0.88, 0.0, 0.82);
       float toothSignal = clamp(sHeight * (1.0 - 0.18 * u_surfResist) + 0.16 * u_surfRelief * (sHeight - 0.5) - sCavity * 0.24 * u_surfResist, 0.0, 1.0);
       float valleyPass = smoothstep(valleyFloor - 0.15, valleyFloor + 0.17, toothSignal);
-      strandCoverage *= mix(1.0, valleyPass, u_surfResist);
+      strandCoverage *= mix(1.0, valleyPass, clamp(u_surfResist * effSurfMod, 0.0, 1.0));
     }
 
     float targetBrushAlpha = min(1.0, strandCoverage * u_strokeOpacity);
@@ -352,7 +361,7 @@ void main() {
 
       float toneShift = (wave - 0.54) * (4.0 + 14.0 * maxTipBump) * (0.2 + 1.25 * u_bristleContrast) / 255.0;
       if (u_hasSurface == 1) {
-        toneShift += (sHeight - 0.5) * u_surfRelief * (10.0 / 255.0);
+        toneShift += (sHeight - 0.5) * u_surfRelief * effSurfMod * (10.0 / 255.0);
       }
       vec3 fCol = clamp(paintColor + vec3(toneShift), 0.0, 1.0);
 
@@ -377,7 +386,7 @@ void main() {
 
       if (u_depthScale > 0.01 && (u_alphaLock == 0 || srcP.a > 0.004)) {
         float supplyH = 0.22 + 0.78 * u_paintSupply;
-        float toothRelief = (u_hasSurface == 1) ? mix(1.0, 0.72 + 0.56 * sHeight, u_surfRelief) : 1.0;
+        float toothRelief = (u_hasSurface == 1) ? mix(1.0, 0.72 + 0.56 * sHeight, clamp(u_surfRelief * effSurfMod, 0.0, 1.0)) : 1.0;
         float targetH = strandCoverage * (0.14 + 0.86 * maxTipBump) * (0.30 + 0.70 * ridgeFactor) * toothRelief * u_depthScale * supplyH;
         wetH = min(52.0, max(wetH, targetH));
       }
@@ -498,9 +507,16 @@ uniform sampler2D u_surfaceMap;
 uniform int u_hasSurface;
 uniform vec2 u_simOrigin;
 uniform float u_surfaceInvScale;
+uniform float u_surfaceBiomeMix;
+uniform float u_surfaceAllowRotate;
+uniform float u_surfaceScaleSpread;
 uniform float u_surfRelief;
+uniform float u_heightShield;
+uniform float u_speedHeightMod;
 
 out vec4 outLit;
+
+${GLSL_SURFACE_BIOME_SAMPLER}
 
 void main() {
   vec4 p = texture(u_paint, v_uv);
@@ -541,9 +557,10 @@ void main() {
   vec2 nxy = vec2(-gx, -gy) * u_bumpScale;
   if (u_hasSurface == 1 && u_surfRelief > 0.01) {
     vec2 wp = u_simOrigin + gl_FragCoord.xy;
-    vec2 surfSlope = (texture(u_surfaceMap, wp * u_surfaceInvScale).gb - 0.5) * 2.0;
-    float thinFade = clamp(1.0 - h * 0.04, 0.20, 1.0);
-    nxy += -surfSlope * (u_surfRelief * 0.65 * thinFade);
+    vec4 sSample = sampleSurfaceMapBiome(u_surfaceMap, wp, u_surfaceInvScale, u_surfaceBiomeMix, u_surfaceAllowRotate, u_surfaceScaleSpread);
+    vec2 surfSlope = (sSample.gb - 0.5) * 2.0;
+    float shieldFade = clamp(1.0 - (h / max(2.5, 22.0 - 16.0 * u_heightShield)) * (0.20 + 1.05 * u_heightShield), 0.0, 1.0);
+    nxy += -surfSlope * (u_surfRelief * 0.65 * shieldFade * u_speedHeightMod);
   }
   float invLen = inversesqrt(dot(nxy, nxy) + 1.0);
   vec3 n = vec3(nxy * invLen, invLen);
@@ -757,8 +774,9 @@ export class GpuFluidSolver {
       'u_brFreq', 'u_bristleContrast', 'u_fluidity', 'u_vortex', 'u_turb', 'u_depthScale',
       'u_paintSupply', 'u_supplyThreshold', 'u_strokeOpacity', 'u_recolorRateBase',
       'u_nSteps', 'u_alphaLock', 'u_physicalMix',
-      'u_surfaceMap', 'u_hasSurface', 'u_surfaceInvScale', 'u_surfSlip',
-      'u_surfResist', 'u_surfChannel', 'u_surfRelief', 'u_pressure'
+      'u_surfaceMap', 'u_hasSurface', 'u_surfaceInvScale', 'u_surfaceBiomeMix', 'u_surfaceAllowRotate', 'u_surfaceScaleSpread',
+      'u_surfSlip', 'u_surfResist', 'u_surfChannel', 'u_surfRelief', 'u_pressure',
+      'u_heightShield', 'u_speedHeightMod'
     ]);
     this.streamerLocs = this._cacheLocs(this.progStreamer, [
       'u_paint', 'u_state', 'u_simOrigin', 'u_segCount', 'u_segPos', 'u_segCol', 'u_segMeta',
@@ -767,7 +785,9 @@ export class GpuFluidSolver {
     this.lightLocs = this._cacheLocs(this.progLight, [
       'u_paint', 'u_state', 'u_texel', 'u_uvClamp', 'u_doShade',
       'u_bumpScale', 'u_diffIntensity', 'u_rimMax', 'u_specScale',
-      'u_surfaceMap', 'u_hasSurface', 'u_simOrigin', 'u_surfaceInvScale', 'u_surfRelief'
+      'u_surfaceMap', 'u_hasSurface', 'u_simOrigin', 'u_surfaceInvScale',
+      'u_surfaceBiomeMix', 'u_surfaceAllowRotate', 'u_surfaceScaleSpread',
+      'u_surfRelief', 'u_heightShield', 'u_speedHeightMod'
     ]);
     this.unpremultLocs = this._cacheLocs(this.progUnpremult, ['u_tex']);
 
@@ -916,11 +936,16 @@ export class GpuFluidSolver {
     gl.uniform1i(this.injectLocs.u_surfaceMap, 4);
     gl.uniform1i(this.injectLocs.u_hasSurface, 0);
     gl.uniform1f(this.injectLocs.u_surfaceInvScale, 1.0 / 320.0);
+    gl.uniform1f(this.injectLocs.u_surfaceBiomeMix, 0.0);
+    gl.uniform1f(this.injectLocs.u_surfaceAllowRotate, 1.0);
+    gl.uniform1f(this.injectLocs.u_surfaceScaleSpread, 1.0);
     gl.uniform1f(this.injectLocs.u_surfSlip, 0.5);
     gl.uniform1f(this.injectLocs.u_surfResist, 0.0);
     gl.uniform1f(this.injectLocs.u_surfChannel, 0.0);
     gl.uniform1f(this.injectLocs.u_surfRelief, 0.0);
     gl.uniform1f(this.injectLocs.u_pressure, 1.0);
+    gl.uniform1f(this.injectLocs.u_heightShield, 0.65);
+    gl.uniform1f(this.injectLocs.u_speedHeightMod, 1.0);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 
     // 4. progStreamer (MRT): workPaintB + workStateB -> mrtWorkA
@@ -959,7 +984,12 @@ export class GpuFluidSolver {
     gl.uniform1i(this.lightLocs.u_hasSurface, 0);
     gl.uniform2f(this.lightLocs.u_simOrigin, 0, 0);
     gl.uniform1f(this.lightLocs.u_surfaceInvScale, 1.0 / 320.0);
+    gl.uniform1f(this.lightLocs.u_surfaceBiomeMix, 0.0);
+    gl.uniform1f(this.lightLocs.u_surfaceAllowRotate, 1.0);
+    gl.uniform1f(this.lightLocs.u_surfaceScaleSpread, 1.0);
     gl.uniform1f(this.lightLocs.u_surfRelief, 0.0);
+    gl.uniform1f(this.lightLocs.u_heightShield, 0.65);
+    gl.uniform1f(this.lightLocs.u_speedHeightMod, 1.0);
     gl.uniform2f(this.lightLocs.u_texel, 1 / WORK_SIZE, 1 / WORK_SIZE);
     gl.uniform4f(this.lightLocs.u_uvClamp, 0.001, 0.001, 0.999, 0.999);
     gl.uniform1i(this.lightLocs.u_doShade, 1);
@@ -1365,7 +1395,9 @@ export class GpuFluidSolver {
     this.lastShadeParams = {
       isShading: params.isShading,
       depthRatio: params.depthRatio,
-      glossRatio: params.glossRatio
+      glossRatio: params.glossRatio,
+      heightShield: params.heightShield !== undefined ? params.heightShield : 0.65,
+      speedHeightMod: params.speedHeightMod !== undefined ? params.speedHeightMod : 1.0
     };
 
     const apron = 2;
@@ -1519,11 +1551,16 @@ export class GpuFluidSolver {
       gl.uniform1i(this.injectLocs.u_surfaceMap, 4);
       gl.uniform1i(this.injectLocs.u_hasSurface, hasSurface ? 1 : 0);
       gl.uniform1f(this.injectLocs.u_surfaceInvScale, surfU.invScale || (1.0 / 320.0));
+      gl.uniform1f(this.injectLocs.u_surfaceBiomeMix, surfU.biomeMix ?? 0.88);
+      gl.uniform1f(this.injectLocs.u_surfaceAllowRotate, surfU.allowRotate ?? 1.0);
+      gl.uniform1f(this.injectLocs.u_surfaceScaleSpread, surfU.scaleSpread ?? 1.0);
       gl.uniform1f(this.injectLocs.u_surfSlip, surfU.slip ?? 0.5);
       gl.uniform1f(this.injectLocs.u_surfResist, surfU.resist ?? 0.0);
       gl.uniform1f(this.injectLocs.u_surfChannel, surfU.channel ?? 0.0);
       gl.uniform1f(this.injectLocs.u_surfRelief, surfU.relief ?? 0.0);
       gl.uniform1f(this.injectLocs.u_pressure, params.pressure !== undefined ? params.pressure : 1.0);
+      gl.uniform1f(this.injectLocs.u_heightShield, params.heightShield !== undefined ? params.heightShield : 0.65);
+      gl.uniform1f(this.injectLocs.u_speedHeightMod, params.speedHeightMod !== undefined ? params.speedHeightMod : 1.0);
 
       gl.drawArrays(gl.TRIANGLES, 0, 6);
       this._swapWork();
@@ -1591,7 +1628,12 @@ export class GpuFluidSolver {
     gl.uniform1i(this.lightLocs.u_hasSurface, hasSurface ? 1 : 0);
     gl.uniform2f(this.lightLocs.u_simOrigin, workX, workY);
     gl.uniform1f(this.lightLocs.u_surfaceInvScale, surfU.invScale || (1.0 / 320.0));
+    gl.uniform1f(this.lightLocs.u_surfaceBiomeMix, surfU.biomeMix ?? 0.88);
+    gl.uniform1f(this.lightLocs.u_surfaceAllowRotate, surfU.allowRotate ?? 1.0);
+    gl.uniform1f(this.lightLocs.u_surfaceScaleSpread, surfU.scaleSpread ?? 1.0);
     gl.uniform1f(this.lightLocs.u_surfRelief, surfU.relief ?? 0.0);
+    gl.uniform1f(this.lightLocs.u_heightShield, params.heightShield !== undefined ? params.heightShield : 0.65);
+    gl.uniform1f(this.lightLocs.u_speedHeightMod, params.speedHeightMod !== undefined ? params.speedHeightMod : 1.0);
 
     gl.uniform2f(this.lightLocs.u_texel, texel, texel);
     gl.uniform4f(this.lightLocs.u_uvClamp, minU, minV, maxU, maxV);
@@ -1615,7 +1657,7 @@ export class GpuFluidSolver {
     const layer = engine.activeLayer;
     const layerSet = engine.layerSettings ? engine.layerSettings[layer] : null;
     const alphaLock = !!(layerSet && layerSet.alphaLock);
-    const { isShading, depthRatio, glossRatio } = this.lastShadeParams;
+    const { isShading, depthRatio, glossRatio, heightShield = 0.65, speedHeightMod = 1.0 } = this.lastShadeParams;
     const doShade = (isShading && (depthRatio > 0.005 || glossRatio > 0.005)) ? 1 : 0;
 
     if (!this._commitCanvas) {
@@ -1713,7 +1755,12 @@ export class GpuFluidSolver {
       gl.uniform1i(this.lightLocs.u_hasSurface, commitHasSurf ? 1 : 0);
       gl.uniform2f(this.lightLocs.u_simOrigin, workX, workY);
       gl.uniform1f(this.lightLocs.u_surfaceInvScale, commitSurfU.invScale || (1.0 / 320.0));
+      gl.uniform1f(this.lightLocs.u_surfaceBiomeMix, commitSurfU.biomeMix ?? 0.88);
+      gl.uniform1f(this.lightLocs.u_surfaceAllowRotate, commitSurfU.allowRotate ?? 1.0);
+      gl.uniform1f(this.lightLocs.u_surfaceScaleSpread, commitSurfU.scaleSpread ?? 1.0);
       gl.uniform1f(this.lightLocs.u_surfRelief, commitSurfU.relief ?? 0.0);
+      gl.uniform1f(this.lightLocs.u_heightShield, heightShield);
+      gl.uniform1f(this.lightLocs.u_speedHeightMod, speedHeightMod);
       gl.uniform2f(this.lightLocs.u_texel, texel, texel);
       gl.uniform4f(this.lightLocs.u_uvClamp, 0.5 * texel, 0.5 * texel, (boxW - 0.5) * texel, (boxH - 0.5) * texel);
       gl.uniform1i(this.lightLocs.u_doShade, doShade);

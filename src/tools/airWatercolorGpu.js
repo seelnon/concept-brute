@@ -13,6 +13,7 @@
 
 import { backupChunkLayer } from '../engine/backupPool.js';
 import { GLSL_RYB_MIX } from '../colorUtils.js';
+import { GLSL_SURFACE_BIOME_SAMPLER } from '../engine/canvasSurfaceGpu.js';
 
 const TILE_SIZE = 256;
 const WORK_SIZE = 1024;
@@ -171,8 +172,16 @@ uniform float u_rotSin;
 uniform float u_tipPour;
 uniform int u_physicalMix;
 uniform sampler2D u_surfaceMap;
+uniform sampler2D u_poreMap;
 uniform int u_hasSurface;
+uniform int u_useHeightmap;
+uniform int u_heightSource;
+uniform vec2 u_texel;
+uniform vec4 u_uvClamp;
 uniform float u_surfaceInvScale;
+uniform float u_surfaceBiomeMix;
+uniform float u_surfaceAllowRotate;
+uniform float u_surfaceScaleSpread;
 uniform float u_surfSlip;
 uniform float u_surfResist;
 uniform float u_surfChannel;
@@ -184,6 +193,7 @@ layout(location = 1) out vec4 outVel;
 
 ${WATERCOLOR_GLSL_COMMON}
 ${GLSL_RYB_MIX}
+${GLSL_SURFACE_BIOME_SAMPLER}
 
 void main() {
   vec4 pig = texture(u_pigment, v_uv);
@@ -216,10 +226,34 @@ void main() {
   vec2 surfSlope = vec2(0.0);
   float surfCavity = 0.0;
   if (u_hasSurface == 1) {
-    vec4 surf = texture(u_surfaceMap, worldPos * u_surfaceInvScale);
-    tooth = clamp(mix(0.5, surf.r, clamp(0.25 + 0.85 * u_surfRelief, 0.0, 1.25)), 0.0, 1.0);
-    surfSlope = (surf.gb - 0.5) * 2.0;
-    surfCavity = surf.a;
+    vec4 pore = sampleSurfacePoreBiome(u_poreMap, worldPos, u_surfaceInvScale, u_surfaceBiomeMix, u_surfaceAllowRotate, u_surfaceScaleSpread);
+    tooth = clamp(mix(0.5, pore.a, clamp(0.25 + 0.85 * u_surfRelief, 0.0, 1.25)), 0.0, 1.0);
+    surfCavity = clamp((1.0 - pore.g) * 0.55 + (1.0 - pore.r) * 0.25, 0.0, 1.0);
+  }
+  if (u_useHeightmap == 1) {
+    if (u_heightSource == 0 && u_hasSurface == 1) {
+      vec4 surf = sampleSurfaceMapBiome(u_surfaceMap, worldPos, u_surfaceInvScale, u_surfaceBiomeMix, u_surfaceAllowRotate, u_surfaceScaleSpread);
+      tooth = clamp(mix(tooth, surf.r, 0.35), 0.0, 1.0);
+      surfSlope = (surf.gb - 0.5) * 2.0;
+      surfCavity = clamp(mix(surfCavity, surf.a, 0.50), 0.0, 1.0);
+    } else if (u_heightSource == 1) {
+      vec2 uvL = vec2(max(u_uvClamp.x, v_uv.x - u_texel.x), v_uv.y);
+      vec2 uvR = vec2(min(u_uvClamp.z, v_uv.x + u_texel.x), v_uv.y);
+      vec2 uvT = vec2(v_uv.x, max(u_uvClamp.y, v_uv.y - u_texel.y));
+      vec2 uvB = vec2(v_uv.x, min(u_uvClamp.w, v_uv.y + u_texel.y));
+      vec4 pL = texture(u_pigment, uvL);
+      vec4 pR = texture(u_pigment, uvR);
+      vec4 pT = texture(u_pigment, uvT);
+      vec4 pB = texture(u_pigment, uvB);
+      float hL = pL.a * (0.35 + 0.65 * dot(pL.a > 0.002 ? (pL.rgb / pL.a) : vec3(0.0), vec3(0.299, 0.587, 0.114)));
+      float hR = pR.a * (0.35 + 0.65 * dot(pR.a > 0.002 ? (pR.rgb / pR.a) : vec3(0.0), vec3(0.299, 0.587, 0.114)));
+      float hT = pT.a * (0.35 + 0.65 * dot(pT.a > 0.002 ? (pT.rgb / pT.a) : vec3(0.0), vec3(0.299, 0.587, 0.114)));
+      float hB = pB.a * (0.35 + 0.65 * dot(pB.a > 0.002 ? (pB.rgb / pB.a) : vec3(0.0), vec3(0.299, 0.587, 0.114)));
+      surfSlope = vec2(hR - hL, hB - hT) * 2.2;
+      float ridgeH = clamp(pig.a * (0.35 + 0.65 * dot(pig.a > 0.002 ? (pig.rgb / pig.a) : vec3(0.0), vec3(0.299, 0.587, 0.114))), 0.0, 1.0);
+      tooth = clamp(mix(tooth, 0.5 + (ridgeH - 0.5) * 0.6, 0.45), 0.0, 1.0);
+      surfCavity = clamp(max(surfCavity, (1.0 - ridgeH) * pig.a * 0.45), 0.0, 1.0);
+    }
   }
 
   float dNormRaw = dist / max(1.0, u_radius);
@@ -527,8 +561,14 @@ uniform int u_isFloat;
 uniform int u_alphaLock;
 uniform int u_physicalMix;
 uniform sampler2D u_surfaceMap;
+uniform sampler2D u_poreMap;
 uniform int u_hasSurface;
+uniform int u_useHeightmap;
+uniform int u_heightSource;
 uniform float u_surfaceInvScale;
+uniform float u_surfaceBiomeMix;
+uniform float u_surfaceAllowRotate;
+uniform float u_surfaceScaleSpread;
 uniform float u_surfSlip;
 uniform float u_surfResist;
 uniform float u_surfChannel;
@@ -540,6 +580,7 @@ layout(location = 1) out vec4 outVel;
 
 ${WATERCOLOR_GLSL_COMMON}
 ${GLSL_RYB_MIX}
+${GLSL_SURFACE_BIOME_SAMPLER}
 
 void main() {
   vec4 cV = texture(u_vel, v_uv);
@@ -590,16 +631,40 @@ void main() {
   vec2 surfSlope = vec2(0.0);
   float surfCavity = 0.0;
   if (u_hasSurface == 1) {
-    vec4 surf = texture(u_surfaceMap, worldPos * u_surfaceInvScale);
-    tooth = clamp(mix(0.5, surf.r, clamp(0.25 + 0.85 * u_surfRelief, 0.0, 1.25)), 0.0, 1.0);
-    surfSlope = (surf.gb - 0.5) * 2.0;
-    surfCavity = surf.a;
-
-    // Channel liquid along wood grain, stone cracks, and cloth weave grooves
-    vec2 surfTan = vec2(-surfSlope.y, surfSlope.x);
-    float tanAlign = dot(velNext, surfTan) >= 0.0 ? 1.0 : -1.0;
-    vec2 grainForce = (-surfSlope * (0.45 + 0.85 * u_surfChannel) + surfTan * tanAlign * (0.75 * u_surfChannel)) * smoothstep(0.015, 0.35, maxNbW);
-    velNext = clamp(velNext + grainForce * u_dt, vec2(-u_maxVel), vec2(u_maxVel));
+    vec4 pore = sampleSurfacePoreBiome(u_poreMap, worldPos, u_surfaceInvScale, u_surfaceBiomeMix, u_surfaceAllowRotate, u_surfaceScaleSpread);
+    tooth = clamp(mix(0.5, pore.a, clamp(0.25 + 0.85 * u_surfRelief, 0.0, 1.25)), 0.0, 1.0);
+    surfCavity = clamp((1.0 - pore.g) * 0.55 + (1.0 - pore.r) * 0.25, 0.0, 1.0);
+    // Pore-fiber wicking anisotropy without forced steep terrain cliff bounce
+    vec2 poreGrad = vec2(pore.r - 0.5, pore.g - 0.5) * (0.28 * u_surfChannel);
+    velNext = clamp(velNext + poreGrad * smoothstep(0.015, 0.35, maxNbW) * u_dt, vec2(-u_maxVel), vec2(u_maxVel));
+  }
+  if (u_useHeightmap == 1) {
+    if (u_heightSource == 0 && u_hasSurface == 1) {
+      vec4 surf = sampleSurfaceMapBiome(u_surfaceMap, worldPos, u_surfaceInvScale, u_surfaceBiomeMix, u_surfaceAllowRotate, u_surfaceScaleSpread);
+      tooth = clamp(mix(tooth, surf.r, 0.35), 0.0, 1.0);
+      surfSlope = (surf.gb - 0.5) * 2.0;
+      surfCavity = clamp(mix(surfCavity, surf.a, 0.50), 0.0, 1.0);
+    } else if (u_heightSource == 1) {
+      vec4 pL_s = texture(u_pigment, uvL);
+      vec4 pR_s = texture(u_pigment, uvR);
+      vec4 pT_s = texture(u_pigment, uvT);
+      vec4 pB_s = texture(u_pigment, uvB);
+      float hL = pL_s.a * (0.35 + 0.65 * dot(pL_s.a > 0.002 ? (pL_s.rgb / pL_s.a) : vec3(0.0), vec3(0.299, 0.587, 0.114)));
+      float hR = pR_s.a * (0.35 + 0.65 * dot(pR_s.a > 0.002 ? (pR_s.rgb / pR_s.a) : vec3(0.0), vec3(0.299, 0.587, 0.114)));
+      float hT = pT_s.a * (0.35 + 0.65 * dot(pT_s.a > 0.002 ? (pT_s.rgb / pT_s.a) : vec3(0.0), vec3(0.299, 0.587, 0.114)));
+      float hB = pB_s.a * (0.35 + 0.65 * dot(pB_s.a > 0.002 ? (pB_s.rgb / pB_s.a) : vec3(0.0), vec3(0.299, 0.587, 0.114)));
+      surfSlope = vec2(hR - hL, hB - hT) * 2.2;
+      float ridgeH = clamp(pigC.a * (0.35 + 0.65 * dot(pigC.a > 0.002 ? (pigC.rgb / pigC.a) : vec3(0.0), vec3(0.299, 0.587, 0.114))), 0.0, 1.0);
+      tooth = clamp(mix(tooth, 0.5 + (ridgeH - 0.5) * 0.6, 0.45), 0.0, 1.0);
+      surfCavity = clamp(max(surfCavity, (1.0 - ridgeH) * pigC.a * 0.45), 0.0, 1.0);
+    }
+    if (dot(surfSlope, surfSlope) > 1e-6) {
+      // Channel liquid along height slopes and grooves
+      vec2 surfTan = vec2(-surfSlope.y, surfSlope.x);
+      float tanAlign = dot(velNext, surfTan) >= 0.0 ? 1.0 : -1.0;
+      vec2 grainForce = (-surfSlope * (0.45 + 0.85 * u_surfChannel) + surfTan * tanAlign * (0.75 * u_surfChannel)) * smoothstep(0.015, 0.35, maxNbW);
+      velNext = clamp(velNext + grainForce * u_dt, vec2(-u_maxVel), vec2(u_maxVel));
+    }
   }
   float mob = smoothstep(0.015, 0.40, maxNbW) * (0.20 + 0.80 * u_wetness) * ((u_hasSurface == 1) ? mix(0.75, 1.32, u_surfSlip) : 1.0);
 
@@ -922,8 +987,9 @@ export class GpuWatercolorSolver {
       'u_color', 'u_opacity', 'u_flow', 'u_wetness', 'u_streamFlow', 'u_bloom', 'u_edge',
       'u_granulation', 'u_time', 'u_segLen', 'u_maxVel', 'u_isFloat', 'u_alphaLock',
       'u_hasTip', 'u_isDab', 'u_rotCos', 'u_rotSin', 'u_tipPour', 'u_physicalMix',
-      'u_surfaceMap', 'u_hasSurface', 'u_surfaceInvScale', 'u_surfSlip',
-      'u_surfResist', 'u_surfChannel', 'u_surfRelief', 'u_pressure'
+      'u_surfaceMap', 'u_poreMap', 'u_hasSurface', 'u_useHeightmap', 'u_heightSource',
+      'u_texel', 'u_uvClamp', 'u_surfaceInvScale', 'u_surfaceBiomeMix', 'u_surfaceAllowRotate', 'u_surfaceScaleSpread',
+      'u_surfSlip', 'u_surfResist', 'u_surfChannel', 'u_surfRelief', 'u_pressure'
     ]);
     this.vortLocs = this._cacheLocs(this.progVort, ['u_vel', 'u_texel', 'u_uvClamp', 'u_maxVel', 'u_isFloat']);
     this.confDivLocs = this._cacheLocs(this.progConfDiv, [
@@ -936,8 +1002,9 @@ export class GpuWatercolorSolver {
       'u_pigment', 'u_vel', 'u_press', 'u_texel', 'u_uvClamp', 'u_simOrigin',
       'u_wetness', 'u_streamFlow', 'u_bloom', 'u_edge', 'u_granulation',
       'u_maxVel', 'u_dt', 'u_isFloat', 'u_alphaLock', 'u_physicalMix',
-      'u_surfaceMap', 'u_hasSurface', 'u_surfaceInvScale', 'u_surfSlip',
-      'u_surfResist', 'u_surfChannel', 'u_surfRelief', 'u_surfAbsorb'
+      'u_surfaceMap', 'u_poreMap', 'u_hasSurface', 'u_useHeightmap', 'u_heightSource',
+      'u_surfaceInvScale', 'u_surfaceBiomeMix', 'u_surfaceAllowRotate', 'u_surfaceScaleSpread',
+      'u_surfSlip', 'u_surfResist', 'u_surfChannel', 'u_surfRelief', 'u_surfAbsorb'
     ]);
     this.drySharpenLocs = this._cacheLocs(this.progDrySharpen, [
       'u_pigment', 'u_vel', 'u_texel', 'u_uvClamp', 'u_edge', 'u_wetness'
@@ -1056,8 +1123,18 @@ export class GpuWatercolorSolver {
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, this.tipTex);
     gl.uniform1i(this.injectLocs.u_surfaceMap, 3);
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, this.tipTex);
+    gl.uniform1i(this.injectLocs.u_poreMap, 4);
     gl.uniform1i(this.injectLocs.u_hasSurface, 0);
+    gl.uniform1i(this.injectLocs.u_useHeightmap, 0);
+    gl.uniform1i(this.injectLocs.u_heightSource, 0);
+    gl.uniform2f(this.injectLocs.u_texel, texel, texel);
+    gl.uniform4f(this.injectLocs.u_uvClamp, 0.001, 0.001, 0.999, 0.999);
     gl.uniform1f(this.injectLocs.u_surfaceInvScale, 1.0 / 320.0);
+    gl.uniform1f(this.injectLocs.u_surfaceBiomeMix, 0.0);
+    gl.uniform1f(this.injectLocs.u_surfaceAllowRotate, 1.0);
+    gl.uniform1f(this.injectLocs.u_surfaceScaleSpread, 1.0);
     gl.uniform1f(this.injectLocs.u_surfSlip, 0.5);
     gl.uniform1f(this.injectLocs.u_surfResist, 0.0);
     gl.uniform1f(this.injectLocs.u_surfChannel, 0.0);
@@ -1136,8 +1213,16 @@ export class GpuWatercolorSolver {
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, this.tipTex);
     gl.uniform1i(this.flowEdgeLocs.u_surfaceMap, 3);
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, this.tipTex);
+    gl.uniform1i(this.flowEdgeLocs.u_poreMap, 4);
     gl.uniform1i(this.flowEdgeLocs.u_hasSurface, 0);
+    gl.uniform1i(this.flowEdgeLocs.u_useHeightmap, 0);
+    gl.uniform1i(this.flowEdgeLocs.u_heightSource, 0);
     gl.uniform1f(this.flowEdgeLocs.u_surfaceInvScale, 1.0 / 320.0);
+    gl.uniform1f(this.flowEdgeLocs.u_surfaceBiomeMix, 0.0);
+    gl.uniform1f(this.flowEdgeLocs.u_surfaceAllowRotate, 1.0);
+    gl.uniform1f(this.flowEdgeLocs.u_surfaceScaleSpread, 1.0);
     gl.uniform1f(this.flowEdgeLocs.u_surfSlip, 0.5);
     gl.uniform1f(this.flowEdgeLocs.u_surfResist, 0.0);
     gl.uniform1f(this.flowEdgeLocs.u_surfChannel, 0.0);
@@ -1759,15 +1844,30 @@ export class GpuWatercolorSolver {
     gl.uniform1f(this.injectLocs.u_tipPour, tipPour);
     gl.uniform1i(this.injectLocs.u_physicalMix, (engine.physicalColorMix !== false) ? 1 : 0);
 
+    const texel = 1.0 / WORK_SIZE;
+    const minU = 0.5 * texel;
+    const minV = 0.5 * texel;
+    const maxU = Math.max(minU, (boxW - 0.5) * texel);
+    const maxV = Math.max(minV, (boxH - 0.5) * texel);
     const surfMgr = engine.surfaceManager;
     const surfU = surfMgr ? surfMgr.getShaderUniforms() : null;
-    const surfTex = (surfU && surfU.active) ? surfMgr.ensureGpuTextures(gl) : { mapTex: null };
+    const surfTex = (surfU && surfU.active) ? surfMgr.ensureGpuTextures(gl) : { mapTex: null, poreTex: null };
     const hasSurf = !!(surfTex && surfTex.mapTex);
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, hasSurf ? surfTex.mapTex : this.tipTex);
     gl.uniform1i(this.injectLocs.u_surfaceMap, 3);
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, (hasSurf && surfTex.poreTex) ? surfTex.poreTex : this.tipTex);
+    gl.uniform1i(this.injectLocs.u_poreMap, 4);
     gl.uniform1i(this.injectLocs.u_hasSurface, hasSurf ? 1 : 0);
+    gl.uniform1i(this.injectLocs.u_useHeightmap, params.useHeightmap ? 1 : 0);
+    gl.uniform1i(this.injectLocs.u_heightSource, params.heightSource === 1 ? 1 : 0);
+    gl.uniform2f(this.injectLocs.u_texel, texel, texel);
+    gl.uniform4f(this.injectLocs.u_uvClamp, minU, minV, maxU, maxV);
     gl.uniform1f(this.injectLocs.u_surfaceInvScale, surfU ? surfU.invScale : 1.0 / 320.0);
+    gl.uniform1f(this.injectLocs.u_surfaceBiomeMix, surfU ? surfU.biomeMix : 0.88);
+    gl.uniform1f(this.injectLocs.u_surfaceAllowRotate, surfU ? surfU.allowRotate : 1.0);
+    gl.uniform1f(this.injectLocs.u_surfaceScaleSpread, surfU ? surfU.scaleSpread : 1.0);
     gl.uniform1f(this.injectLocs.u_surfSlip, surfU ? surfU.slip : 0.5);
     gl.uniform1f(this.injectLocs.u_surfResist, surfU ? surfU.resist : 0.0);
     gl.uniform1f(this.injectLocs.u_surfChannel, surfU ? surfU.channel : 0.0);
@@ -1917,13 +2017,21 @@ export class GpuWatercolorSolver {
 
       const surfMgr = engine.surfaceManager;
       const surfU = surfMgr ? surfMgr.getShaderUniforms() : null;
-      const surfTex = (surfU && surfU.active) ? surfMgr.ensureGpuTextures(gl) : { mapTex: null };
+      const surfTex = (surfU && surfU.active) ? surfMgr.ensureGpuTextures(gl) : { mapTex: null, poreTex: null };
       const hasSurf = !!(surfTex && surfTex.mapTex);
       gl.activeTexture(gl.TEXTURE3);
       gl.bindTexture(gl.TEXTURE_2D, hasSurf ? surfTex.mapTex : this.tipTex);
       gl.uniform1i(this.flowEdgeLocs.u_surfaceMap, 3);
+      gl.activeTexture(gl.TEXTURE4);
+      gl.bindTexture(gl.TEXTURE_2D, (hasSurf && surfTex.poreTex) ? surfTex.poreTex : this.tipTex);
+      gl.uniform1i(this.flowEdgeLocs.u_poreMap, 4);
       gl.uniform1i(this.flowEdgeLocs.u_hasSurface, hasSurf ? 1 : 0);
+      gl.uniform1i(this.flowEdgeLocs.u_useHeightmap, params.useHeightmap ? 1 : 0);
+      gl.uniform1i(this.flowEdgeLocs.u_heightSource, params.heightSource === 1 ? 1 : 0);
       gl.uniform1f(this.flowEdgeLocs.u_surfaceInvScale, surfU ? surfU.invScale : 1.0 / 320.0);
+      gl.uniform1f(this.flowEdgeLocs.u_surfaceBiomeMix, surfU ? surfU.biomeMix : 0.88);
+      gl.uniform1f(this.flowEdgeLocs.u_surfaceAllowRotate, surfU ? surfU.allowRotate : 1.0);
+      gl.uniform1f(this.flowEdgeLocs.u_surfaceScaleSpread, surfU ? surfU.scaleSpread : 1.0);
       gl.uniform1f(this.flowEdgeLocs.u_surfSlip, surfU ? surfU.slip : 0.5);
       gl.uniform1f(this.flowEdgeLocs.u_surfResist, surfU ? surfU.resist : 0.0);
       gl.uniform1f(this.flowEdgeLocs.u_surfChannel, surfU ? surfU.channel : 0.0);

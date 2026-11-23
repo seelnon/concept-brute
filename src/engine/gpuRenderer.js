@@ -1,4 +1,5 @@
 import { LAYERS_COUNT, TOOLS } from '../constants.js';
+import { GLSL_SURFACE_BIOME_SAMPLER } from './canvasSurfaceGpu.js';
 
 const QUAD_VS = `#version 300 es
 precision highp float;
@@ -88,8 +89,13 @@ uniform float u_isMirrored;
 uniform int u_useSurfaceBg;
 uniform float u_surfaceInvScale;
 uniform float u_surfaceBgOpacity;
+uniform float u_surfaceBiomeMix;
+uniform float u_surfaceAllowRotate;
+uniform float u_surfaceScaleSpread;
 
 out vec4 outColor;
+
+${GLSL_SURFACE_BIOME_SAMPLER}
 
 void main() {
     if (u_clipToBoard == 1) {
@@ -121,7 +127,14 @@ void main() {
     }
 
     if (u_useSurfaceBg == 1) {
-        vec3 texCol = texture(u_tex, v_worldPos * u_surfaceInvScale).rgb;
+        vec3 texCol = sampleSurfaceColorBiome(
+            u_tex,
+            v_worldPos,
+            u_surfaceInvScale,
+            u_surfaceBiomeMix,
+            u_surfaceAllowRotate,
+            u_surfaceScaleSpread
+        );
         // Blend cleanly with user's chosen canvasBg color while letting dark/bright bg tint grain
         vec3 baseBg = u_solidColor.rgb;
         float bgLum = dot(baseBg, vec3(0.299, 0.587, 0.114));
@@ -524,7 +537,10 @@ export class GPURenderer {
       u_invDpr: gl.getUniformLocation(this.quadProgram, 'u_invDpr'),
       u_useSurfaceBg: gl.getUniformLocation(this.quadProgram, 'u_useSurfaceBg'),
       u_surfaceInvScale: gl.getUniformLocation(this.quadProgram, 'u_surfaceInvScale'),
-      u_surfaceBgOpacity: gl.getUniformLocation(this.quadProgram, 'u_surfaceBgOpacity')
+      u_surfaceBgOpacity: gl.getUniformLocation(this.quadProgram, 'u_surfaceBgOpacity'),
+      u_surfaceBiomeMix: gl.getUniformLocation(this.quadProgram, 'u_surfaceBiomeMix'),
+      u_surfaceAllowRotate: gl.getUniformLocation(this.quadProgram, 'u_surfaceAllowRotate'),
+      u_surfaceScaleSpread: gl.getUniformLocation(this.quadProgram, 'u_surfaceScaleSpread')
     };
 
     // Cache uniform locations for gridProgram
@@ -805,6 +821,9 @@ export class GPURenderer {
     gl.uniform1i(this.quadLocs.u_useSurfaceBg, 0);
     gl.uniform1f(this.quadLocs.u_surfaceInvScale, surfUniforms.invScale || (1.0 / 320.0));
     gl.uniform1f(this.quadLocs.u_surfaceBgOpacity, surfUniforms.bgOpacity || 0.0);
+    gl.uniform1f(this.quadLocs.u_surfaceBiomeMix, surfUniforms.biomeMix ?? 0.88);
+    gl.uniform1f(this.quadLocs.u_surfaceAllowRotate, surfUniforms.allowRotate ?? 1.0);
+    gl.uniform1f(this.quadLocs.u_surfaceScaleSpread, surfUniforms.scaleSpread ?? 1.0);
 
     // 2. Static Mode: Drop Shadow, Brutalist Border, and Paper/Material Surface
     //    Infinite Mode: Full-viewport tiled material quad (if active & visible)

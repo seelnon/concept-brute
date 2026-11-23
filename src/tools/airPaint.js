@@ -58,7 +58,9 @@ export const airSettings = {
   followStroke: false,
   tipAngle: 0,      // -180..180 deg
   tipHardness: 55,  // 0..100
-  pressureFlow: 35  // 0..100
+  pressureFlow: 35, // 0..100
+  useHeightmap: false,
+  heightSource: 'surface' // 'surface' | 'layer'
 };
 
 export function syncAirSettingsFromTip(tipSettings) {
@@ -73,6 +75,8 @@ export function syncAirSettingsFromTip(tipSettings) {
   airSettings.tipAngle = tipSettings.airTipAngle ?? 0;
   airSettings.tipHardness = tipSettings.airTipHardness ?? 55;
   airSettings.pressureFlow = tipSettings.airPressureFlow ?? 35;
+  airSettings.useHeightmap = tipSettings.airUseHeightmap !== undefined ? !!tipSettings.airUseHeightmap : false;
+  airSettings.heightSource = tipSettings.airHeightSource || 'surface';
 }
 
 // Reusable 64x64 Brush Tip silhouette / mass / outward-gradient buffers
@@ -715,6 +719,8 @@ function syncAirSettingsFromEngine(engine) {
   if (b.airTipAngle !== undefined) airSettings.tipAngle = b.airTipAngle;
   if (b.airTipHardness !== undefined) airSettings.tipHardness = b.airTipHardness;
   if (b.airPressureFlow !== undefined) airSettings.pressureFlow = b.airPressureFlow;
+  if (b.airUseHeightmap !== undefined) airSettings.useHeightmap = !!b.airUseHeightmap;
+  if (b.airHeightSource !== undefined) airSettings.heightSource = b.airHeightSource;
 }
 
 function prepareAirTipMaps(engine) {
@@ -849,7 +855,10 @@ function computeAirTipAngle(engine, dirX, dirY, pointAngle = null) {
 function runAirStep(engine, ab, from, to, radius, opacity, baseColor, pressure, isSettleStep = false, pointAngle = null, isDab = false) {
   syncAirSettingsFromEngine(engine);
 
-  const wetnessRatio = Math.max(0.0, Math.min(1.0, airSettings.wetness / 100.0));
+  const speedWater = engine?.brush?.speedWater ?? 0;
+  const vFactor = ab?.vFactor || 0;
+  const waterScale = Math.max(0.10, 1.0 + vFactor * (speedWater / 100.0) * 0.85);
+  const wetnessRatio = Math.max(0.0, Math.min(1.0, (airSettings.wetness / 100.0) * waterScale));
   const streamRatio = Math.max(0.0, Math.min(1.0, airSettings.streamFlow / 100.0));
   const bloomRatio = Math.max(0.0, Math.min(1.0, airSettings.bloom / 100.0));
   const edgeRatio = Math.max(0.0, Math.min(1.0, airSettings.edge / 100.0));
@@ -1612,14 +1621,18 @@ function runSmoothedBezier(engine, ab, a, ctrl, b, radius, opacity, baseColor, p
   }
 }
 
-function getNormalizedAirParams() {
+function getNormalizedAirParams(engine = null, vFactor = 0) {
+  const speedWater = engine?.brush?.speedWater ?? 0;
+  const waterScale = Math.max(0.10, 1.0 + vFactor * (speedWater / 100.0) * 0.85);
   return {
-    wetness: Math.max(0.0, Math.min(1.0, airSettings.wetness / 100.0)),
+    wetness: Math.max(0.0, Math.min(1.0, (airSettings.wetness / 100.0) * waterScale)),
     streamFlow: Math.max(0.0, Math.min(1.0, airSettings.streamFlow / 100.0)),
     bloom: Math.max(0.0, Math.min(1.0, airSettings.bloom / 100.0)),
     edge: Math.max(0.0, Math.min(1.0, airSettings.edge / 100.0)),
     granulation: Math.max(0.0, Math.min(1.0, airSettings.granulation / 100.0)),
-    tipPour: Math.max(0.0, Math.min(1.0, (airSettings.tipPour ?? 100) / 100.0))
+    tipPour: Math.max(0.0, Math.min(1.0, (airSettings.tipPour ?? 100) / 100.0)),
+    useHeightmap: !!airSettings.useHeightmap,
+    heightSource: airSettings.heightSource === 'layer' ? 1 : 0
   };
 }
 
@@ -1724,7 +1737,7 @@ function runGpuSmoothedBezier(engine, solver, ab, a, ctrl, b, radius, opacity, b
 // ----------------------------------------------------
 export function startAirPaintStroke(engine) {
   syncAirSettingsFromEngine(engine);
-  const params = getNormalizedAirParams();
+  const params = getNormalizedAirParams(engine, 0);
   const hasTip = prepareAirTipMaps(engine);
 
   const startP = (engine.strokePoints && engine.strokePoints.length > 0)
@@ -1756,7 +1769,8 @@ export function startAirPaintStroke(engine) {
     baseColor,
     lastOpacity: startP.opacity ?? engine.brush.opacity ?? 0.55,
     lastPressure: startP.pressure ?? 1.0,
-    lastAngle: startP.angle ?? null
+    lastAngle: startP.angle ?? null,
+    vFactor: 0
   };
 }
 
@@ -1787,6 +1801,7 @@ export function paintAirIncrementally(engine, j) {
   ab.lastOpacity = opacity;
   ab.lastPressure = pressure;
   ab.lastAngle = pointAngle;
+  ab.vFactor = p.vFactor !== undefined ? p.vFactor : (ab.vFactor || 0);
 
   const dist = Math.hypot(p.x - pPrev.x, p.y - pPrev.y);
   if (dist > 450.0) {
@@ -1802,7 +1817,7 @@ export function paintAirIncrementally(engine, j) {
     const solver = getGpuSolver(engine);
     if (solver && solver.active) {
       syncAirSettingsFromEngine(engine);
-      const params = getNormalizedAirParams();
+      const params = getNormalizedAirParams(engine, ab.vFactor);
       const effPressure = engine?.brush?.pressureEnabled ? pressure : 1.0;
       const pFlowInf = (airSettings.pressureFlow ?? 35) / 100.0;
       const pressFlowScale = 1.0 - pFlowInf + pFlowInf * effPressure;
@@ -1891,7 +1906,7 @@ export function endAirPaintStroke(engine) {
     const solver = getGpuSolver(engine);
     if (solver && solver.active) {
       syncAirSettingsFromEngine(engine);
-      const params = getNormalizedAirParams();
+      const params = getNormalizedAirParams(engine, ab.vFactor || 0);
       const effPressure = engine?.brush?.pressureEnabled ? pr : 1.0;
       const pFlowInf = (airSettings.pressureFlow ?? 35) / 100.0;
       const pressFlowScale = 1.0 - pFlowInf + pFlowInf * effPressure;
