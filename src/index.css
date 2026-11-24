@@ -2680,3 +2680,183 @@ input[type="range"] {
     letter-spacing: 0.3px;
 }
 
+/* PERF SETTINGS LOCKED STATE */
+.settings-row-locked {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.settings-row-locked .settings-label,
+.settings-row-locked .settings-input-check,
+.settings-row-locked .checkbox-wrapper {
+    cursor: not-allowed !important;
+}
+
+.settings-row-locked .checkbox-custom {
+    background-color: #1a1a1a !important;
+    border-color: #000000 !important;
+}
+
+.settings-row-locked .settings-label::after {
+    content: " [LOCKED]";
+    font-size: 7.5px;
+    font-weight: 900;
+    opacity: 0.85;
+}
+
+/* BRUTALIST STARTUP LOADING SCREEN */
+.loading-screen-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9500;
+    background: rgba(240, 240, 240, 0.94);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    pointer-events: auto;
+    opacity: 1;
+    transition: opacity 0.16s linear;
+}
+
+.loading-screen-overlay.loading-dismissing {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.loading-screen-card {
+    width: min(544px, 100%);
+    background: #ffffff;
+    border: 3px solid #000000;
+    box-shadow: 8px 8px 0px 0px #000000;
+    display: flex;
+    flex-direction: column;
+}
+
+.loading-card-header {
+    background: #000000;
+    color: #ffffff;
+    padding: 7px 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 10px;
+    font-weight: 900;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+}
+
+.loading-canvas-stage {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 2 / 1;
+    background-color: #ffffff;
+    background-image:
+        linear-gradient(to right, rgba(0, 0, 0, 0.05) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(0, 0, 0, 0.05) 1px, transparent 1px);
+    background-size: 16px 16px;
+    border-bottom: 3px solid #000000;
+    overflow: hidden;
+    cursor: crosshair;
+    touch-action: none;
+}
+
+#loading-preview-canvas,
+#loading-overlay-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+#loading-overlay-canvas {
+    pointer-events: none;
+}
+
+.loading-stage-tag {
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    background: #ffffff;
+    color: #000000;
+    border: 1.5px solid #000000;
+    padding: 2px 5px;
+    font-size: 8px;
+    font-weight: 900;
+    letter-spacing: 0.4px;
+    pointer-events: none;
+    text-transform: uppercase;
+}
+
+.loading-tool-chip {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    background: #000000;
+    color: #ffffff;
+    border: 1.5px solid #000000;
+    padding: 2px 6px;
+    font-size: 8.5px;
+    font-weight: 900;
+    letter-spacing: 0.5px;
+    pointer-events: none;
+    text-transform: uppercase;
+}
+
+.loading-tool-chip.loading-tool-delete-flash {
+    background: #dc2626;
+    border-color: #000000;
+    color: #ffffff;
+}
+
+.loading-footer {
+    padding: 8px 10px 10px 10px;
+    background: #f5f5f5;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.loading-status-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 9px;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+#loading-status-text {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+#loading-progress-pct {
+    flex-shrink: 0;
+    background: #000000;
+    color: #ffffff;
+    padding: 1px 5px;
+    font-size: 8.5px;
+}
+
+.loading-progress-track {
+    width: 100%;
+    height: 12px;
+    border: 2px solid #000000;
+    background: #ffffff;
+    position: relative;
+    overflow: hidden;
+}
+
+.loading-progress-fill {
+    width: 0%;
+    height: 100%;
+    background: #000000;
+    transition: width 0.08s linear;
+}
+
+

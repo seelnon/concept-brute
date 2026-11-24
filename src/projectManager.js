@@ -411,24 +411,46 @@ export async function initProjectSystem(app) {
         } catch (e) {}
     }
 
-    // Setup Tab Visibility / Wake-up sync
+    // Setup Tab Visibility / Wake-up sync (deferred to idle so Alt-Tab focus has zero frame spike)
     if (!app._visibilitySyncInitialized) {
         app._visibilitySyncInitialized = true;
-        const handleWakeUp = async () => {
-            if (!document.hidden) {
-                try {
-                    await app.storage.ensureReady();
-                    const storedProjects = await app.storage.loadUiState('projects_list');
-                    if (storedProjects && Array.isArray(storedProjects) && storedProjects.length > 0) {
-                        const storedStr = JSON.stringify(storedProjects.map(p => ({ id: p.id, name: p.name })));
-                        const currentStr = JSON.stringify((app.projects || []).map(p => ({ id: p.id, name: p.name })));
-                        if (storedStr !== currentStr) {
-                            app.projects = storedProjects;
-                            await renderProjectList(app);
-                        }
+        let wakeTimer = null;
+        let lastWakeCheck = 0;
+        const runDeferredWakeCheck = async () => {
+            wakeTimer = null;
+            if (document.hidden) return;
+            const now = performance.now();
+            if (now - lastWakeCheck < 1000) return;
+            lastWakeCheck = now;
+            try {
+                await app.storage.ensureReady();
+                const storedProjects = await app.storage.loadUiState('projects_list');
+                if (storedProjects && Array.isArray(storedProjects) && storedProjects.length > 0) {
+                    const storedStr = JSON.stringify(storedProjects.map(p => ({ id: p.id, name: p.name })));
+                    const currentStr = JSON.stringify((app.projects || []).map(p => ({ id: p.id, name: p.name })));
+                    if (storedStr !== currentStr) {
+                        app.projects = storedProjects;
+                        await renderProjectList(app);
                     }
-                } catch (e) {}
+                }
+            } catch (e) {}
+        };
+        const handleWakeUp = () => {
+            if (document.hidden) {
+                if (wakeTimer) {
+                    clearTimeout(wakeTimer);
+                    wakeTimer = null;
+                }
+                return;
             }
+            if (wakeTimer) clearTimeout(wakeTimer);
+            wakeTimer = setTimeout(() => {
+                if (typeof window.requestIdleCallback === 'function') {
+                    window.requestIdleCallback(runDeferredWakeCheck, { timeout: 600 });
+                } else {
+                    runDeferredWakeCheck();
+                }
+            }, 500);
         };
         document.addEventListener('visibilitychange', handleWakeUp);
         window.addEventListener('focus', handleWakeUp);

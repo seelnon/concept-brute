@@ -80,6 +80,12 @@ class App {
     this._domCache = new Map();
     this._dirtyTools = new Set();
     this._perfPrewarmTools = true;
+    this._perfLoadingScreen = true;
+    try {
+      if (localStorage.getItem('perf_loading_screen_hint') === 'false') {
+        this._perfLoadingScreen = false;
+      }
+    } catch (_) {}
     this.storage = new SketchStorage();
     this.engine.storage = this.storage;
     this.palette = new PaletteManager();
@@ -566,10 +572,12 @@ class App {
     try {
         // 1. PANELS & UI FIRST (Immediate listener & hotkey wiring)
         this._status('INITIALIZING UI...');
+        this._updateLoadingScreenUI({ step: 0, total: 10, tool: 'BOOT', status: 'INITIALIZING UI & HOTKEYS...', pct: 4 });
         this._setupUI();
         this._setupHotkeys();
 
         // 2. STORAGE & COMPARTMENTS SECONDO (Single IndexedDB open, zero artificial sleep)
+        this._updateLoadingScreenUI({ step: 0, total: 10, tool: 'STORAGE', status: 'OPENING PROJECT STORAGE & BRUSH TIPS...', pct: 8 });
         try {
             await this.storage.init();
             await Promise.all([
@@ -590,6 +598,11 @@ class App {
 
         // 3. LOAD NON-CANVAS SETTINGS (Fast per-tool & UI compartment restoration)
         await this.loadProjectSettings();
+        if (!this._perfLoadingScreen) {
+            this._dismissLoadingScreen(true);
+        } else {
+            this._updateLoadingScreenUI({ step: 0, total: 10, tool: 'LOAD', status: 'RESTORING PROJECT CHUNKS & LAYERS...', pct: 12 });
+        }
 
         // 4. HEAVY ASSETS LAST (Image references and large canvas chunk matrices)
         await this.load();
@@ -676,7 +689,138 @@ class App {
         }
     };
 
-    this._scheduleToolWarmup();
+    if (this._perfLoadingScreen) {
+        this._runLoadingScreenPrewarm();
+    } else {
+        this._dismissLoadingScreen(true);
+        this._scheduleToolWarmup();
+    }
+  }
+
+  _syncPerfPrewarmLockUI() {
+    const prewarmCheck = this._el('settings-perf-prewarm-tools');
+    const prewarmRow = this._el('perf-prewarm-row');
+    const loadingCheck = this._el('settings-perf-loading-screen');
+
+    if (this._perfLoadingScreen) {
+      this._perfPrewarmTools = true;
+      if (prewarmCheck) {
+        prewarmCheck.checked = true;
+        prewarmCheck.disabled = true;
+      }
+      if (prewarmRow) prewarmRow.classList.add('settings-row-locked');
+    } else {
+      if (prewarmCheck) {
+        prewarmCheck.disabled = false;
+        prewarmCheck.checked = !!this._perfPrewarmTools;
+      }
+      if (prewarmRow) prewarmRow.classList.remove('settings-row-locked');
+    }
+
+    if (loadingCheck) {
+      loadingCheck.checked = !!this._perfLoadingScreen;
+    }
+  }
+
+  _updateLoadingScreenUI({ step = 0, total = 10, tool = '', status = '', pct = 0, isDeleteFlash = false } = {}) {
+    const stepEl = document.getElementById('loading-step-counter');
+    const badgeEl = document.getElementById('loading-tool-badge');
+    const statusEl = document.getElementById('loading-status-text');
+    const pctEl = document.getElementById('loading-progress-pct');
+    const fillEl = document.getElementById('loading-progress-fill');
+
+    if (stepEl) {
+      const s = String(Math.max(0, Math.min(total, step))).padStart(2, '0');
+      const t = String(total).padStart(2, '0');
+      stepEl.innerText = `[${s}/${t}]`;
+    }
+    if (badgeEl) {
+      if (tool) badgeEl.innerText = tool;
+      badgeEl.classList.toggle('loading-tool-delete-flash', !!isDeleteFlash);
+    }
+    if (statusEl && status) {
+      statusEl.innerText = status;
+    }
+    const clampedPct = Math.max(0, Math.min(100, Math.round(pct)));
+    if (pctEl) pctEl.innerText = `${clampedPct}%`;
+    if (fillEl) fillEl.style.width = `${clampedPct}%`;
+  }
+
+  _dismissLoadingScreen(immediate = false) {
+    const overlay = document.getElementById('loading-screen-overlay');
+    if (!overlay || overlay.classList.contains('hidden')) return;
+    if (immediate) {
+      overlay.classList.add('hidden');
+      overlay.classList.remove('loading-dismissing');
+      return;
+    }
+    overlay.classList.add('loading-dismissing');
+    setTimeout(() => {
+      overlay.classList.add('hidden');
+      overlay.classList.remove('loading-dismissing');
+    }, 170);
+  }
+
+  async _runLoadingScreenPrewarm() {
+    if (this._warmupScheduled) return;
+    this._warmupScheduled = true;
+
+    const overlay = document.getElementById('loading-screen-overlay');
+    const previewCanvas = document.getElementById('loading-preview-canvas');
+    const overlayCanvas = document.getElementById('loading-overlay-canvas');
+
+    if (!overlay || !previewCanvas || !overlayCanvas) {
+      this._dismissLoadingScreen(true);
+      this._scheduleToolWarmup();
+      return;
+    }
+
+    overlay.classList.remove('hidden', 'loading-dismissing');
+
+    try {
+      if (this.engine && !this.engine.isDrawing && !this._isSwitchingProject) {
+        if (this.engine.brush && this.engine.brush.tip) {
+          const bSize = Math.round(this.engine.brush.size || 20);
+          const cacheSize = this.engine._getCacheSize(bSize);
+          this.engine._updateTipCache(cacheSize, this.engine.brush.airbrush || 0, this.engine.brush.color || '#000000');
+        }
+        const bw = this.engine.isStatic ? Math.min(2560, this.engine.staticWidth || 1024) : (this.engine.chunkSize || 1024);
+        const bh = this.engine.isStatic ? Math.min(2560, this.engine.staticHeight || 1024) : (this.engine.chunkSize || 1024);
+        const c = acquireBackupCanvas(this.engine, bw, bh, false);
+        releaseBackupCanvas(this.engine, c);
+
+        const ok = await this.prewarmAllTools(false, {
+          previewCanvas,
+          overlayCanvas,
+          onStep: (step, total, tool, detail) => {
+            const pct = 15 + (step / total) * 85;
+            this._updateLoadingScreenUI({
+              step,
+              total,
+              tool,
+              status: detail || `PREWARMING ${tool}...`,
+              pct,
+              isDeleteFlash: (tool === 'DELETE')
+            });
+          }
+        });
+
+        if (ok) {
+          this._updateLoadingScreenUI({
+            step: 10,
+            total: 10,
+            tool: 'READY',
+            status: 'ALL SOLVERS & TIPS WARMED // WORKSPACE READY',
+            pct: 100,
+            isDeleteFlash: false
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('Startup loading prewarm error:', e);
+    } finally {
+      this._dismissLoadingScreen(false);
+    }
   }
 
   _warmToolSolver(tool) {
@@ -698,7 +842,7 @@ class App {
     }
   }
 
-  async prewarmAllTools(force = false) {
+  async prewarmAllTools(force = false, opts = {}) {
     if (!this.engine || this._isPrewarming) return false;
     if (this._allToolsPrewarmed && !force) return true;
 
@@ -708,8 +852,13 @@ class App {
     if (statusEl) statusEl.innerText = 'PREWARMING TOOLS...';
 
     const ok = await runPhantomToolsPrewarm(this, {
-      onProgress: (step, total, label) => {
+      previewCanvas: opts.previewCanvas || null,
+      overlayCanvas: opts.overlayCanvas || null,
+      onProgress: (step, total, label, detail) => {
         if (statusEl) statusEl.innerText = `PREWARMING ${step}/${total}: ${label}`;
+        if (typeof opts.onStep === 'function') {
+          opts.onStep(step, total, label, detail);
+        }
       }
     });
 
@@ -938,8 +1087,19 @@ class App {
         const uiStateBatch = await this.storage.loadUiStateBatch([
             'global_autosaveDelaySlider',
             'global_autosaveEnabled',
-            'perf_prewarm_tools'
+            'perf_prewarm_tools',
+            'perf_loading_screen'
         ]);
+
+        let loadingScreenPref = uiStateBatch['perf_loading_screen'];
+        if (loadingScreenPref === null || loadingScreenPref === undefined) {
+            loadingScreenPref = true;
+            this.storage.saveUiState('perf_loading_screen', true).catch(() => {});
+        }
+        this._perfLoadingScreen = (loadingScreenPref !== false && loadingScreenPref !== 'false');
+        try {
+            localStorage.setItem('perf_loading_screen_hint', String(this._perfLoadingScreen));
+        } catch (_) {}
 
         let prewarmPref = uiStateBatch['perf_prewarm_tools'];
         if (prewarmPref === null || prewarmPref === undefined) {
@@ -956,9 +1116,10 @@ class App {
                 prewarmPref = true;
             }
         }
-        this._perfPrewarmTools = (prewarmPref !== false && prewarmPref !== 'false');
-        const prewarmCheck = this._el('settings-perf-prewarm-tools');
-        if (prewarmCheck) prewarmCheck.checked = !!this._perfPrewarmTools;
+        this._perfPrewarmTools = this._perfLoadingScreen
+            ? true
+            : (prewarmPref !== false && prewarmPref !== 'false');
+        this._syncPerfPrewarmLockUI();
 
         let perToolMap = null;
         if (!options.isNewProject) {

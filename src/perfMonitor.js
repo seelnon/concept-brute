@@ -44,10 +44,36 @@ export class PerfMonitor {
     this.rafId = null;
     this.isWindowOpen = false;
 
-    // Listen for tab visibility and window focus changes to discard OS/browser background throttle spikes
-    this._onFocus = () => this.resetTiming();
-    this._onBlur = () => this.resetTiming();
-    this._onVisibilityChange = () => this.resetTiming();
+    this._lastFocusTime = performance.now();
+    this._resumeTimer = null;
+
+    // Pause rAF loop completely when blurred/hidden and resume smoothly on focus return
+    this._onFocus = () => {
+      this._lastFocusTime = performance.now();
+      this.resetTiming();
+      if (this._resumeTimer) clearTimeout(this._resumeTimer);
+      this._resumeTimer = setTimeout(() => {
+        this._resumeTimer = null;
+        if (!document.hidden && (typeof document.hasFocus !== 'function' || document.hasFocus())) {
+          this.resetTiming();
+          this.start();
+        }
+      }, 160);
+    };
+    this._onBlur = () => {
+      if (this._resumeTimer) {
+        clearTimeout(this._resumeTimer);
+        this._resumeTimer = null;
+      }
+      this.stop();
+    };
+    this._onVisibilityChange = () => {
+      if (document.hidden) {
+        this._onBlur();
+      } else {
+        this._onFocus();
+      }
+    };
 
     window.addEventListener('focus', this._onFocus);
     window.addEventListener('blur', this._onBlur);
@@ -129,6 +155,7 @@ export class PerfMonitor {
     if (this.isSavingActive()) return false; // Strictly skip checks during saving
     if (document.hidden) return false; // Ignore browser background tab throttling
     if (typeof document.hasFocus === 'function' && !document.hasFocus()) return false; // Ignore blurred window
+    if ((now - (this._lastFocusTime || 0)) < 400) return false; // Allow compositor wake-up settle after Alt-Tab
 
     if (this.paintOnly) {
       // Must be actively painting on canvas or within 70ms of stroke commit
@@ -148,6 +175,10 @@ export class PerfMonitor {
     this.lastFrameTime = performance.now();
     
     const loop = (time) => {
+      if (document.hidden || (typeof document.hasFocus === 'function' && !document.hasFocus())) {
+        this.rafId = null;
+        return;
+      }
       this._checkFrame(time);
       this.rafId = requestAnimationFrame(loop);
     };
@@ -162,9 +193,6 @@ export class PerfMonitor {
   }
 
   _checkFrame(now) {
-    // If window is blurred or document is hidden (e.g. typing in AI Studio chat or switched tabs),
-    // browser intentionally throttles requestAnimationFrame down to 20-30 FPS.
-    // Reset lastFrameTime to prevent false 'engine lag' reports upon return.
     if (document.hidden || (typeof document.hasFocus === 'function' && !document.hasFocus())) {
       this.lastFrameTime = now;
       return;

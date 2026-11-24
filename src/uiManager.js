@@ -1339,13 +1339,43 @@ export function setupUI(app) {
     }
 
     const checkPerfPrewarm = document.getElementById('settings-perf-prewarm-tools');
+    const checkPerfLoading = document.getElementById('settings-perf-loading-screen');
+
+    if (typeof app._syncPerfPrewarmLockUI === 'function') {
+        app._syncPerfPrewarmLockUI();
+    }
+
+    if (checkPerfLoading) {
+        checkPerfLoading.onchange = (e) => {
+            const loadingOn = !!e.target.checked;
+            app._perfLoadingScreen = loadingOn;
+            app.storage?.saveUiState('perf_loading_screen', loadingOn, true);
+            try { localStorage.setItem('perf_loading_screen_hint', String(loadingOn)); } catch (_) {}
+
+            if (loadingOn) {
+                app._perfPrewarmTools = true;
+                app.storage?.saveUiState('perf_prewarm_tools', true, true);
+            }
+            app._syncPerfPrewarmLockUI?.();
+
+            if (loadingOn && !app._allToolsPrewarmed && typeof app.prewarmAllTools === 'function') {
+                app.prewarmAllTools(false);
+            }
+        };
+    }
+
     if (checkPerfPrewarm) {
-        checkPerfPrewarm.checked = !!app._perfPrewarmTools;
         checkPerfPrewarm.onchange = (e) => {
+            if (app._perfLoadingScreen) {
+                e.target.checked = true;
+                app._perfPrewarmTools = true;
+                app._syncPerfPrewarmLockUI?.();
+                return;
+            }
             const enabled = !!e.target.checked;
             app._perfPrewarmTools = enabled;
             app.storage?.saveUiState('perf_prewarm_tools', enabled, true);
-            if (enabled && typeof app.prewarmAllTools === 'function') {
+            if (enabled && !app._allToolsPrewarmed && typeof app.prewarmAllTools === 'function') {
                 app.prewarmAllTools(false);
             }
         };

@@ -912,15 +912,22 @@
                      </div>
                  </div>
                  <div class="settings-divider" style="margin: 10px 0;"></div>
-                 <div class="settings-row" style="display: flex; justify-content: space-between; align-items: center;">
+                 <div class="settings-row" id="perf-prewarm-row" style="display: flex; justify-content: space-between; align-items: center;">
                      <label class="settings-label" for="settings-perf-prewarm-tools">PREWARM ALL TOOLS ON STARTUP</label>
                      <div class="checkbox-wrapper">
-                         <input type="checkbox" id="settings-perf-prewarm-tools" class="settings-input-check">
+                         <input type="checkbox" id="settings-perf-prewarm-tools" checked class="settings-input-check">
                          <span class="checkbox-custom"></span>
                      </div>
                  </div>
-                 <p style="font-size: 8px; line-height: 1.35; opacity: 0.72; margin: 4px 0 8px 0;">
-                     Optional: runs a hidden 1-stroke warmup across every tool (Brush, Wireframe, Lasso, Smudge, Eraser, Liquify, Fluid Paint, Watercolor) on an invisible scratch buffer after load so the very first stroke of any tool has zero shader/tip init stutter.
+                 <div class="settings-row" id="perf-loading-screen-row" style="margin-top: 6px; display: flex; justify-content: space-between; align-items: center;">
+                     <label class="settings-label" for="settings-perf-loading-screen">LOADING SCREEN ON STARTUP</label>
+                     <div class="checkbox-wrapper">
+                         <input type="checkbox" id="settings-perf-loading-screen" checked class="settings-input-check">
+                         <span class="checkbox-custom"></span>
+                     </div>
+                 </div>
+                 <p id="perf-prewarm-desc" style="font-size: 8px; line-height: 1.35; opacity: 0.72; margin: 4px 0 8px 0;">
+                     Visual interactive warmup across every tool on startup (Brush dynamics, Wireframe, Fluid Paint, Watercolor, Sumi-e, Smudge, Eraser, Liquify, Lasso + Delete) so first strokes have zero compile stutter. Locking: turning Loading Screen ON forces Prewarm ON; turn Loading Screen OFF to allow turning Prewarm OFF.
                  </p>
                  <div style="display: flex; gap: 6px; align-items: center; margin-bottom: 4px;">
                      <button id="btn-perf-prewarm-now" class="brutal-btn full-width" style="font-size: 9px; padding: 5px; font-weight: 900;">
@@ -2282,6 +2289,39 @@
       <button id="undo-button"></button>
       <button id="redo-button"></button>
     </div>
+
+    <!-- STARTUP INTERACTIVE PREWARM LOADING SCREEN -->
+    <div id="loading-screen-overlay" class="loading-screen-overlay" role="dialog" aria-label="Engine Prewarm Loading Screen">
+      <div id="loading-screen-card" class="loading-screen-card">
+        <div class="loading-card-header">
+          <span>CONCEPT_BRUTE // STARTUP PREWARM</span>
+          <span id="loading-step-counter">[00/10]</span>
+        </div>
+        <div id="loading-canvas-stage" class="loading-canvas-stage">
+          <canvas id="loading-preview-canvas" width="512" height="256"></canvas>
+          <canvas id="loading-overlay-canvas" width="512" height="256"></canvas>
+          <div class="loading-stage-tag" id="loading-stage-tag">DRAG CANVAS // INTERACTIVE</div>
+          <div class="loading-tool-chip" id="loading-tool-badge">BOOTING</div>
+        </div>
+        <div class="loading-footer">
+          <div class="loading-status-row">
+            <span id="loading-status-text">INITIALIZING WORKSPACE &amp; WEBGL2 SOLVERS...</span>
+            <span id="loading-progress-pct">0%</span>
+          </div>
+          <div class="loading-progress-track">
+            <div class="loading-progress-fill" id="loading-progress-fill"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script>
+      try {
+        if (localStorage.getItem('perf_loading_screen_hint') === 'false') {
+          var _lo = document.getElementById('loading-screen-overlay');
+          if (_lo) _lo.classList.add('hidden');
+        }
+      } catch (_) {}
+    </script>
 
     <script type="module" src="./src/main.js"></script>
   </body>
