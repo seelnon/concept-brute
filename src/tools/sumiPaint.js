@@ -733,6 +733,9 @@ export function warmSumiSolver(engine) {
   if (!gr.sumiSolver) {
     gr.sumiSolver = new GpuSumiSolver(gr);
   }
+  if (gr.sumiSolver.ready && gr.sumiSolver.prewarmPipelines) {
+    gr.sumiSolver.prewarmPipelines(engine);
+  }
   return gr.sumiSolver;
 }
 
@@ -1162,4 +1165,24 @@ export function cancelSumiStroke(engine) {
     solver.cancel(engine, true);
   }
   renderSumiBristlePreview();
+}
+
+export function flushSumiCaches(engine) {
+  stopLiveSimLoop();
+  _lastStrokeWorld = null;
+  _lastRawPt = null;
+  _lastMidPt = null;
+  _isFirstMove = false;
+  const solver = engine?.gpuRenderer?.sumiSolver;
+  if (solver) {
+    solver.cancel(engine, false);
+  }
+}
+
+export function clearSumiPassiveArchive(engine, layerIndex = null) {
+  const solver = engine?.gpuRenderer?.sumiSolver;
+  if (solver && typeof solver.clearPassiveArchive === 'function') {
+    const projId = engine?.currentProjectId || 'default';
+    solver.clearPassiveArchive(projId, layerIndex);
+  }
 }

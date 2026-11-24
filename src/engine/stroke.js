@@ -5,6 +5,14 @@ import { paintFluidOnChunks, startFluidPaintStroke, endFluidPaintStroke, cancelF
 import { startLiquifyStroke, paintLiquifyStroke, endLiquifyStroke, cancelLiquifyStroke } from '../tools/liquify.js';
 import { paintAirIncrementally, clearAirParticles, startAirPaintStroke, endAirPaintStroke } from '../tools/airPaint.js';
 import { startSumiPaintStroke, paintSumiMove, endSumiPaintStroke, cancelSumiStroke } from '../tools/sumiPaint.js';
+import {
+  startEraserStroke,
+  paintEraserOnChunks,
+  endEraserStroke,
+  cancelEraserStroke,
+  beginEraserBatch,
+  flushEraserBatch
+} from '../tools/eraser.js';
 import { isMobileDevice } from '../colorUtils.js';
 import { wasmCore } from '../wasm/wasmBridge.js';
 import { hitTestTransformGizmo, updateGizmoHoverUI } from '../tools/selection.js';
@@ -266,9 +274,31 @@ export function _startStroke(e) {
       startSumiPaintStroke(this, worldPos, e);
   } else if (this.brush.type === TOOLS.WIREFRAME) {
       startWireframeStroke(this, worldPos);
-  } else if (this.brush.type === TOOLS.BRUSH || this.brush.type === TOOLS.ERASER) {
+  } else if (this.brush.type === TOOLS.ERASER) {
+      if (!startEraserStroke(this)) {
+          const layerSet = this.layerSettings[this.activeLayer];
+          if (!(layerSet && layerSet.alphaLock)) {
+              const halfSpan = (initSize || 10) * 0.75 + 15;
+              const overlapsStatic = !this.isStatic || (
+                  (worldPos.x + halfSpan) >= (-this.staticWidth * 0.5) &&
+                  (worldPos.x - halfSpan) <= (this.staticWidth * 0.5) &&
+                  (worldPos.y + halfSpan) >= (-this.staticHeight * 0.5) &&
+                  (worldPos.y - halfSpan) <= (this.staticHeight * 0.5)
+              );
+              if (overlapsStatic) {
+                  const sCX = this.isStatic ? 0 : Math.floor(worldPos.x / this.chunkSize);
+                  const sCY = this.isStatic ? 0 : Math.floor(worldPos.y / this.chunkSize);
+                  const startChunk = this._getChunk(sCX, sCY);
+                  if (startChunk) {
+                      const id = `${sCX},${sCY}`;
+                      backupChunkLayer(this, startChunk, id, { layer: this.activeLayer });
+                  }
+              }
+          }
+      }
+  } else if (this.brush.type === TOOLS.BRUSH) {
       // Pre-warm tip cache for main brush so first drag move executes with 0 lag
-      if (this.brush.tip && this.brush.type === TOOLS.BRUSH) {
+      if (this.brush.tip) {
           const bSize = Math.round(initSize);
           const cacheSize = this._getCacheSize(bSize);
           const airbrush = this.brush.airbrush || 0;
@@ -826,6 +856,9 @@ export function _endStroke(e = null) {
   if (this.brush.type === TOOLS.SUMI) {
       endSumiPaintStroke(this);
   }
+  if (this.brush.type === TOOLS.ERASER) {
+      endEraserStroke(this);
+  }
 
   // Bake per-stroke buffer
   if (this.perfMonitor) this.perfMonitor.markPhase('stroke_end_bake', { tool: this.brush.type, chunks: this.currentStrokeDirtyChunks ? this.currentStrokeDirtyChunks.size : 0 });
@@ -1153,6 +1186,7 @@ export function _cancelStroke() {
   cancelFluidAfterEffect(this);
   clearAirParticles(this);
   cancelSumiStroke(this);
+  cancelEraserStroke(this);
 
   cancelLiquifyStroke(this);
   this.liquifyChunkData = null;
@@ -1243,19 +1277,29 @@ export function _paintCurveOnChunks(p0, p1, p2, size1, size2, opac1, opac2, colo
 
   // Much more aggressive simplification for speed (sacrificing quality)
   const steps = Math.min(6, Math.max(1, Math.ceil(dist / 24)));
-  
-  let prev = p0;
-  for (let i = 1; i <= steps; i++) {
-      const t = i / steps;
-      const tInv = 1 - t;
-      const next = {
-          x: tInv * tInv * p0.x + 2 * tInv * t * p1.x + t * t * p2.x,
-          y: tInv * tInv * p0.y + 2 * tInv * t * p1.y + t * t * p2.y
-      };
-      const curSize = size1 + (size2 - size1) * t;
-      const curOpac = opac1 + (opac2 - opac1) * t;
-      this._paintOnChunks(prev, next, curSize, curOpac, color);
-      prev = next;
+  const batchEraser = (this.brush.type === TOOLS.ERASER && this.useGpuEraser);
+  if (batchEraser) {
+      beginEraserBatch(this);
+  }
+
+  try {
+      let prev = p0;
+      for (let i = 1; i <= steps; i++) {
+          const t = i / steps;
+          const tInv = 1 - t;
+          const next = {
+              x: tInv * tInv * p0.x + 2 * tInv * t * p1.x + t * t * p2.x,
+              y: tInv * tInv * p0.y + 2 * tInv * t * p1.y + t * t * p2.y
+          };
+          const curSize = size1 + (size2 - size1) * t;
+          const curOpac = opac1 + (opac2 - opac1) * t;
+          this._paintOnChunks(prev, next, curSize, curOpac, color);
+          prev = next;
+      }
+  } finally {
+      if (batchEraser) {
+          flushEraserBatch(this);
+      }
   }
 }
 
@@ -1361,6 +1405,24 @@ export function _paintOnChunks(from, to, size, opacity, color) {
   if (!Number.isFinite(this.spacingAccumulator)) this.spacingAccumulator = 0;
 
   if (stamps.length === 0) return;
+
+  if (isEraser) {
+      const layerSet = this.layerSettings[this.activeLayer];
+      if (layerSet && layerSet.alphaLock) return;
+      if (this.useGpuEraser) {
+          if (this.perfMonitor) {
+              this.perfMonitor.markPhase('chunk_paint', {
+                  tool: this.brush.type,
+                  stamps: stamps.length,
+                  chunks: 1,
+                  gpu: true
+              });
+          }
+          if (paintEraserOnChunks(this, stamps, flow)) {
+              return;
+          }
+      }
+  }
 
   // 3. Cache and Smudge Prep
   if (tip && !isSmudge) {

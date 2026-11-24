@@ -1878,6 +1878,13 @@ export class GpuFluidSolver {
     }
   }
 
+  resetProjectState() {
+    this.cancel(null);
+    while (this.tilePool.length > 4) {
+      this._destroyTileGpu(this.tilePool.pop());
+    }
+  }
+
   dispose() {
     const gl = this.gl;
     if (!gl) return;

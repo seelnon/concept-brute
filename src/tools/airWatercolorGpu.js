@@ -2305,6 +2305,38 @@ export class GpuWatercolorSolver {
     }
   }
 
+  resetProjectState(prevProjId = null) {
+    this.cancel(null);
+    if (prevProjId) {
+      const prefix = `${prevProjId}:`;
+      for (const [key, entry] of this.wetCache.entries()) {
+        if (key.startsWith(prefix)) {
+          this.wetCache.delete(key);
+          if (entry && entry.vel) {
+            if (this.wetPool.length < 4) this.wetPool.push(entry.vel);
+            else if (this.gl) {
+              if (entry.vel.fbo) this.gl.deleteFramebuffer(entry.vel.fbo);
+              if (entry.vel.tex) this.gl.deleteTexture(entry.vel.tex);
+            }
+          }
+        }
+      }
+    } else {
+      this._clearWetCache();
+    }
+    while (this.tilePool.length > 4) {
+      this._destroyTileGpu(this.tilePool.pop());
+    }
+    while (this.wetPool.length > 4) {
+      const o = this.wetPool.pop();
+      if (o && this.gl) {
+        if (o.fbo) this.gl.deleteFramebuffer(o.fbo);
+        if (o.tex) this.gl.deleteTexture(o.tex);
+      }
+    }
+    this._brushColorCache = null;
+  }
+
   dispose() {
     const gl = this.gl;
     if (!gl) return;

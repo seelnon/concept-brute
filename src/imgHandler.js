@@ -1,4 +1,12 @@
 import { TOOLS } from './constants.js';
+import {
+  createDefaultColorAdjustState,
+  isDefaultColorAdjustState,
+  compileColorAdjustState,
+  applyColorAdjustToBuffer,
+  computeHistogramBins,
+  mountPainterlyControlsUI
+} from './colorCorrection.js';
 
 export class ImgHandler {
   constructor(engine, onUpdate = null) {
@@ -93,11 +101,33 @@ export class ImgHandler {
       b:   { black: 0, gamma: 1.0, white: 255, outblack: 0, outwhite: 255 }
     };
 
+    // Painterly / Curves mode state
+    this.colorAdjustMode = 'levels'; // 'levels' | 'painterly'
+    this.painterlyState = createDefaultColorAdjustState();
+    this.btnColorModeToggle = document.getElementById('btn-ref-col-mode-toggle');
+    this.lblColorModeLevels = document.getElementById('ref-col-mode-lbl-levels');
+    this.lblColorModePainterly = document.getElementById('ref-col-mode-lbl-painterly');
+    this.levelsPane = document.getElementById('ref-color-levels-pane');
+    this.curvesPane = document.getElementById('ref-color-curves-pane');
+    this.btnCcViewToggle = document.getElementById('btn-ref-cc-view-toggle');
+    this.ccCurvesSubpane = document.getElementById('ref-cc-curves-subpane');
+    this.ccSlidersSubpane = document.getElementById('ref-cc-sliders-subpane');
+    this.ccViewMode = 'curves'; // 'curves' | 'sliders'
+
+    this._previewRafId = null;
+    this._previewTimer = null;
+    this._lastPreviewTime = 0;
+    this._proxyCanvas = null;
+    this._proxyCtx = null;
+    this._proxySrcImgData = null;
+    this._proxyDstImgData = null;
+
     this.isDraggingCrop = false;
     this.dragStartPos = null;
 
     this._initEvents();
     this._initEditorEvents();
+    this._initPainterlyControls();
 
     window.addEventListener('resize', () => {
       if (this.modal && !this.modal.classList.contains('hidden')) {
@@ -117,7 +147,7 @@ export class ImgHandler {
     this.active = false;
     this.topBarMain.classList.remove('hidden');
     this.topBarRef.classList.add('hidden');
-    if (this.modal) this.modal.classList.add('hidden');
+    this.closeEditor();
   }
 
   syncUI() {
@@ -199,7 +229,7 @@ export class ImgHandler {
 
   openEditor(tabMode = 'crop') {
     if (this.engine.selectedRefIndex < 0) {
-      alert('Please select a reference image first.');
+      this.engine?.onStatus?.('SELECT A REFERENCE IMAGE FIRST');
       return;
     }
     this.selectedRef = this.engine.referenceImages[this.engine.selectedRefIndex];
@@ -212,7 +242,9 @@ export class ImgHandler {
       // Clear saved position to ensure it opens centered by default
       if (this.engine.windowPositions) {
           delete this.engine.windowPositions['modal-ref-editor'];
-          localStorage.setItem('window_positions', JSON.stringify(this.engine.windowPositions));
+          if (this.engine.storage?.saveUiState) {
+              this.engine.storage.saveUiState('window_positions', this.engine.windowPositions);
+          }
       }
       
       // Center modal in pixels
@@ -223,13 +255,39 @@ export class ImgHandler {
       this.modal.style.transform = '';
     }
 
+    // Pause background autosave while editing reference image
+    this.engine?.app?._clearSaveTimer?.();
+    if (this.engine?.app) this.engine.app._pauseAutosaveForModal = true;
+
     // Build Original Canvas Data model
     this.origCanvas = document.createElement('canvas');
     this.origCanvas.width = this.selectedRef.img.width;
     this.origCanvas.height = this.selectedRef.img.height;
-    const octx = this.origCanvas.getContext('2d');
+    const octx = this.origCanvas.getContext('2d', { willReadFrequently: true });
     octx.drawImage(this.selectedRef.img, 0, 0);
     this.origImgData = octx.getImageData(0, 0, this.origCanvas.width, this.origCanvas.height);
+
+    // Build fast downsampled preview proxy (max 520px) so curves & sliders stay 60fps on large photos
+    const w = this.origCanvas.width;
+    const h = this.origCanvas.height;
+    const maxDim = Math.max(w, h);
+    if (w * h > 280000 && maxDim > 520) {
+      const scale = 520 / maxDim;
+      const pw = Math.max(1, Math.round(w * scale));
+      const ph = Math.max(1, Math.round(h * scale));
+      this._proxyCanvas = document.createElement('canvas');
+      this._proxyCanvas.width = pw;
+      this._proxyCanvas.height = ph;
+      this._proxyCtx = this._proxyCanvas.getContext('2d', { willReadFrequently: true });
+      this._proxyCtx.drawImage(this.origCanvas, 0, 0, pw, ph);
+      this._proxySrcImgData = this._proxyCtx.getImageData(0, 0, pw, ph);
+      this._proxyDstImgData = this._proxyCtx.createImageData(pw, ph);
+    } else {
+      this._proxyCanvas = null;
+      this._proxyCtx = null;
+      this._proxySrcImgData = null;
+      this._proxyDstImgData = null;
+    }
 
     // Reset parameters
     this.cropVal = { left: 0, right: 0, top: 0, bottom: 0 };
@@ -247,11 +305,27 @@ export class ImgHandler {
     }
     this.colorBWMode = false;
 
+    // Reset Painterly Curves state for fresh editor session
+    const freshPainterly = createDefaultColorAdjustState();
+    this.painterlyState.activeSpace = freshPainterly.activeSpace;
+    this.painterlyState.activeChannels = { ...freshPainterly.activeChannels };
+    this.painterlyState.curves = freshPainterly.curves;
+    this.painterlyState.sliders = { ...freshPainterly.sliders };
+    this.painterlyState.chromaBleed = 0;
+    this.painterlyState.bwMode = false;
+    if (this.painterlyUi) {
+      const histSrc = this._proxySrcImgData ? this._proxySrcImgData.data : this.origImgData.data;
+      this.painterlyUi.curveEditor.setHistogram(computeHistogramBins(histSrc, 64));
+      this.painterlyUi.syncUIFromState();
+    }
+
     // Update Sliders in UI
     this.syncCropSliders();
     this.syncColorSliders('all');
     if (this.colorChannelSelect) this.colorChannelSelect.value = 'all';
     this.updateKnifeStatus();
+    this.setColorAdjustMode('levels', false);
+    this.setPainterlyViewMode('curves', false);
 
     // Switch active Tab visual indicators
     this.switchTab(tabMode);
@@ -261,10 +335,31 @@ export class ImgHandler {
   }
 
   closeEditor() {
+    if (this._previewTimer) {
+      clearTimeout(this._previewTimer);
+      this._previewTimer = null;
+    }
+    if (this._previewRafId) {
+      cancelAnimationFrame(this._previewRafId);
+      this._previewRafId = null;
+    }
     if (this.modal) this.modal.classList.add('hidden');
+    if (this._proxyCanvas) {
+      this._proxyCanvas.width = 1;
+      this._proxyCanvas.height = 1;
+    }
+    if (this.origCanvas) {
+      this.origCanvas.width = 1;
+      this.origCanvas.height = 1;
+    }
     this.selectedRef = null;
     this.origImgData = null;
     this.origCanvas = null;
+    this._proxyCanvas = null;
+    this._proxyCtx = null;
+    this._proxySrcImgData = null;
+    this._proxyDstImgData = null;
+    if (this.engine?.app) this.engine.app._pauseAutosaveForModal = false;
   }
 
   switchTab(tabId) {
@@ -272,11 +367,11 @@ export class ImgHandler {
     Object.entries(this.tabs).forEach(([id, tabBtn]) => {
       if (!tabBtn) return;
       if (id === tabId) {
-        tabBtn.style.background = 'white';
-        tabBtn.style.color = 'black';
-      } else {
         tabBtn.style.background = 'black';
         tabBtn.style.color = 'white';
+      } else {
+        tabBtn.style.background = 'white';
+        tabBtn.style.color = 'black';
       }
     });
 
@@ -290,7 +385,88 @@ export class ImgHandler {
       }
     });
 
+    if (tabId === 'color' && this.colorAdjustMode === 'painterly' && this.ccViewMode === 'curves') {
+      requestAnimationFrame(() => this.painterlyUi?.curveEditor?.draw());
+    }
+
     this.renderPreview();
+  }
+
+  _initPainterlyControls() {
+    if (this.btnColorModeToggle) {
+      this.btnColorModeToggle.onclick = () => {
+        this.setColorAdjustMode(this.colorAdjustMode === 'levels' ? 'painterly' : 'levels');
+      };
+    }
+    if (this.btnCcViewToggle) {
+      this.btnCcViewToggle.onclick = () => {
+        this.setPainterlyViewMode(this.ccViewMode === 'curves' ? 'sliders' : 'curves');
+      };
+    }
+
+    this.painterlyUi = mountPainterlyControlsUI({
+      state: this.painterlyState,
+      spaceTabsEl: document.getElementById('ref-cc-space-tabs'),
+      channelPillsEl: document.getElementById('ref-cc-channel-pills'),
+      presetsEl: document.getElementById('ref-cc-presets'),
+      slidersEl: document.getElementById('ref-cc-sliders'),
+      curveCanvas: document.getElementById('ref-cc-curve-canvas'),
+      readoutEl: document.getElementById('ref-cc-curve-readout'),
+      btnResetCurve: document.getElementById('btn-ref-cc-reset-curve'),
+      btnAddMidpoint: document.getElementById('btn-ref-cc-midpoint'),
+      btnResetAll: document.getElementById('btn-ref-cc-reset-all'),
+      onChange: (meta) => {
+        this.painterlyUi?.refreshChannelDots();
+        if (meta?.dragging) {
+          this._schedulePreview(true);
+        } else {
+          this._schedulePreview(false);
+        }
+      }
+    });
+  }
+
+  setColorAdjustMode(mode = 'levels', redraw = true) {
+    this.colorAdjustMode = mode === 'painterly' ? 'painterly' : 'levels';
+    const isCurves = this.colorAdjustMode === 'painterly';
+    if (this.lblColorModeLevels) this.lblColorModeLevels.classList.toggle('is-active', !isCurves);
+    if (this.lblColorModePainterly) this.lblColorModePainterly.classList.toggle('is-active', isCurves);
+    if (this.levelsPane) this.levelsPane.classList.toggle('hidden', isCurves);
+    if (this.curvesPane) this.curvesPane.classList.toggle('hidden', !isCurves);
+    if (isCurves && redraw && this.ccViewMode === 'curves') {
+      requestAnimationFrame(() => this.painterlyUi?.curveEditor?.draw());
+    }
+  }
+
+  setPainterlyViewMode(mode = 'curves', redraw = true) {
+    this.ccViewMode = mode === 'sliders' ? 'sliders' : 'curves';
+    const isSliders = this.ccViewMode === 'sliders';
+    if (this.ccCurvesSubpane) this.ccCurvesSubpane.classList.toggle('hidden', isSliders);
+    if (this.ccSlidersSubpane) this.ccSlidersSubpane.classList.toggle('hidden', !isSliders);
+    if (this.btnCcViewToggle) {
+      this.btnCcViewToggle.textContent = isSliders ? 'CURVES ▸' : 'SLIDERS ▸';
+      this.btnCcViewToggle.classList.toggle('active-mode', isSliders);
+    }
+    if (!isSliders && redraw) {
+      requestAnimationFrame(() => this.painterlyUi?.curveEditor?.draw());
+    }
+  }
+
+  _schedulePreview(dragging = true) {
+    if (this._previewTimer) {
+      clearTimeout(this._previewTimer);
+      this._previewTimer = null;
+    }
+    if (!dragging) {
+      this.renderPreview();
+      return;
+    }
+    const now = performance.now();
+    const wait = Math.max(0, 32 - (now - this._lastPreviewTime));
+    this._previewTimer = setTimeout(() => {
+      this._previewTimer = null;
+      this.renderPreview();
+    }, wait);
   }
 
   _initEditorEvents() {
@@ -361,7 +537,10 @@ export class ImgHandler {
             this.colorValuesText[prop].innerText = prop === 'gamma' ? val.toFixed(2) : Math.round(val);
           }
           
-          this.renderPreview();
+          this._schedulePreview(true);
+        };
+        slider.onchange = () => {
+          this._schedulePreview(false);
         };
       }
     });
@@ -554,6 +733,7 @@ export class ImgHandler {
 
   renderPreview() {
     if (!this.selectedRef || !this.editorCanvas || !this.origImgData) return;
+    this._lastPreviewTime = performance.now();
 
     if (this.editorSvg) {
       this.editorSvg.innerHTML = '';
@@ -564,7 +744,7 @@ export class ImgHandler {
     const w = this.origImgData.width;
     const h = this.origImgData.height;
 
-    // 1. Maintain layout sizes
+    // 1. Maintain layout sizes for crisp Crop & Knife pixel coordinate mapping
     if (this.editorCanvas.width !== w || this.editorCanvas.height !== h) {
       this.editorCanvas.width = w;
       this.editorCanvas.height = h;
@@ -573,47 +753,63 @@ export class ImgHandler {
     const ctx = this.editorCanvas.getContext('2d');
     if (!ctx) return;
 
-    // Create a workspace image copy
-    const previewImgData = ctx.createImageData(w, h);
-    const srcData = this.origImgData.data;
-    const destData = previewImgData.data;
-    
-    // 2. Generate and combine Levels LUTs
-    const lutAll = this.generateLUT(this.colorVal.all.black, this.colorVal.all.gamma, this.colorVal.all.white, this.colorVal.all.outblack, this.colorVal.all.outwhite);
-    const lutR = this.generateLUT(this.colorVal.r.black, this.colorVal.r.gamma, this.colorVal.r.white, this.colorVal.r.outblack, this.colorVal.r.outwhite);
-    const lutG = this.generateLUT(this.colorVal.g.black, this.colorVal.g.gamma, this.colorVal.g.white, this.colorVal.g.outblack, this.colorVal.g.outwhite);
-    const lutB = this.generateLUT(this.colorVal.b.black, this.colorVal.b.gamma, this.colorVal.b.white, this.colorVal.b.outblack, this.colorVal.b.outwhite);
+    const useProxy = !!(this._proxySrcImgData && this._proxyDstImgData && this._proxyCanvas && this._proxyCtx);
+    const procW = useProxy ? this._proxySrcImgData.width : w;
+    const procH = useProxy ? this._proxySrcImgData.height : h;
+    const targetImgData = useProxy ? this._proxyDstImgData : ctx.createImageData(w, h);
+    const srcData = useProxy ? this._proxySrcImgData.data : this.origImgData.data;
+    const destData = targetImgData.data;
 
-    const finalLUT_R = new Uint8Array(256);
-    const finalLUT_G = new Uint8Array(256);
-    const finalLUT_B = new Uint8Array(256);
-    for (let i = 0; i < 256; i++) {
-      const masterVal = lutAll[i];
-      finalLUT_R[i] = lutR[masterVal];
-      finalLUT_G[i] = lutG[masterVal];
-      finalLUT_B[i] = lutB[masterVal];
-    }
+    if (!isDefaultColorAdjustState(this.painterlyState)) {
+      const levelsConfig = { ...this.colorVal, bwMode: !!this.colorBWMode };
+      const compiled = compileColorAdjustState(this.painterlyState, levelsConfig);
+      applyColorAdjustToBuffer(srcData, destData, procW, procH, this.painterlyState, {
+        compiled,
+        exact: false
+      });
+    } else {
+      // Fast pure Levels path
+      const lutAll = this.generateLUT(this.colorVal.all.black, this.colorVal.all.gamma, this.colorVal.all.white, this.colorVal.all.outblack, this.colorVal.all.outwhite);
+      const lutR = this.generateLUT(this.colorVal.r.black, this.colorVal.r.gamma, this.colorVal.r.white, this.colorVal.r.outblack, this.colorVal.r.outwhite);
+      const lutG = this.generateLUT(this.colorVal.g.black, this.colorVal.g.gamma, this.colorVal.g.white, this.colorVal.g.outblack, this.colorVal.g.outwhite);
+      const lutB = this.generateLUT(this.colorVal.b.black, this.colorVal.b.gamma, this.colorVal.b.white, this.colorVal.b.outblack, this.colorVal.b.outwhite);
 
-    // 3. Render color tone pixels
-    for (let i = 0; i < srcData.length; i += 4) {
-      const r = finalLUT_R[srcData[i]];
-      const g = finalLUT_G[srcData[i + 1]];
-      const b = finalLUT_B[srcData[i + 2]];
-      
-      if (this.colorBWMode) {
-        const lum = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
-        destData[i]     = lum;
-        destData[i + 1] = lum;
-        destData[i + 2] = lum;
-      } else {
-        destData[i]     = r;
-        destData[i + 1] = g;
-        destData[i + 2] = b;
+      const finalLUT_R = new Uint8Array(256);
+      const finalLUT_G = new Uint8Array(256);
+      const finalLUT_B = new Uint8Array(256);
+      for (let i = 0; i < 256; i++) {
+        const masterVal = lutAll[i];
+        finalLUT_R[i] = lutR[masterVal];
+        finalLUT_G[i] = lutG[masterVal];
+        finalLUT_B[i] = lutB[masterVal];
       }
-      destData[i + 3] = srcData[i + 3];
+
+      for (let i = 0; i < srcData.length; i += 4) {
+        const r = finalLUT_R[srcData[i]];
+        const g = finalLUT_G[srcData[i + 1]];
+        const b = finalLUT_B[srcData[i + 2]];
+
+        if (this.colorBWMode) {
+          const lum = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+          destData[i]     = lum;
+          destData[i + 1] = lum;
+          destData[i + 2] = lum;
+        } else {
+          destData[i]     = r;
+          destData[i + 1] = g;
+          destData[i + 2] = b;
+        }
+        destData[i + 3] = srcData[i + 3];
+      }
     }
 
-    ctx.putImageData(previewImgData, 0, 0);
+    if (useProxy) {
+      this._proxyCtx.putImageData(targetImgData, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      ctx.drawImage(this._proxyCanvas, 0, 0, w, h);
+    } else {
+      ctx.putImageData(targetImgData, 0, 0);
+    }
 
     // 4. Overlays based on active Mode Tab
     if (this.activeTab === 'crop') {
@@ -855,45 +1051,62 @@ export class ImgHandler {
 
           this.engine.refsDirty = true;
           this.engine.refresh();
-          if (this.onUpdate) this.onUpdate();
           this.closeEditor();
+          if (this.onUpdate) this.onUpdate();
         };
         bakedImg.src = bakeCanvas.toDataURL();
       };
 
       // Extract color corrected sub region
-      const tempImgData = bctx.createImageData(targetW, targetH);
-      const dest = tempImgData.data;
-      const src = this.origImgData.data;
+      if (!isDefaultColorAdjustState(this.painterlyState)) {
+        const fullCanvas = document.createElement('canvas');
+        fullCanvas.width = w;
+        fullCanvas.height = h;
+        const fctx = fullCanvas.getContext('2d');
+        const fullOut = fctx.createImageData(w, h);
+        const compiled = compileColorAdjustState(this.painterlyState, { ...this.colorVal, bwMode: !!this.colorBWMode });
+        applyColorAdjustToBuffer(this.origImgData.data, fullOut.data, w, h, this.painterlyState, {
+          compiled,
+          exact: true
+        });
+        fctx.putImageData(fullOut, 0, 0);
+        bctx.drawImage(fullCanvas, cLeft, cTop, targetW, targetH, 0, 0, targetW, targetH);
+        fullCanvas.width = 1;
+        fullCanvas.height = 1;
+      } else {
+        const tempImgData = bctx.createImageData(targetW, targetH);
+        const dest = tempImgData.data;
+        const src = this.origImgData.data;
 
-      let destIdx = 0;
-      for (let y = cTop; y < cBottom; y++) {
-        for (let x = cLeft; x < cRight; x++) {
-          const srcIdx = (y * w + x) * 4;
-          const r = finalLUT_R[src[srcIdx]];
-          const g = finalLUT_G[src[srcIdx + 1]];
-          const b = finalLUT_B[src[srcIdx + 2]];
-          
-          if (this.colorBWMode) {
-            const lum = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
-            dest[destIdx]     = lum;
-            dest[destIdx + 1] = lum;
-            dest[destIdx + 2] = lum;
-          } else {
-            dest[destIdx]     = r;
-            dest[destIdx + 1] = g;
-            dest[destIdx + 2] = b;
+        let destIdx = 0;
+        for (let y = cTop; y < cBottom; y++) {
+          for (let x = cLeft; x < cRight; x++) {
+            const srcIdx = (y * w + x) * 4;
+            const r = finalLUT_R[src[srcIdx]];
+            const g = finalLUT_G[src[srcIdx + 1]];
+            const b = finalLUT_B[src[srcIdx + 2]];
+            
+            if (this.colorBWMode) {
+              const lum = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+              dest[destIdx]     = lum;
+              dest[destIdx + 1] = lum;
+              dest[destIdx + 2] = lum;
+            } else {
+              dest[destIdx]     = r;
+              dest[destIdx + 1] = g;
+              dest[destIdx + 2] = b;
+            }
+            dest[destIdx + 3] = src[srcIdx + 3];
+            destIdx += 4;
           }
-          dest[destIdx + 3] = src[srcIdx + 3];
-          destIdx += 4;
         }
+        bctx.putImageData(tempImgData, 0, 0);
       }
-      bctx.putImageData(tempImgData, 0, 0);
       finishBake();
     }
     else if (this.activeTab === 'knife') {
       if (this.knifePoints.length < 2) {
-        alert('Please place a cutting line / lasso points path first.');
+        this.engine?.onStatus?.('PLACE KNIFE / LASSO POINTS FIRST');
         return;
       }
 
@@ -906,21 +1119,29 @@ export class ImgHandler {
       const colorImgData = cctx.createImageData(w, h);
       const src = this.origImgData.data;
       const dest = colorImgData.data;
-      for (let i = 0; i < src.length; i += 4) {
-        const r = finalLUT_R[src[i]];
-        const g = finalLUT_G[src[i + 1]];
-        const b = finalLUT_B[src[i + 2]];
-        if (this.colorBWMode) {
-          const lum = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
-          dest[i]     = lum;
-          dest[i + 1] = lum;
-          dest[i + 2] = lum;
-        } else {
-          dest[i]     = r;
-          dest[i + 1] = g;
-          dest[i + 2] = b;
+      if (!isDefaultColorAdjustState(this.painterlyState)) {
+        const compiled = compileColorAdjustState(this.painterlyState, { ...this.colorVal, bwMode: !!this.colorBWMode });
+        applyColorAdjustToBuffer(src, dest, w, h, this.painterlyState, {
+          compiled,
+          exact: true
+        });
+      } else {
+        for (let i = 0; i < src.length; i += 4) {
+          const r = finalLUT_R[src[i]];
+          const g = finalLUT_G[src[i + 1]];
+          const b = finalLUT_B[src[i + 2]];
+          if (this.colorBWMode) {
+            const lum = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+            dest[i]     = lum;
+            dest[i + 1] = lum;
+            dest[i + 2] = lum;
+          } else {
+            dest[i]     = r;
+            dest[i + 1] = g;
+            dest[i + 2] = b;
+          }
+          dest[i + 3] = src[i + 3];
         }
-        dest[i + 3] = src[i + 3];
       }
       cctx.putImageData(colorImgData, 0, 0);
 
@@ -1035,8 +1256,8 @@ export class ImgHandler {
           this.engine.removeReferenceImage(this.engine.selectedRefIndex, false);
           this.engine.refsDirty = true;
           this.engine.refresh();
-          if (this.onUpdate) this.onUpdate();
           this.closeEditor();
+          if (this.onUpdate) this.onUpdate();
         }
       };
 

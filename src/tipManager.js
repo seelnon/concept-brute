@@ -1,14 +1,27 @@
+const TIP_SETTING_KEYS = [
+  'paintHeight', 'oiliness', 'airbrush', 'spacing',
+  'pressureEnabled', 'pressureOpacityInfluence', 'pressureSizeInfluence',
+  'jitterSize', 'jitterAngle', 'jitterPos', 'jitterHue',
+  'smudgeFlowBoost', '_smudgeCalibratedV2', 'smudgePickup', 'smudgeAlpha',
+  'brushSharpen', 'wireDensity', 'wireRange', 'wireMinDist',
+  'airWetness', 'airStreamFlow', 'airBloom', 'airEdge', 'airGranulation',
+  'airTipPour', 'airFollowStroke', 'airTipAngle', 'airTipHardness',
+  'airPressureFlow', 'airUseHeightmap', 'airHeightSource',
+  'speedHeight', 'speedWater', 'fluidHeightShield',
+  'sumiUseHeightmap', 'sumiHeightSource', 'sumiMaxWater', 'sumiPressureGate'
+];
+
 export class TipManager {
   constructor(container, onTipChange, storage = null) {
     this.container = container;
     this.onTipChange = onTipChange;
     this.storage = storage;
-    this.tips = []; 
-    this.defaults = []; 
-    this.generatedTips = []; // Store generated tips persistently
-    this.activeBankIndex = 0; // >= 0 for main slots, < 0 for generated or custom
-    this.activeGeneratedIndex = -1; // Index in generatedTips if active
-    this.selectedTipCanvas = null; // The one actually in use
+    this.tips = [];
+    this.defaults = [];
+    this.generatedTips = [];
+    this.activeBankIndex = 0;
+    this.activeGeneratedIndex = -1;
+    this.selectedTipCanvas = null;
     this.editorCanvas = document.getElementById('tip-editor-canvas');
     this.editorCtx = this.editorCanvas.getContext('2d');
     this.isEraser = false;
@@ -16,11 +29,10 @@ export class TipManager {
     this._saveTimer = null;
     this._saveIdleId = null;
     this._storageDirty = false;
-    this._lastSavedMainJson = null;
-    this._lastSavedGenJson = null;
     this._lastSavedBankIdx = null;
     this._lastSavedGenIdx = null;
-    
+    this._lastDrawnEditorCanvas = null;
+
     this.ready = this.init();
   }
 
@@ -28,7 +40,7 @@ export class TipManager {
     t.paintHeight = saved.paintHeight || 0;
     t.oiliness = saved.oiliness ?? 0.5;
     t.airbrush = saved.airbrush || 0;
-    
+
     t.spacing = saved.spacing ?? 0.05;
     t.pressureEnabled = saved.pressureEnabled ?? true;
     t.pressureOpacityInfluence = saved.pressureOpacityInfluence ?? 1.0;
@@ -69,125 +81,254 @@ export class TipManager {
     t.sumiPressureGate = saved.sumiPressureGate ?? 20;
   }
 
+  _extractTipSettings(t) {
+    const out = {};
+    for (let i = 0; i < TIP_SETTING_KEYS.length; i++) {
+      const k = TIP_SETTING_KEYS[i];
+      if (t[k] !== undefined) out[k] = t[k];
+    }
+    return out;
+  }
+
+  async _decodeSourceToCanvas(srcOrBlob) {
+    if (!srcOrBlob) return null;
+    if (srcOrBlob instanceof Blob) {
+      if (typeof createImageBitmap === 'function') {
+        try {
+          const bmp = await createImageBitmap(srcOrBlob);
+          const c = document.createElement('canvas');
+          c.width = 128; c.height = 128;
+          c.getContext('2d').drawImage(bmp, 0, 0, 128, 128);
+          if (bmp.close) bmp.close();
+          return c;
+        } catch (_) {}
+      }
+      const objUrl = URL.createObjectURL(srcOrBlob);
+      try {
+        return await this._decodeUrlToCanvas(objUrl);
+      } finally {
+        URL.revokeObjectURL(objUrl);
+      }
+    }
+    if (typeof srcOrBlob === 'string') {
+      return this._decodeUrlToCanvas(srcOrBlob);
+    }
+    return null;
+  }
+
+  _decodeUrlToCanvas(url) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      const timer = setTimeout(() => {
+        img.src = '';
+        reject(new Error('Tip load timeout'));
+      }, 600);
+      img.onload = () => {
+        clearTimeout(timer);
+        const c = document.createElement('canvas');
+        c.width = 128; c.height = 128;
+        c.getContext('2d').drawImage(img, 0, 0, 128, 128);
+        resolve(c);
+      };
+      img.onerror = () => {
+        clearTimeout(timer);
+        reject(new Error('Tip load error'));
+      };
+      img.src = url;
+    });
+  }
+
+  _canvasToBlob(canvas) {
+    if (!canvas) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      try {
+        canvas.toBlob((blob) => resolve(blob || null), 'image/png');
+      } catch (_) {
+        resolve(null);
+      }
+    });
+  }
+
   async init() {
     await this._createDefaultTips();
-    
-    // Create initial empty generated tips
+
     for (let i = 0; i < 9; i++) {
-        const t = { canvas: null };
-        this._applyDefaultAdvancedSettings(t);
-        this.generatedTips.push(t);
+      const t = { canvas: null, _cachedBlob: null, _bitmapDirty: false, _settingsDirty: false };
+      this._applyDefaultAdvancedSettings(t);
+      this.generatedTips.push(t);
     }
+
+    let migratedGenFromLegacy = false;
 
     if (this.storage) {
-        // Load main tips
+      await this.storage.ensureReady();
+      const [slotsMap, savedIndices] = await Promise.all([
+        this.storage.loadAllTipSlots(),
+        this.storage.loadUiState('tip_indices')
+      ]);
+
+      const hasIdbSlots = slotsMap && Object.keys(slotsMap).length > 0;
+      if (hasIdbSlots) {
+        const decodeJobs = [];
+        for (let i = 0; i < this.tips.length; i++) {
+          const rec = slotsMap[`main_${i}`];
+          if (rec) {
+            const idx = i;
+            if (rec.settings) this._applyDefaultAdvancedSettings(this.tips[idx], rec.settings);
+            if (rec.blob instanceof Blob && rec.blob.size >= 16) {
+              this.tips[idx]._cachedBlob = rec.blob;
+              decodeJobs.push(this._decodeSourceToCanvas(rec.blob).then((c) => {
+                if (c) this.tips[idx].canvas = c;
+              }).catch(() => {}));
+            }
+          }
+        }
+        for (let i = 0; i < this.generatedTips.length; i++) {
+          const rec = slotsMap[`gen_${i}`];
+          if (rec) {
+            const idx = i;
+            if (rec.settings) this._applyDefaultAdvancedSettings(this.generatedTips[idx], rec.settings);
+            if (rec.blob instanceof Blob && rec.blob.size >= 16) {
+              this.generatedTips[idx]._cachedBlob = rec.blob;
+              decodeJobs.push(this._decodeSourceToCanvas(rec.blob).then((c) => {
+                if (c) this.generatedTips[idx].canvas = c;
+              }).catch(() => {}));
+            }
+          }
+        }
+        if (decodeJobs.length > 0) {
+          await Promise.all(decodeJobs);
+        }
+
+        if (savedIndices && typeof savedIndices === 'object') {
+          if (typeof savedIndices.bankIdx === 'number') this.activeBankIndex = savedIndices.bankIdx;
+          if (typeof savedIndices.genIdx === 'number') this.activeGeneratedIndex = savedIndices.genIdx;
+        }
+      } else {
+        // One-time migration from legacy monolithic localStorage base64 JSON strings
         let savedMain = null;
         try {
-            const raw = localStorage.getItem('brushTips');
-            if (raw) savedMain = JSON.parse(raw);
-        } catch(e) {}
+          const raw = localStorage.getItem('brushTips');
+          if (raw) savedMain = JSON.parse(raw);
+        } catch (e) {}
 
         if (savedMain && Array.isArray(savedMain)) {
-            const mainPromises = [];
-            for (let i = 0; i < savedMain.length && i < this.tips.length; i++) {
-                if (savedMain[i]) {
-                    const idx = i;
-                    const tipData = (typeof savedMain[i] === 'string') ? { src: savedMain[i] } : savedMain[i];
-                    mainPromises.push((async () => {
-                        try {
-                            const img = new Image();
-                            await new Promise((res, rej) => {
-                                const timer = setTimeout(() => {
-                                    img.src = '';
-                                    rej(new Error('Tip load timeout'));
-                                }, 300);
-                                img.onload = () => { clearTimeout(timer); res(); };
-                                img.onerror = () => { clearTimeout(timer); rej(new Error('Tip load error')); };
-                                img.src = tipData.src;
-                            });
-                            const c = document.createElement('canvas');
-                            c.width = 128; c.height = 128;
-                            c.getContext('2d').drawImage(img, 0, 0);
-                            this.tips[idx].canvas = c;
-                            this.tips[idx]._cachedSrc = tipData.src || null;
-                            this._applyDefaultAdvancedSettings(this.tips[idx], tipData);
-                        } catch (err) {
-                            console.warn(`Failed loading saved main tip ${idx}:`, err);
-                        }
-                    })());
-                }
+          const mainPromises = [];
+          for (let i = 0; i < savedMain.length && i < this.tips.length; i++) {
+            if (savedMain[i]) {
+              const idx = i;
+              const tipData = (typeof savedMain[i] === 'string') ? { src: savedMain[i] } : savedMain[i];
+              this._applyDefaultAdvancedSettings(this.tips[idx], tipData);
+              if (tipData.src) {
+                mainPromises.push((async () => {
+                  try {
+                    const res = await fetch(tipData.src);
+                    const blob = await res.blob();
+                    const c = await this._decodeSourceToCanvas(blob);
+                    if (c) {
+                      this.tips[idx].canvas = c;
+                      this.tips[idx]._cachedBlob = blob;
+                      await this.storage.saveTipSlot(`main_${idx}`, {
+                        blob,
+                        settings: this._extractTipSettings(this.tips[idx]),
+                        updatedAt: Date.now()
+                      });
+                    }
+                  } catch (err) {
+                    console.warn(`Failed migrating main tip ${idx}:`, err);
+                  }
+                })());
+              }
             }
-            await Promise.all(mainPromises);
+          }
+          await Promise.all(mainPromises);
         }
 
-        // Load generated tips
         let savedGen = null;
         try {
-            const raw = localStorage.getItem('brushTips_generated');
-            if (raw) savedGen = JSON.parse(raw);
-        } catch(e) {}
+          const raw = localStorage.getItem('brushTips_generated');
+          if (raw) savedGen = JSON.parse(raw);
+        } catch (e) {}
 
         if (savedGen && Array.isArray(savedGen)) {
-            const genPromises = [];
-            for (let i = 0; i < savedGen.length && i < this.generatedTips.length; i++) {
-                if (savedGen[i] && savedGen[i].src) {
-                    const idx = i;
-                    genPromises.push((async () => {
-                        try {
-                            const img = new Image();
-                            await new Promise((res, rej) => {
-                                const timer = setTimeout(() => {
-                                    img.src = '';
-                                    rej(new Error('Gen tip load timeout'));
-                                }, 300);
-                                img.onload = () => { clearTimeout(timer); res(); };
-                                img.onerror = () => { clearTimeout(timer); rej(new Error('Gen tip load error')); };
-                                img.src = savedGen[idx].src;
-                            });
-                            const c = document.createElement('canvas');
-                            c.width = 128; c.height = 128;
-                            c.getContext('2d').drawImage(img, 0, 0);
-                            this.generatedTips[idx].canvas = c;
-                            this.generatedTips[idx]._cachedSrc = savedGen[idx].src || null;
-                            this._applyDefaultAdvancedSettings(this.generatedTips[idx], savedGen[idx]);
-                        } catch (err) {
-                            console.warn(`Failed loading saved gen tip ${idx}:`, err);
-                        }
-                    })());
+          migratedGenFromLegacy = true;
+          const genPromises = [];
+          for (let i = 0; i < savedGen.length && i < this.generatedTips.length; i++) {
+            if (savedGen[i] && savedGen[i].src) {
+              const idx = i;
+              this._applyDefaultAdvancedSettings(this.generatedTips[idx], savedGen[idx]);
+              genPromises.push((async () => {
+                try {
+                  const res = await fetch(savedGen[idx].src);
+                  const blob = await res.blob();
+                  const c = await this._decodeSourceToCanvas(blob);
+                  if (c) {
+                    this.generatedTips[idx].canvas = c;
+                    this.generatedTips[idx]._cachedBlob = blob;
+                    await this.storage.saveTipSlot(`gen_${idx}`, {
+                      blob,
+                      settings: this._extractTipSettings(this.generatedTips[idx]),
+                      updatedAt: Date.now()
+                    });
+                  }
+                } catch (err) {
+                  console.warn(`Failed migrating gen tip ${idx}:`, err);
                 }
+              })());
             }
-            await Promise.all(genPromises);
+          }
+          await Promise.all(genPromises);
         }
 
-        // Fill missing generated tips
-        for (let i = 0; i < 9; i++) {
-            if (!this.generatedTips[i].canvas) {
-                this._regenerateSlot(i, false);
-            }
-        }
-
-        // Load active indices
         const savedBankIdx = localStorage.getItem('activeTipBankIndex');
-        if (savedBankIdx !== null) this.activeBankIndex = parseInt(savedBankIdx);
+        if (savedBankIdx !== null) this.activeBankIndex = parseInt(savedBankIdx, 10);
         const savedGenIdx = localStorage.getItem('activeTipGenIndex');
-        if (savedGenIdx !== null) this.activeGeneratedIndex = parseInt(savedGenIdx);
+        if (savedGenIdx !== null) this.activeGeneratedIndex = parseInt(savedGenIdx, 10);
+
+        this.storage.saveUiState('tip_indices', {
+          bankIdx: this.activeBankIndex,
+          genIdx: this.activeGeneratedIndex
+        }).catch(() => {});
+
+        // Remove oversized legacy localStorage blobs so main thread never touches them again
+        try {
+          localStorage.removeItem('brushTips');
+          localStorage.removeItem('brushTips_generated');
+          localStorage.removeItem('activeTipBankIndex');
+          localStorage.removeItem('activeTipGenIndex');
+        } catch (_) {}
+      }
+
+      // Fill missing generated tips (only persist newly generated ones cleanly)
+      for (let i = 0; i < 9; i++) {
+        if (!this.generatedTips[i].canvas) {
+          this._regenerateSlot(i, false);
+          if (hasIdbSlots || migratedGenFromLegacy) {
+            this.generatedTips[i]._bitmapDirty = true;
+          }
+        }
+      }
     } else {
-        // No storage, just generate
-        for (let i = 0; i < 9; i++) this._regenerateSlot(i, false);
+      for (let i = 0; i < 9; i++) this._regenerateSlot(i, false);
     }
 
+    this._lastSavedBankIdx = this.activeBankIndex;
+    this._lastSavedGenIdx = this.activeGeneratedIndex;
     this._setupUI();
-    
-    if (this.activeGeneratedIndex >= 0) {
-        this.selectedTipCanvas = this.generatedTips[this.activeGeneratedIndex].canvas;
-        this.activeBankIndex = -1;
+
+    if (this.activeGeneratedIndex >= 0 && this.generatedTips[this.activeGeneratedIndex]?.canvas) {
+      this.selectedTipCanvas = this.generatedTips[this.activeGeneratedIndex].canvas;
+      this.activeBankIndex = -1;
     } else {
-        this.selectedTipCanvas = this.tips[Math.max(0, this.activeBankIndex)].canvas;
-        this.activeGeneratedIndex = -1;
+      const safeBank = Math.max(0, Math.min(this.tips.length - 1, this.activeBankIndex));
+      this.activeBankIndex = safeBank;
+      this.selectedTipCanvas = this.tips[safeBank].canvas;
+      this.activeGeneratedIndex = -1;
     }
 
-    this.editorCtx.clearRect(0,0,128,128);
+    this.editorCtx.clearRect(0, 0, 128, 128);
     this.editorCtx.drawImage(this.selectedTipCanvas, 0, 0);
+    this._lastDrawnEditorCanvas = this.selectedTipCanvas;
     this._renderPalette();
     this._updateActiveTip();
   }
@@ -195,7 +336,7 @@ export class TipManager {
   _regenerateSlot(i, save = true) {
     const t1 = this.tips[Math.floor(Math.random() * this.tips.length)];
     const t2 = this.tips[Math.floor(Math.random() * this.tips.length)];
-    
+
     let rotation = 0;
     if (i % 3 === 0) rotation = Math.floor(Math.random() * 4) * 90;
     else if (i % 3 === 1) rotation = Math.floor(Math.random() * 8) * 45;
@@ -219,7 +360,9 @@ export class TipManager {
 
     combined._tipVersion = ((this.generatedTips[i].canvas && this.generatedTips[i].canvas._tipVersion) || 0) + 1;
     this.generatedTips[i].canvas = combined;
-    this.generatedTips[i]._cachedSrc = null;
+    this.generatedTips[i]._cachedBlob = null;
+    this.generatedTips[i]._bitmapDirty = true;
+    this.generatedTips[i]._settingsDirty = true;
     this._applyDefaultAdvancedSettings(this.generatedTips[i]);
 
     if (save) this._scheduleSaveToStorage();
@@ -229,47 +372,33 @@ export class TipManager {
     this.tips = [];
     this.defaults = [];
     const types = ['rect', 'circle', 'triangle', 'scatter', 'scratchy', 'hollow'];
-    
-    for (let i = 0; i < types.length; i++) {
-        const type = types[i];
-        let canvas;
-        
-        if (type === 'triangle') {
-            try {
-                const resp = await fetch('./main_brushtip.png');
-                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                const blob = await resp.blob();
-                const objUrl = URL.createObjectURL(blob);
-                try {
-                    canvas = await new Promise((resolve, reject) => {
-                        const img = new Image();
-                        img.onload = () => {
-                            const tc = document.createElement('canvas');
-                            tc.width = 128; tc.height = 128;
-                            tc.getContext('2d').drawImage(img, 0, 0, 128, 128);
-                            resolve(tc);
-                        };
-                        img.onerror = () => reject(new Error('Error decoding main_brushtip.png'));
-                        img.src = objUrl;
-                    });
-                } finally {
-                    URL.revokeObjectURL(objUrl);
-                }
-            } catch (e) {
-                console.warn('Could not load ./main_brushtip.png, falling back to shape:', e);
-                canvas = this._createShape(type);
-            }
-        } else {
-            canvas = this._createShape(type);
-        }
 
-        const t = { canvas, _cachedSrc: null };
-        this._applyDefaultAdvancedSettings(t);
-        this.tips.push(t);
-        const backup = document.createElement('canvas');
-        backup.width = 128; backup.height = 128;
-        backup.getContext('2d').drawImage(canvas, 0, 0);
-        this.defaults.push(backup);
+    for (let i = 0; i < types.length; i++) {
+      const type = types[i];
+      let canvas;
+
+      if (type === 'triangle') {
+        try {
+          const resp = await fetch('./main_brushtip.png');
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const blob = await resp.blob();
+          if (!blob || blob.size < 16) throw new Error('Empty tip asset');
+          canvas = await this._decodeSourceToCanvas(blob);
+          if (!canvas) throw new Error('Decode failed');
+        } catch (_) {
+          canvas = this._createShape(type);
+        }
+      } else {
+        canvas = this._createShape(type);
+      }
+
+      const t = { canvas, _cachedBlob: null, _bitmapDirty: false, _settingsDirty: false };
+      this._applyDefaultAdvancedSettings(t);
+      this.tips.push(t);
+      const backup = document.createElement('canvas');
+      backup.width = 128; backup.height = 128;
+      backup.getContext('2d').drawImage(canvas, 0, 0);
+      this.defaults.push(backup);
     }
   }
 
@@ -279,7 +408,7 @@ export class TipManager {
     c.height = 128;
     const ctx = c.getContext('2d');
     ctx.fillStyle = 'black';
-    
+
     if (type === 'rect') {
       ctx.fillRect(0, 32, 128, 64);
     } else if (type === 'circle') {
@@ -287,13 +416,13 @@ export class TipManager {
     } else if (type === 'triangle') {
       ctx.beginPath(); ctx.moveTo(64, 10); ctx.lineTo(118, 118); ctx.lineTo(10, 118); ctx.closePath(); ctx.fill();
     } else if (type === 'scatter') {
-      for(let i=0; i<30; i++) {
-        ctx.beginPath(); ctx.arc(Math.random()*128, Math.random()*128, Math.random()*8, 0, Math.PI*2); ctx.fill();
+      for (let i = 0; i < 30; i++) {
+        ctx.beginPath(); ctx.arc(Math.random() * 128, Math.random() * 128, Math.random() * 8, 0, Math.PI * 2); ctx.fill();
       }
     } else if (type === 'scratchy') {
       ctx.lineWidth = 2;
-      for(let i=0; i<20; i++) {
-        ctx.beginPath(); const y = 32 + Math.random()*64; ctx.moveTo(10, y); ctx.lineTo(118, y + (Math.random()-0.5)*10); ctx.stroke();
+      for (let i = 0; i < 20; i++) {
+        ctx.beginPath(); const y = 32 + Math.random() * 64; ctx.moveTo(10, y); ctx.lineTo(118, y + (Math.random() - 0.5) * 10); ctx.stroke();
       }
     } else if (type === 'hollow') {
       ctx.lineWidth = 12; ctx.beginPath(); ctx.arc(64, 64, 54, 0, Math.PI * 2); ctx.stroke();
@@ -307,82 +436,82 @@ export class TipManager {
     const editorCrosshair = document.getElementById('tip-editor-crosshair');
 
     const updateCrosshair = (e, clampInside = false) => {
-        if (!editorCrosshair) return;
-        const rect = this._editorRect || this.editorCanvas.getBoundingClientRect();
-        if (!rect || rect.width <= 0 || rect.height <= 0) return;
-        let lx = e.clientX - rect.left;
-        let ly = e.clientY - rect.top;
-        if (clampInside) {
-            lx = Math.max(0, Math.min(rect.width, lx));
-            ly = Math.max(0, Math.min(rect.height, ly));
-        } else if (lx < 0 || ly < 0 || lx > rect.width || ly > rect.height) {
-            hideCrosshair();
-            return;
-        }
-        if (editorCrosshair.style.display !== 'block') {
-            editorCrosshair.style.display = 'block';
-        }
-        editorCrosshair.style.transform = `translate3d(${lx - 8.5}px, ${ly - 8.5}px, 0)`;
-        if (editorContainer) editorContainer.classList.add('tip-crosshair-active');
+      if (!editorCrosshair) return;
+      const rect = this._editorRect || this.editorCanvas.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) return;
+      let lx = e.clientX - rect.left;
+      let ly = e.clientY - rect.top;
+      if (clampInside) {
+        lx = Math.max(0, Math.min(rect.width, lx));
+        ly = Math.max(0, Math.min(rect.height, ly));
+      } else if (lx < 0 || ly < 0 || lx > rect.width || ly > rect.height) {
+        hideCrosshair();
+        return;
+      }
+      if (editorCrosshair.style.display !== 'block') {
+        editorCrosshair.style.display = 'block';
+      }
+      editorCrosshair.style.transform = `translate3d(${lx - 8.5}px, ${ly - 8.5}px, 0)`;
+      if (editorContainer) editorContainer.classList.add('tip-crosshair-active');
     };
 
     const hideCrosshair = () => {
-        if (editorCrosshair && editorCrosshair.style.display !== 'none') {
-            editorCrosshair.style.display = 'none';
-        }
-        if (editorContainer) editorContainer.classList.remove('tip-crosshair-active');
+      if (editorCrosshair && editorCrosshair.style.display !== 'none') {
+        editorCrosshair.style.display = 'none';
+      }
+      if (editorContainer) editorContainer.classList.remove('tip-crosshair-active');
     };
 
     const startDraw = (e) => {
-        if (e.button !== undefined && e.button !== 0 && e.pointerType === 'mouse') return;
-        e.preventDefault();
-        try {
-            this.editorCanvas.setPointerCapture(e.pointerId);
-        } catch (_) {}
-        drawing = true;
-        this._editorRect = this.editorCanvas.getBoundingClientRect();
-        updateCrosshair(e, true);
-        this._drawEditor(e, true);
-    };
-    
-    const moveDraw = (e) => {
-        if (e.pointerType !== 'touch' || drawing) {
-            updateCrosshair(e, drawing);
-        }
-        if (!drawing) return;
-        e.preventDefault();
-        const events = (typeof e.getCoalescedEvents === 'function') ? e.getCoalescedEvents() : null;
-        if (events && events.length > 0) {
-            for (let i = 0; i < events.length; i++) {
-                this._drawEditor(events[i], false);
-            }
-        } else {
-            this._drawEditor(e, false);
-        }
+      if (e.button !== undefined && e.button !== 0 && e.pointerType === 'mouse') return;
+      e.preventDefault();
+      try {
+        this.editorCanvas.setPointerCapture(e.pointerId);
+      } catch (_) {}
+      drawing = true;
+      this._editorRect = this.editorCanvas.getBoundingClientRect();
+      updateCrosshair(e, true);
+      this._drawEditor(e, true);
     };
 
-    const stopDraw = (e) => { 
-        if (drawing) { 
-            drawing = false;
-            this._finishEditorStroke();
-            this._editorRect = null;
-            try {
-                if (e && e.pointerId !== undefined && this.editorCanvas.hasPointerCapture?.(e.pointerId)) {
-                    this.editorCanvas.releasePointerCapture(e.pointerId);
-                }
-            } catch (_) {}
-            this._updateFromEditor();
-            if (!e || e.pointerType === 'touch') {
-                hideCrosshair();
-            } else {
-                updateCrosshair(e, false);
-            }
-        } 
+    const moveDraw = (e) => {
+      if (e.pointerType !== 'touch' || drawing) {
+        updateCrosshair(e, drawing);
+      }
+      if (!drawing) return;
+      e.preventDefault();
+      const events = (typeof e.getCoalescedEvents === 'function') ? e.getCoalescedEvents() : null;
+      if (events && events.length > 0) {
+        for (let i = 0; i < events.length; i++) {
+          this._drawEditor(events[i], false);
+        }
+      } else {
+        this._drawEditor(e, false);
+      }
+    };
+
+    const stopDraw = (e) => {
+      if (drawing) {
+        drawing = false;
+        this._finishEditorStroke();
+        this._editorRect = null;
+        try {
+          if (e && e.pointerId !== undefined && this.editorCanvas.hasPointerCapture?.(e.pointerId)) {
+            this.editorCanvas.releasePointerCapture(e.pointerId);
+          }
+        } catch (_) {}
+        this._updateFromEditor();
+        if (!e || e.pointerType === 'touch') {
+          hideCrosshair();
+        } else {
+          updateCrosshair(e, false);
+        }
+      }
     };
 
     this.editorCanvas.onpointerenter = (e) => {
-        this._editorRect = this.editorCanvas.getBoundingClientRect();
-        if (e.pointerType !== 'touch') updateCrosshair(e, drawing);
+      this._editorRect = this.editorCanvas.getBoundingClientRect();
+      if (e.pointerType !== 'touch') updateCrosshair(e, drawing);
     };
     this.editorCanvas.onpointerdown = startDraw;
     this.editorCanvas.onpointermove = moveDraw;
@@ -390,62 +519,62 @@ export class TipManager {
     this.editorCanvas.onpointercancel = stopDraw;
     this.editorCanvas.onlostpointercapture = stopDraw;
     this.editorCanvas.onpointerleave = () => {
-        if (!drawing) hideCrosshair();
+      if (!drawing) hideCrosshair();
     };
-    
+
     document.getElementById('btn-tip-clear').onclick = () => {
-        this.editorCtx.clearRect(0,0,128,128);
-        this._updateFromEditor();
+      this.editorCtx.clearRect(0, 0, 128, 128);
+      this._updateFromEditor();
     };
 
     document.getElementById('btn-tip-reset').onclick = () => {
-        if (this.activeBankIndex < 0) return; 
-        const backup = this.defaults[this.activeBankIndex];
-        this.editorCtx.save();
-        this.editorCtx.globalCompositeOperation = 'source-over';
-        this.editorCtx.clearRect(0,0,128,128);
-        this.editorCtx.drawImage(backup, 0, 0);
-        this.editorCtx.restore();
-        this._updateFromEditor();
+      if (this.activeBankIndex < 0) return;
+      const backup = this.defaults[this.activeBankIndex];
+      this.editorCtx.save();
+      this.editorCtx.globalCompositeOperation = 'source-over';
+      this.editorCtx.clearRect(0, 0, 128, 128);
+      this.editorCtx.drawImage(backup, 0, 0);
+      this.editorCtx.restore();
+      this._updateFromEditor();
     };
 
     document.getElementById('btn-tip-eraser').onclick = () => {
-        this.isEraser = !this.isEraser;
-        document.getElementById('btn-tip-eraser').classList.toggle('active-btn', this.isEraser);
+      this.isEraser = !this.isEraser;
+      document.getElementById('btn-tip-eraser').classList.toggle('active-btn', this.isEraser);
     };
 
     document.getElementById('btn-tips-collapse').onclick = () => {
-        const content = document.getElementById('tips-content');
-        const isHidden = content.style.display === 'none';
-        content.style.display = isHidden ? '' : 'none';
-        document.getElementById('btn-tips-collapse').innerText = isHidden ? '_' : '+';
+      const content = document.getElementById('tips-content');
+      const isHidden = content.style.display === 'none';
+      content.style.display = isHidden ? '' : 'none';
+      document.getElementById('btn-tips-collapse').innerText = isHidden ? '_' : '+';
     };
 
     document.getElementById('btn-tip-capture').onclick = () => {
-        if (this.onCaptureRequest) this.onCaptureRequest();
+      if (this.onCaptureRequest) this.onCaptureRequest();
     };
 
-    // Refresh Buttons
     for (let col = 0; col < 3; col++) {
-        const btn = document.getElementById(`btn-refresh-col-${col}`);
-        if (btn) {
-            btn.onclick = () => {
-                for (let row = 0; row < 3; row++) {
-                    this._regenerateSlot(row * 3 + col, false);
-                }
-                this._renderPalette(true);
-                if (this.activeGeneratedIndex >= 0 && (this.activeGeneratedIndex % 3 === col)) {
-                    this.selectedTipCanvas = this.generatedTips[this.activeGeneratedIndex].canvas;
-                    this.editorCtx.save();
-                    this.editorCtx.globalCompositeOperation = 'source-over';
-                    this.editorCtx.clearRect(0, 0, 128, 128);
-                    this.editorCtx.drawImage(this.selectedTipCanvas, 0, 0);
-                    this.editorCtx.restore();
-                    this._updateActiveTip();
-                }
-                this._scheduleSaveToStorage();
-            };
-        }
+      const btn = document.getElementById(`btn-refresh-col-${col}`);
+      if (btn) {
+        btn.onclick = () => {
+          for (let row = 0; row < 3; row++) {
+            this._regenerateSlot(row * 3 + col, false);
+          }
+          this._renderPalette(true);
+          if (this.activeGeneratedIndex >= 0 && (this.activeGeneratedIndex % 3 === col)) {
+            this.selectedTipCanvas = this.generatedTips[this.activeGeneratedIndex].canvas;
+            this.editorCtx.save();
+            this.editorCtx.globalCompositeOperation = 'source-over';
+            this.editorCtx.clearRect(0, 0, 128, 128);
+            this.editorCtx.drawImage(this.selectedTipCanvas, 0, 0);
+            this.editorCtx.restore();
+            this._lastDrawnEditorCanvas = this.selectedTipCanvas;
+            this._updateActiveTip();
+          }
+          this._scheduleSaveToStorage();
+        };
+      }
     }
   }
 
@@ -457,25 +586,30 @@ export class TipManager {
     c._tipVersion = ((this.selectedTipCanvas && this.selectedTipCanvas._tipVersion) || 0) + 1;
 
     this.selectedTipCanvas = c;
+    let target = null;
     if (this.activeBankIndex >= 0 && this.tips[this.activeBankIndex]) {
-        this.tips[this.activeBankIndex].canvas = c;
-        this.tips[this.activeBankIndex]._cachedSrc = null;
+      target = this.tips[this.activeBankIndex];
     } else if (this.activeGeneratedIndex >= 0 && this.generatedTips[this.activeGeneratedIndex]) {
-        this.generatedTips[this.activeGeneratedIndex].canvas = c;
-        this.generatedTips[this.activeGeneratedIndex]._cachedSrc = null;
+      target = this.generatedTips[this.activeGeneratedIndex];
     } else if (this.tips[0]) {
-        this.activeBankIndex = 0;
-        this.activeGeneratedIndex = -1;
-        this.tips[0].canvas = c;
-        this.tips[0]._cachedSrc = null;
+      this.activeBankIndex = 0;
+      this.activeGeneratedIndex = -1;
+      target = this.tips[0];
     }
-    
+
+    if (target) {
+      target.canvas = c;
+      target._cachedBlob = null;
+      target._bitmapDirty = true;
+    }
+
     this.editorCtx.save();
     this.editorCtx.globalCompositeOperation = 'source-over';
-    this.editorCtx.clearRect(0,0,128,128);
+    this.editorCtx.clearRect(0, 0, 128, 128);
     this.editorCtx.drawImage(c, 0, 0);
     this.editorCtx.restore();
-    
+    this._lastDrawnEditorCanvas = c;
+
     this._renderPalette(true);
     this._updateActiveTip();
     this._scheduleSaveToStorage();
@@ -484,8 +618,8 @@ export class TipManager {
   _getEditorPoint(e) {
     let rect = this._editorRect;
     if (!rect || rect.width <= 0 || rect.height <= 0) {
-        rect = this.editorCanvas.getBoundingClientRect();
-        this._editorRect = rect;
+      rect = this.editorCanvas.getBoundingClientRect();
+      this._editorRect = rect;
     }
     const x = ((e.clientX - rect.left) / Math.max(1, rect.width)) * 128;
     const y = ((e.clientY - rect.top) / Math.max(1, rect.height)) * 128;
@@ -503,41 +637,41 @@ export class TipManager {
     ctx.globalAlpha = 1.0;
 
     if (!this._strokeIsPen && Math.abs(ar - br) < 0.05) {
-        ctx.strokeStyle = '#000000';
-        ctx.lineWidth = br * 2.0;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        ctx.beginPath();
-        ctx.moveTo(ax, ay);
-        if (isQuadratic) {
-            ctx.quadraticCurveTo(cx, cy, bx, by);
-        } else {
-            ctx.lineTo(bx, by);
-        }
-        ctx.stroke();
+      ctx.strokeStyle = '#000000';
+      ctx.lineWidth = br * 2.0;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      if (isQuadratic) {
+        ctx.quadraticCurveTo(cx, cy, bx, by);
+      } else {
+        ctx.lineTo(bx, by);
+      }
+      ctx.stroke();
     } else {
-        ctx.fillStyle = '#000000';
-        const len = isQuadratic
-            ? (Math.hypot(cx - ax, cy - ay) + Math.hypot(bx - cx, by - cy))
-            : Math.hypot(bx - ax, by - ay);
-        const steps = Math.max(1, Math.ceil(len * 2.8));
-        for (let i = 0; i <= steps; i++) {
-            const t = i / steps;
-            let px, py, pr;
-            if (isQuadratic) {
-                const inv = 1 - t;
-                px = inv * inv * ax + 2 * inv * t * cx + t * t * bx;
-                py = inv * inv * ay + 2 * inv * t * cy + t * t * by;
-                pr = inv * inv * ar + 2 * inv * t * cr + t * t * br;
-            } else {
-                px = ax + (bx - ax) * t;
-                py = ay + (by - ay) * t;
-                pr = ar + (br - ar) * t;
-            }
-            ctx.beginPath();
-            ctx.arc(px, py, Math.max(0.6, pr), 0, Math.PI * 2);
-            ctx.fill();
+      ctx.fillStyle = '#000000';
+      const len = isQuadratic
+        ? (Math.hypot(cx - ax, cy - ay) + Math.hypot(bx - cx, by - cy))
+        : Math.hypot(bx - ax, by - ay);
+      const steps = Math.max(1, Math.ceil(len * 2.8));
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        let px, py, pr;
+        if (isQuadratic) {
+          const inv = 1 - t;
+          px = inv * inv * ax + 2 * inv * t * cx + t * t * bx;
+          py = inv * inv * ay + 2 * inv * t * cy + t * t * by;
+          pr = inv * inv * ar + 2 * inv * t * cr + t * t * br;
+        } else {
+          px = ax + (bx - ax) * t;
+          py = ay + (by - ay) * t;
+          pr = ar + (br - ar) * t;
         }
+        ctx.beginPath();
+        ctx.arc(px, py, Math.max(0.6, pr), 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
     ctx.restore();
   }
@@ -546,51 +680,50 @@ export class TipManager {
     const pt = this._getEditorPoint(e);
 
     if (isStart || !this._strokePts) {
-        this._strokeIsPen = pt.isPen;
-        this._strokePts = [pt];
-        this._lastMid = { x: pt.x, y: pt.y, r: pt.r };
-        const ctx = this.editorCtx;
-        ctx.save();
-        ctx.globalCompositeOperation = this.isEraser ? 'destination-out' : 'source-over';
-        ctx.globalAlpha = 1.0;
-        ctx.fillStyle = '#000000';
-        ctx.beginPath();
-        ctx.arc(pt.x, pt.y, pt.r, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-        return;
+      this._strokeIsPen = pt.isPen;
+      this._strokePts = [pt];
+      this._lastMid = { x: pt.x, y: pt.y, r: pt.r };
+      const ctx = this.editorCtx;
+      ctx.save();
+      ctx.globalCompositeOperation = this.isEraser ? 'destination-out' : 'source-over';
+      ctx.globalAlpha = 1.0;
+      ctx.fillStyle = '#000000';
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, pt.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      return;
     }
 
     const pts = this._strokePts;
     const prev = pts[pts.length - 1];
     if (Math.hypot(pt.x - prev.x, pt.y - prev.y) < 0.25) return;
 
-    // Smooth rapid radius jumps on pen strokes so ink thickness flows cleanly
     if (pt.isPen) {
-        pt.r = prev.r + (pt.r - prev.r) * 0.45;
+      pt.r = prev.r + (pt.r - prev.r) * 0.45;
     }
     pts.push(pt);
 
     const mid = {
-        x: (prev.x + pt.x) * 0.5,
-        y: (prev.y + pt.y) * 0.5,
-        r: (prev.r + pt.r) * 0.5
+      x: (prev.x + pt.x) * 0.5,
+      y: (prev.y + pt.y) * 0.5,
+      r: (prev.r + pt.r) * 0.5
     };
 
     if (pts.length === 2) {
-        this._strokeEditorSegment(
-            this._lastMid.x, this._lastMid.y, this._lastMid.r,
-            prev.x, prev.y, prev.r,
-            mid.x, mid.y, mid.r,
-            false
-        );
+      this._strokeEditorSegment(
+        this._lastMid.x, this._lastMid.y, this._lastMid.r,
+        prev.x, prev.y, prev.r,
+        mid.x, mid.y, mid.r,
+        false
+      );
     } else {
-        this._strokeEditorSegment(
-            this._lastMid.x, this._lastMid.y, this._lastMid.r,
-            prev.x, prev.y, prev.r,
-            mid.x, mid.y, mid.r,
-            true
-        );
+      this._strokeEditorSegment(
+        this._lastMid.x, this._lastMid.y, this._lastMid.r,
+        prev.x, prev.y, prev.r,
+        mid.x, mid.y, mid.r,
+        true
+      );
     }
     this._lastMid = mid;
   }
@@ -598,13 +731,13 @@ export class TipManager {
   _finishEditorStroke() {
     if (!this._strokePts || !this._lastMid) return;
     if (this._strokePts.length >= 2) {
-        const last = this._strokePts[this._strokePts.length - 1];
-        this._strokeEditorSegment(
-            this._lastMid.x, this._lastMid.y, this._lastMid.r,
-            last.x, last.y, last.r,
-            last.x, last.y, last.r,
-            false
-        );
+      const last = this._strokePts[this._strokePts.length - 1];
+      this._strokeEditorSegment(
+        this._lastMid.x, this._lastMid.y, this._lastMid.r,
+        last.x, last.y, last.r,
+        last.x, last.y, last.r,
+        false
+      );
     }
     this._strokePts = null;
     this._lastMid = null;
@@ -616,15 +749,20 @@ export class TipManager {
     c.getContext('2d').drawImage(this.editorCanvas, 0, 0);
     c._tipVersion = ((this.selectedTipCanvas && this.selectedTipCanvas._tipVersion) || 0) + 1;
     this.selectedTipCanvas = c;
-    
+    this._lastDrawnEditorCanvas = c;
+
+    let target = null;
     if (this.activeBankIndex >= 0 && this.tips[this.activeBankIndex]) {
-        this.tips[this.activeBankIndex].canvas = c;
-        this.tips[this.activeBankIndex]._cachedSrc = null;
+      target = this.tips[this.activeBankIndex];
     } else if (this.activeGeneratedIndex >= 0 && this.generatedTips[this.activeGeneratedIndex]) {
-        this.generatedTips[this.activeGeneratedIndex].canvas = c;
-        this.generatedTips[this.activeGeneratedIndex]._cachedSrc = null;
+      target = this.generatedTips[this.activeGeneratedIndex];
     }
-    
+    if (target) {
+      target.canvas = c;
+      target._cachedBlob = null;
+      target._bitmapDirty = true;
+    }
+
     this._renderPalette(true);
     this._updateActiveTip();
     this._scheduleSaveToStorage();
@@ -654,25 +792,27 @@ export class TipManager {
           const slot = document.createElement('div');
           slot.className = 'tip-swatch';
           if (this.activeBankIndex === i) slot.classList.add('active-swatch');
-          
+
           const thumb = document.createElement('canvas');
           thumb.width = 64; thumb.height = 64;
           thumb.getContext('2d').drawImage(tip.canvas, 0, 0, 64, 64);
           slot._drawnCanvas = tip.canvas;
           slot.appendChild(thumb);
-          
+
           slot.onclick = () => {
+            if (this.activeBankIndex === i && this.activeGeneratedIndex === -1) return;
             this.activeBankIndex = i;
             this.activeGeneratedIndex = -1;
             this.selectedTipCanvas = tip.canvas;
             this.editorCtx.save();
             this.editorCtx.globalCompositeOperation = 'source-over';
-            this.editorCtx.clearRect(0,0,128,128);
+            this.editorCtx.clearRect(0, 0, 128, 128);
             this.editorCtx.drawImage(tip.canvas, 0, 0);
             this.editorCtx.restore();
+            this._lastDrawnEditorCanvas = tip.canvas;
             this._renderPalette(false);
             this._updateActiveTip();
-            this._scheduleSaveToStorage(400);
+            this._saveActiveIndices();
           };
           mainGrid.appendChild(slot);
         });
@@ -699,56 +839,72 @@ export class TipManager {
       } else {
         genGrid.innerHTML = '';
         this.generatedTips.forEach((tip, i) => {
-            const slot = document.createElement('div');
-            slot.className = 'tip-swatch';
-            if (this.activeGeneratedIndex === i) slot.classList.add('active-swatch');
-            const thumb = document.createElement('canvas');
-            thumb.width = 64; thumb.height = 64;
-            thumb.getContext('2d').drawImage(tip.canvas, 0, 0, 64, 64);
-            slot._drawnCanvas = tip.canvas;
-            slot.appendChild(thumb);
-            
-            slot.onclick = () => {
-                this.activeGeneratedIndex = i;
-                this.activeBankIndex = -1;
-                this.selectedTipCanvas = tip.canvas;
-                this.editorCtx.save();
-                this.editorCtx.globalCompositeOperation = 'source-over';
-                this.editorCtx.clearRect(0,0,128,128);
-                this.editorCtx.drawImage(tip.canvas, 0, 0);
-                this.editorCtx.restore();
-                
-                this._renderPalette(false);
-                this._updateActiveTip();
-                this._scheduleSaveToStorage(400);
-            };
-            genGrid.appendChild(slot);
+          const slot = document.createElement('div');
+          slot.className = 'tip-swatch';
+          if (this.activeGeneratedIndex === i) slot.classList.add('active-swatch');
+          const thumb = document.createElement('canvas');
+          thumb.width = 64; thumb.height = 64;
+          thumb.getContext('2d').drawImage(tip.canvas, 0, 0, 64, 64);
+          slot._drawnCanvas = tip.canvas;
+          slot.appendChild(thumb);
+
+          slot.onclick = () => {
+            if (this.activeGeneratedIndex === i && this.activeBankIndex === -1) return;
+            this.activeGeneratedIndex = i;
+            this.activeBankIndex = -1;
+            this.selectedTipCanvas = tip.canvas;
+            this.editorCtx.save();
+            this.editorCtx.globalCompositeOperation = 'source-over';
+            this.editorCtx.clearRect(0, 0, 128, 128);
+            this.editorCtx.drawImage(tip.canvas, 0, 0);
+            this.editorCtx.restore();
+            this._lastDrawnEditorCanvas = tip.canvas;
+
+            this._renderPalette(false);
+            this._updateActiveTip();
+            this._saveActiveIndices();
+          };
+          genGrid.appendChild(slot);
         });
       }
     }
   }
 
+  _saveActiveIndices() {
+    if (!this.storage) return;
+    if (this._lastSavedBankIdx === this.activeBankIndex && this._lastSavedGenIdx === this.activeGeneratedIndex) {
+      return;
+    }
+    this._lastSavedBankIdx = this.activeBankIndex;
+    this._lastSavedGenIdx = this.activeGeneratedIndex;
+    this.storage.saveUiState('tip_indices', {
+      bankIdx: this.activeBankIndex,
+      genIdx: this.activeGeneratedIndex
+    });
+  }
+
   updateActiveTipSettings(height, oiliness, airbrush) {
     let target = null;
     if (this.activeBankIndex >= 0) {
-        target = this.tips[this.activeBankIndex];
+      target = this.tips[this.activeBankIndex];
     } else if (this.activeGeneratedIndex >= 0) {
-        target = this.generatedTips[this.activeGeneratedIndex];
+      target = this.generatedTips[this.activeGeneratedIndex];
     }
-    
+
     if (target) {
-        if (height !== undefined) target.paintHeight = height;
-        if (oiliness !== undefined) target.oiliness = oiliness;
-        if (airbrush !== undefined) target.airbrush = airbrush;
-        this._scheduleSaveToStorage();
+      if (height !== undefined) target.paintHeight = height;
+      if (oiliness !== undefined) target.oiliness = oiliness;
+      if (airbrush !== undefined) target.airbrush = airbrush;
+      target._settingsDirty = true;
+      this._scheduleSaveToStorage();
     }
   }
 
   getActiveTip() {
     if (this.activeBankIndex >= 0) {
-        return this.tips[this.activeBankIndex];
+      return this.tips[this.activeBankIndex];
     } else if (this.activeGeneratedIndex >= 0) {
-        return this.generatedTips[this.activeGeneratedIndex];
+      return this.generatedTips[this.activeGeneratedIndex];
     }
     return null;
   }
@@ -756,8 +912,9 @@ export class TipManager {
   updateActiveTipAdvancedSettings(key, val) {
     const target = this.getActiveTip();
     if (target) {
-        target[key] = val;
-        this._scheduleSaveToStorage();
+      target[key] = val;
+      target._settingsDirty = true;
+      this._scheduleSaveToStorage();
     }
   }
 
@@ -768,23 +925,24 @@ export class TipManager {
   refreshTip(skipStorage = false) {
     let tip = null;
     if (this.activeBankIndex >= 0) {
-        tip = this.tips[this.activeBankIndex];
+      tip = this.tips[this.activeBankIndex];
     } else if (this.activeGeneratedIndex >= 0) {
-        tip = this.generatedTips[this.activeGeneratedIndex];
+      tip = this.generatedTips[this.activeGeneratedIndex];
     } else {
-        tip = { canvas: this.selectedTipCanvas, paintHeight: 0, oiliness: 0.5, airbrush: 0 };
+      tip = { canvas: this.selectedTipCanvas, paintHeight: 0, oiliness: 0.5, airbrush: 0 };
     }
 
     if (tip && tip.canvas) {
-        if (!tip.canvas._tipVersion) tip.canvas._tipVersion = 1;
-        this.selectedTipCanvas = tip.canvas;
-        if (this.editorCtx) {
-            this.editorCtx.save();
-            this.editorCtx.globalCompositeOperation = 'source-over';
-            this.editorCtx.clearRect(0, 0, 128, 128);
-            this.editorCtx.drawImage(tip.canvas, 0, 0);
-            this.editorCtx.restore();
-        }
+      if (!tip.canvas._tipVersion) tip.canvas._tipVersion = 1;
+      this.selectedTipCanvas = tip.canvas;
+      if (this.editorCtx && this._lastDrawnEditorCanvas !== tip.canvas) {
+        this.editorCtx.save();
+        this.editorCtx.globalCompositeOperation = 'source-over';
+        this.editorCtx.clearRect(0, 0, 128, 128);
+        this.editorCtx.drawImage(tip.canvas, 0, 0);
+        this.editorCtx.restore();
+        this._lastDrawnEditorCanvas = tip.canvas;
+      }
     }
 
     if (this.onTipChange) {
@@ -792,167 +950,90 @@ export class TipManager {
     }
   }
 
-  _scheduleSaveToStorage(delayMs = 950) {
-      if (!this.storage) return;
-      this._storageDirty = true;
-      if (this._saveTimer) {
-          clearTimeout(this._saveTimer);
-          this._saveTimer = null;
+  _scheduleSaveToStorage(delayMs = 500) {
+    if (!this.storage) return;
+    this._storageDirty = true;
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    if (this._saveIdleId && typeof cancelIdleCallback === 'function') {
+      cancelIdleCallback(this._saveIdleId);
+      this._saveIdleId = null;
+    }
+    const attemptFlush = () => {
+      this._saveTimer = null;
+      if (this.shouldDeferSave && this.shouldDeferSave()) {
+        this._saveTimer = setTimeout(attemptFlush, 400);
+        return;
       }
-      if (this._saveIdleId && typeof cancelIdleCallback === 'function') {
-          cancelIdleCallback(this._saveIdleId);
-          this._saveIdleId = null;
-      }
-      const attemptFlush = () => {
-          this._saveTimer = null;
-          if (this.shouldDeferSave && this.shouldDeferSave()) {
-              this._saveTimer = setTimeout(attemptFlush, 600);
-              return;
-          }
-          const runSave = () => {
-              this._saveIdleId = null;
-              if (this.shouldDeferSave && this.shouldDeferSave()) {
-                  this._saveTimer = setTimeout(attemptFlush, 600);
-                  return;
-              }
-              this._saveToStorage();
-          };
-          if (typeof requestIdleCallback === 'function') {
-              this._saveIdleId = requestIdleCallback(runSave, { timeout: 1500 });
-          } else {
-              runSave();
-          }
+      const runSave = () => {
+        this._saveIdleId = null;
+        if (this.shouldDeferSave && this.shouldDeferSave()) {
+          this._saveTimer = setTimeout(attemptFlush, 400);
+          return;
+        }
+        this._saveToStorage();
       };
-      this._saveTimer = setTimeout(attemptFlush, delayMs);
+      if (typeof requestIdleCallback === 'function') {
+        this._saveIdleId = requestIdleCallback(runSave, { timeout: 1000 });
+      } else {
+        runSave();
+      }
+    };
+    this._saveTimer = setTimeout(attemptFlush, delayMs);
   }
 
   flushPendingSave() {
-      if (!this._storageDirty) return;
-      this._saveToStorage();
+    if (!this._storageDirty) return;
+    this._saveToStorage();
   }
 
-  _getTipSrc(t) {
-      if (!t || !t.canvas) return null;
-      if (!t._cachedSrc) {
-          t._cachedSrc = t.canvas.toDataURL();
-      }
-      return t._cachedSrc;
-  }
+  async _saveToStorage() {
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    if (this._saveIdleId && typeof cancelIdleCallback === 'function') {
+      cancelIdleCallback(this._saveIdleId);
+      this._saveIdleId = null;
+    }
+    this._storageDirty = false;
+    if (!this.storage) return;
 
-  _saveToStorage() {
-      if (this._saveTimer) {
-          clearTimeout(this._saveTimer);
-          this._saveTimer = null;
-      }
-      if (this._saveIdleId && typeof cancelIdleCallback === 'function') {
-          cancelIdleCallback(this._saveIdleId);
-          this._saveIdleId = null;
-      }
-      this._storageDirty = false;
-      if (!this.storage) return;
-      
-      const mainData = this.tips.map(t => ({ 
-          src: this._getTipSrc(t), 
-          paintHeight: t.paintHeight || 0,
-          oiliness: t.oiliness ?? 0.5,
-          airbrush: t.airbrush || 0,
-          spacing: t.spacing ?? 0.05,
-          pressureEnabled: t.pressureEnabled ?? true,
-          pressureOpacityInfluence: t.pressureOpacityInfluence ?? 1.0,
-          pressureSizeInfluence: t.pressureSizeInfluence ?? 1.0,
-          jitterSize: t.jitterSize ?? 0,
-          jitterAngle: t.jitterAngle ?? 0,
-          jitterPos: t.jitterPos ?? 0,
-          jitterHue: t.jitterHue ?? 0,
-          smudgeFlowBoost: t.smudgeFlowBoost ?? 1.0,
-          _smudgeCalibratedV2: true,
-          smudgePickup: t.smudgePickup ?? 2.0,
-          smudgeAlpha: t.smudgeAlpha ?? true,
-          brushSharpen: t.brushSharpen ?? 0.0,
-          wireDensity: t.wireDensity ?? 30,
-          wireRange: t.wireRange ?? 4.0,
-          wireMinDist: t.wireMinDist ?? 0.5,
-          airWetness: t.airWetness ?? 100,
-          airStreamFlow: t.airStreamFlow ?? 100,
-          airBloom: t.airBloom ?? 50,
-          airEdge: t.airEdge ?? 30,
-          airGranulation: t.airGranulation ?? 30,
-          airTipPour: t.airTipPour ?? 100,
-          airFollowStroke: t.airFollowStroke ?? false,
-          airTipAngle: t.airTipAngle ?? 0,
-          airTipHardness: t.airTipHardness ?? 55,
-          airPressureFlow: t.airPressureFlow ?? 35,
-          airUseHeightmap: t.airUseHeightmap ?? false,
-          airHeightSource: t.airHeightSource || 'surface',
-          speedHeight: t.speedHeight ?? 0,
-          speedWater: t.speedWater ?? 0,
-          fluidHeightShield: t.fluidHeightShield ?? 65,
-          sumiUseHeightmap: t.sumiUseHeightmap ?? false,
-          sumiHeightSource: t.sumiHeightSource || 'surface',
-          sumiMaxWater: t.sumiMaxWater ?? 100,
-          sumiPressureGate: t.sumiPressureGate ?? 20
-      }));
-      const mainJson = JSON.stringify(mainData);
-      if (mainJson !== this._lastSavedMainJson) {
-          this._lastSavedMainJson = mainJson;
-          try { localStorage.setItem('brushTips', mainJson); } catch (_) {}
-      }
+    this._saveActiveIndices();
 
-      const genData = this.generatedTips.map(t => ({
-          src: this._getTipSrc(t),
-          paintHeight: t.paintHeight || 0,
-          oiliness: t.oiliness ?? 0.5,
-          airbrush: t.airbrush || 0,
-          spacing: t.spacing ?? 0.05,
-          pressureEnabled: t.pressureEnabled ?? true,
-          pressureOpacityInfluence: t.pressureOpacityInfluence ?? 1.0,
-          pressureSizeInfluence: t.pressureSizeInfluence ?? 1.0,
-          jitterSize: t.jitterSize ?? 0,
-          jitterAngle: t.jitterAngle ?? 0,
-          jitterPos: t.jitterPos ?? 0,
-          jitterHue: t.jitterHue ?? 0,
-          smudgeFlowBoost: t.smudgeFlowBoost ?? 1.0,
-          _smudgeCalibratedV2: true,
-          smudgePickup: t.smudgePickup ?? 2.0,
-          smudgeAlpha: t.smudgeAlpha ?? true,
-          brushSharpen: t.brushSharpen ?? 0.0,
-          wireDensity: t.wireDensity ?? 30,
-          wireRange: t.wireRange ?? 4.0,
-          wireMinDist: t.wireMinDist ?? 0.5,
-          airWetness: t.airWetness ?? 100,
-          airStreamFlow: t.airStreamFlow ?? 100,
-          airBloom: t.airBloom ?? 50,
-          airEdge: t.airEdge ?? 30,
-          airGranulation: t.airGranulation ?? 30,
-          airTipPour: t.airTipPour ?? 100,
-          airFollowStroke: t.airFollowStroke ?? false,
-          airTipAngle: t.airTipAngle ?? 0,
-          airTipHardness: t.airTipHardness ?? 55,
-          airPressureFlow: t.airPressureFlow ?? 35,
-          airUseHeightmap: t.airUseHeightmap ?? false,
-          airHeightSource: t.airHeightSource || 'surface',
-          speedHeight: t.speedHeight ?? 0,
-          speedWater: t.speedWater ?? 0,
-          fluidHeightShield: t.fluidHeightShield ?? 65,
-          sumiUseHeightmap: t.sumiUseHeightmap ?? false,
-          sumiHeightSource: t.sumiHeightSource || 'surface',
-          sumiMaxWater: t.sumiMaxWater ?? 100,
-          sumiPressureGate: t.sumiPressureGate ?? 20
-      }));
-      const genJson = JSON.stringify(genData);
-      if (genJson !== this._lastSavedGenJson) {
-          this._lastSavedGenJson = genJson;
-          try { localStorage.setItem('brushTips_generated', genJson); } catch (_) {}
-      }
+    const saveDirtySlot = async (slotId, tip) => {
+      if (!tip || (!tip._bitmapDirty && !tip._settingsDirty)) return;
+      const needsBitmap = tip._bitmapDirty;
+      tip._bitmapDirty = false;
+      tip._settingsDirty = false;
 
-      if (this._lastSavedBankIdx !== this.activeBankIndex) {
-          this._lastSavedBankIdx = this.activeBankIndex;
-          try { localStorage.setItem('activeTipBankIndex', this.activeBankIndex); } catch (_) {}
+      let blob = tip._cachedBlob;
+      if ((needsBitmap || !blob) && tip.canvas) {
+        blob = await this._canvasToBlob(tip.canvas);
+        if (blob) tip._cachedBlob = blob;
       }
-      if (this._lastSavedGenIdx !== this.activeGeneratedIndex) {
-          this._lastSavedGenIdx = this.activeGeneratedIndex;
-          try { localStorage.setItem('activeTipGenIndex', this.activeGeneratedIndex); } catch (_) {}
+      await this.storage.saveTipSlot(slotId, {
+        blob: blob || null,
+        settings: this._extractTipSettings(tip),
+        updatedAt: Date.now()
+      });
+    };
+
+    const ops = [];
+    for (let i = 0; i < this.tips.length; i++) {
+      if (this.tips[i]._bitmapDirty || this.tips[i]._settingsDirty) {
+        ops.push(saveDirtySlot(`main_${i}`, this.tips[i]));
       }
+    }
+    for (let i = 0; i < this.generatedTips.length; i++) {
+      if (this.generatedTips[i]._bitmapDirty || this.generatedTips[i]._settingsDirty) {
+        ops.push(saveDirtySlot(`gen_${i}`, this.generatedTips[i]));
+      }
+    }
+    if (ops.length > 0) {
+      await Promise.all(ops).catch(() => {});
+    }
   }
 }
-

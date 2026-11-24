@@ -146,7 +146,7 @@ export function fitZoom() {
 }
 
 export function saveViewport(projectId = null, immediate = false) {
-  const pid = projectId || this.currentProjectId;
+  const pid = projectId || this.currentProjectId || 'default';
   const writeNow = (targetPid) => {
     this._viewportDirty = false;
     if (this._saveViewportTimer) {
@@ -157,11 +157,16 @@ export function saveViewport(projectId = null, immediate = false) {
       cancelIdleCallback(this._saveViewportIdleId);
       this._saveViewportIdleId = null;
     }
-    const prefix = targetPid ? `v_${targetPid}_` : 'v_';
-    try {
-      localStorage.setItem(prefix + 'zoom', this.zoom);
-      localStorage.setItem(prefix + 'pan', JSON.stringify(this.pan));
-    } catch (_) {}
+    const payload = { zoom: this.zoom, pan: { x: this.pan.x, y: this.pan.y } };
+    if (this.storage && typeof this.storage.saveUiState === 'function') {
+      this.storage.saveUiState(`v_${targetPid}`, payload, !!immediate).catch(() => {});
+    } else {
+      const prefix = targetPid ? `v_${targetPid}_` : 'v_';
+      try {
+        localStorage.setItem(prefix + 'zoom', this.zoom);
+        localStorage.setItem(prefix + 'pan', JSON.stringify(this.pan));
+      } catch (_) {}
+    }
   };
   if (immediate || projectId !== null) {
     writeNow(pid);
@@ -189,23 +194,47 @@ export function saveViewport(projectId = null, immediate = false) {
   }, 450);
 }
 
-export function loadViewport(projectId = null) {
+export async function loadViewport(projectId = null) {
   if (projectId) this.currentProjectId = projectId;
+  const pid = this.currentProjectId || 'default';
   try {
-      const prefix = this.currentProjectId ? `v_${this.currentProjectId}_` : 'v_';
-      const savedZoom = localStorage.getItem(prefix + 'zoom');
-      const savedPan = localStorage.getItem(prefix + 'pan');
-      if (savedZoom && savedPan) {
-          this.zoom = parseFloat(savedZoom);
-          this.pan = JSON.parse(savedPan);
-          this.refresh();
-          if (this.onZoomChange) this.onZoomChange(this.zoom);
-      } else {
-          this.pan = { x: 0, y: 0 };
-          this.zoom = 1.0;
-          this.fitZoom();
+    let vp = null;
+    if (this.storage && typeof this.storage.loadUiState === 'function') {
+      vp = await this.storage.loadUiState(`v_${pid}`);
+    }
+    if (vp && typeof vp.zoom === 'number' && vp.pan) {
+      if (this.currentProjectId !== pid) return;
+      this.zoom = vp.zoom;
+      this.pan = { x: vp.pan.x || 0, y: vp.pan.y || 0 };
+      this.refresh();
+      if (this.onZoomChange) this.onZoomChange(this.zoom);
+      return;
+    }
+
+    // One-time legacy localStorage migration
+    const prefix = pid ? `v_${pid}_` : 'v_';
+    const savedZoom = localStorage.getItem(prefix + 'zoom');
+    const savedPan = localStorage.getItem(prefix + 'pan');
+    if (savedZoom && savedPan) {
+      if (this.currentProjectId !== pid) return;
+      this.zoom = parseFloat(savedZoom);
+      this.pan = JSON.parse(savedPan);
+      this.refresh();
+      if (this.onZoomChange) this.onZoomChange(this.zoom);
+      if (this.storage && typeof this.storage.saveUiState === 'function') {
+        this.storage.saveUiState(`v_${pid}`, { zoom: this.zoom, pan: this.pan }).catch(() => {});
+        try {
+          localStorage.removeItem(prefix + 'zoom');
+          localStorage.removeItem(prefix + 'pan');
+        } catch (_) {}
       }
-  } catch(e) {
-      console.warn('Failed to load viewport', e);
+    } else {
+      if (this.currentProjectId !== pid) return;
+      this.pan = { x: 0, y: 0 };
+      this.zoom = 1.0;
+      this.fitZoom();
+    }
+  } catch (e) {
+    console.warn('Failed to load viewport', e);
   }
 }

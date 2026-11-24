@@ -14,9 +14,11 @@ import {
   updateGizmoHoverUI,
   clearGizmoHoverUI
 } from './tools/selection.js';
-import { paintSmudgeOnChunks } from './tools/smudge.js';
-import { airSettings } from './tools/airPaint.js';
-import { sumiSettings, flushSumiToChunks, cancelSumiStroke } from './tools/sumiPaint.js';
+import { paintSmudgeOnChunks, flushSmudgeCaches } from './tools/smudge.js';
+import { airSettings, flushAirCaches } from './tools/airPaint.js';
+import { flushFluidCaches } from './tools/fluidPaint.js';
+import { sumiSettings, flushSumiToChunks, cancelSumiStroke, flushSumiCaches, clearSumiPassiveArchive } from './tools/sumiPaint.js';
+import { endEraserStroke, cancelEraserStroke, flushEraserCaches } from './tools/eraser.js';
 import { isMobileDevice } from './colorUtils.js';
 import {
   backupChunkLayer,
@@ -286,6 +288,9 @@ export class Engine {
       if (!options.keepSumiSession) {
           flushSumiToChunks(this, true);
       }
+      if (this.useGpuEraser) {
+          endEraserStroke(this);
+      }
   }
 
   whenGpuCommitsDone(cb) {
@@ -311,6 +316,7 @@ export class Engine {
       }
       if (cancelActive) {
           cancelSumiStroke(this);
+          cancelEraserStroke(this);
       }
       if (this.activePointers) this.activePointers.clear();
       if (this._pointerTimes) this._pointerTimes.clear();
@@ -333,7 +339,7 @@ export class Engine {
       this._updateCursor();
   }
 
-  resetEngineState() {
+  resetEngineState(prevProjId = null) {
       this.flushPendingGpuCommits();
       this.invalidateLiquifySession();
       if (this.liquifyStroke) {
@@ -343,9 +349,25 @@ export class Engine {
           this.liquifyStroke = null;
       }
       this._resetInteractionState({ cancelActive: false });
-      if (this.gpuRenderer) {
-          this.gpuRenderer.disposeAllTextures();
+      flushAirCaches(this, prevProjId);
+      flushFluidCaches(this);
+      flushSmudgeCaches(this);
+      flushSumiCaches(this);
+      flushEraserCaches(this);
+      if (wasmCore && wasmCore.ready && typeof wasmCore.liquifyEndAllSessions === 'function') {
+          try { wasmCore.liquifyEndAllSessions(); } catch (_) {}
       }
+      if (this.gpuRenderer) {
+          this.gpuRenderer.flushProjectResources(prevProjId);
+      }
+      if (this.clearAllOffscreenCanvases) {
+          this.clearAllOffscreenCanvases();
+      }
+      if (this._tipColorCache) { this._tipColorCache.width = 0; this._tipColorCache.height = 0; this._tipColorCache = null; this._tipColorCtx = null; }
+      if (this._reliefCache) { this._reliefCache.width = 0; this._reliefCache.height = 0; this._reliefCache = null; this._reliefCtx = null; }
+      if (this._masterReliefCache) { this._masterReliefCache.width = 0; this._masterReliefCache.height = 0; this._masterReliefCache = null; this._masterReliefCtx = null; }
+      if (this.scratchCanvas) { this.scratchCanvas.width = 0; this.scratchCanvas.height = 0; this.scratchCanvas = null; this.scratchCtx = null; }
+
       // Clear chunks from DOM and reset
       this.chunks.forEach(chunk => {
           if (chunk.isAttached && chunk.element && chunk.element.parentNode) {
@@ -362,6 +384,7 @@ export class Engine {
       });
       this.chunks.clear();
       this.dirtyChunks.clear();
+      if (this.offscreenDirty) this.offscreenDirty.clear();
 
       // Clear ref images from DOM
       this.referenceImages.forEach(ref => {
@@ -475,7 +498,7 @@ export class Engine {
   _initEvents() {
     const isUiElement = (el) => {
         if (!(el instanceof Element)) return false;
-        return Boolean(el.closest('.ui-panel, .tool-btn, .brutal-btn, .dots-btn, #top-bar, #top-bar-ref, #selection-mode-toolbar, .brutal-range, button, input, select, textarea, #recording-selection-box, .rec-handle, #modal-new-project, #modal-export, #modal-ref-editor, #modal-color-studio'));
+        return Boolean(el.closest('.ui-panel, .tool-btn, .brutal-btn, .dots-btn, #top-bar, #top-bar-ref, #selection-mode-toolbar, .brutal-range, button, input, select, textarea, #recording-selection-box, .rec-handle, #modal-new-project, #modal-export, #modal-ref-editor, #modal-color-studio, #modal-layer-color'));
     };
 
     const countTouchPointers = () => {
@@ -1313,11 +1336,15 @@ export class Engine {
     this._setContainerCursor(nextCursor);
   }
 
-  _markDirty(id, layer, isEmpty = false) {
+  _markDirty(id, layer, isEmpty = false, fromSumi = false) {
       if (this.chunks.has(id)) {
           const chunk = this.chunks.get(id);
           if (chunk.isEmpty) chunk.isEmpty[layer] = isEmpty;
           if (chunk.gpuDirty) chunk.gpuDirty[layer] = true;
+          if (!fromSumi) {
+              if (!chunk.nonSumiRev) chunk.nonSumiRev = [];
+              chunk.nonSumiRev[layer] = (chunk.nonSumiRev[layer] || 0) + 1;
+          }
           if (chunk._cachedOffscreenImageData) {
               chunk._cachedOffscreenImageData[layer] = null;
           }
@@ -4514,6 +4541,7 @@ export class Engine {
           chunk.ctxs[index].clearRect(0, 0, chunk.width, chunk.height);
           this._markDirty(id, index, true);
       });
+      clearSumiPassiveArchive(this, index);
       this._status(`LAYER ${index} CLEARED`);
       if (this.onDrawEnd) this.onDrawEnd();
   }
@@ -4527,6 +4555,7 @@ export class Engine {
           this._markDirty(id, index, true);
       });
     });
+    clearSumiPassiveArchive(this, null);
     if (this.onDrawEnd) this.onDrawEnd();
   }
 

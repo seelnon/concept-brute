@@ -2360,3 +2360,323 @@ input[type="range"] {
 .gizmo-prompt.hidden {
     display: none;
 }
+
+/* LAYER COLOR CORRECTION LINE BUTTON & PERCEPTUAL CURVES UI */
+.layer-color-btn {
+    width: 13px;
+    min-width: 13px;
+    padding: 0;
+    border: 2px solid #000000;
+    background: #ffffff;
+    cursor: pointer;
+    flex-shrink: 0;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.layer-color-btn::after {
+    content: '';
+    width: 2px;
+    height: 62%;
+    background: #000000;
+    display: block;
+}
+
+.layer-color-btn:hover {
+    background: #000000;
+}
+
+.layer-color-btn:hover::after {
+    background: #ffffff;
+}
+
+.layer-color-btn.active {
+    background: #000000;
+}
+
+.layer-color-btn.active::after {
+    background: #facc15;
+}
+
+.cc-view-toggle-btn {
+    width: 100%;
+    padding: 6px 8px;
+    font-size: 8.5px;
+    font-weight: 900;
+    letter-spacing: 0.4px;
+    background: #000000;
+    color: #ffffff;
+    border: 2px solid #000000;
+    box-shadow: none;
+    cursor: pointer;
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.cc-view-toggle-btn:hover {
+    background: #1c1c1c;
+    color: #ffffff;
+}
+
+.cc-view-toggle-btn.active-mode {
+    background: #000000;
+    color: #ffffff;
+}
+
+.cc-mode-switch {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    padding: 0;
+    border: 2px solid #000000;
+    background: #ffffff;
+    cursor: pointer;
+    overflow: hidden;
+    font-family: inherit;
+    margin-bottom: 8px;
+}
+
+.cc-mode-switch-half {
+    padding: 5px 4px;
+    font-size: 8.5px;
+    font-weight: 900;
+    text-align: center;
+    background: #ffffff;
+    color: #000000;
+    letter-spacing: 0.3px;
+}
+
+.cc-mode-switch-half.is-active {
+    background: #000000;
+    color: #ffffff;
+}
+
+.cc-space-tabs {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 2px;
+    background: #000000;
+    border: 2px solid #000000;
+}
+
+.cc-space-tab {
+    border: none;
+    background: #222222;
+    color: #cccccc;
+    font-family: inherit;
+    font-size: 8px;
+    font-weight: 900;
+    padding: 5px 2px;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+.cc-space-tab:hover {
+    background: #333333;
+    color: #ffffff;
+}
+
+.cc-space-tab.active {
+    background: #ffffff;
+    color: #000000;
+}
+
+.cc-channel-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.cc-ch-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border: 2px solid #000000;
+    background: #2c2c2c;
+    color: #d4d4d4;
+    font-family: inherit;
+    font-size: 8px;
+    font-weight: 900;
+    padding: 3px 6px;
+    cursor: pointer;
+    text-transform: uppercase;
+}
+
+.cc-ch-pill:hover {
+    background: #3a3a3a;
+    color: #ffffff;
+}
+
+.cc-ch-pill.active {
+    background: #000000;
+    color: #ffffff;
+    border: 2px solid #525252;
+}
+
+.cc-ch-dot {
+    width: 6px;
+    height: 6px;
+    display: inline-block;
+    border: 1px solid #000000;
+    flex-shrink: 0;
+}
+
+.cc-preset-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px;
+}
+
+.cc-preset-btn {
+    border: 2px solid #000000;
+    background: #262626;
+    color: #ffffff;
+    font-family: inherit;
+    font-size: 7.5px;
+    font-weight: 900;
+    padding: 4px 3px;
+    cursor: pointer;
+    text-transform: uppercase;
+}
+
+.cc-preset-btn:hover {
+    background: #000000;
+    color: #ffffff;
+}
+
+#layer-cc-sliders-pane {
+    background: #0d0d0d;
+    color: #f5f5f5;
+    border: 2px solid #000000;
+    scrollbar-width: thin;
+    scrollbar-color: #444444 #0d0d0d;
+}
+
+#layer-cc-sliders-pane::-webkit-scrollbar {
+    width: 6px;
+}
+
+#layer-cc-sliders-pane::-webkit-scrollbar-track {
+    background: #0d0d0d;
+}
+
+#layer-cc-sliders-pane::-webkit-scrollbar-thumb {
+    background: #444444;
+}
+
+#layer-cc-sliders-pane .settings-label {
+    color: #e5e5e5;
+}
+
+#layer-cc-sliders-pane .settings-group span {
+    color: #ffffff;
+}
+
+#layer-cc-sliders-pane .minimal-range::-webkit-slider-runnable-track {
+    background: #484848;
+}
+
+#layer-cc-sliders-pane .minimal-range::-webkit-slider-thumb {
+    background: #ffffff;
+    box-shadow: none;
+    border: 1px solid #000000;
+}
+
+#layer-cc-sliders-pane .minimal-range:active::-webkit-slider-thumb {
+    background: #facc15;
+    box-shadow: none;
+}
+
+#layer-cc-sliders-pane .minimal-range::-moz-range-track {
+    height: 2px;
+    background: #484848;
+    border: none;
+}
+
+#layer-cc-sliders-pane .minimal-range::-moz-range-thumb {
+    width: 4px;
+    height: 12px;
+    background: #ffffff;
+    border: 1px solid #000000;
+    border-radius: 0;
+}
+
+#layer-cc-sliders-pane .checkbox-custom {
+    background-color: #1c1c1c;
+    border-color: #666666;
+}
+
+#layer-cc-sliders-pane .settings-input-check:checked ~ .checkbox-custom {
+    background-color: #000000;
+    border-color: #ffffff;
+}
+
+#modal-layer-color .cc-action-dark-btn {
+    background: #000000;
+    color: #ffffff;
+    border: none;
+    box-shadow: none;
+}
+
+#modal-layer-color .cc-action-dark-btn:hover {
+    background: #1f1f1f;
+    color: #ffffff;
+}
+
+#modal-layer-color .cc-action-dark-btn:active {
+    background: #000000;
+    color: #facc15;
+    box-shadow: none;
+}
+
+#btn-layer-cc-midpoint:hover,
+#btn-layer-cc-reset-curve:hover,
+#btn-layer-cc-reset-all:hover {
+    background: #333333 !important;
+    color: #ffffff !important;
+}
+
+#ref-color-curves-pane .cc-ch-pill,
+#ref-color-curves-pane .cc-preset-btn {
+    background: #f5f5f5;
+    color: #000000;
+}
+
+#ref-color-curves-pane .cc-ch-pill.active,
+#ref-color-curves-pane .cc-preset-btn:hover {
+    background: #000000;
+    color: #ffffff;
+}
+
+#ref-color-curves-pane .cc-space-tab {
+    background: #000000;
+    color: #dddddd;
+}
+
+#ref-color-curves-pane .cc-space-tab.active {
+    background: #ffffff;
+    color: #000000;
+}
+
+.cc-curve-canvas {
+    display: block;
+    width: 100%;
+    border: 2px solid #000000;
+    background: #0d0d0d;
+    cursor: crosshair;
+    touch-action: none;
+}
+
+.cc-readout {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 8px;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+

@@ -298,25 +298,82 @@ export async function decodeAndDrawChunk(chunkData, chunk, layerId) {
     }
 }
 
+export async function saveProjectsMetadata(app, projects = null) {
+    if (!app?.storage) return;
+    const list = projects || app.projects || [];
+    if (!app._projectThumbsCache) app._projectThumbsCache = new Map();
+    const cleanList = list.map((p) => {
+        if (!p) return p;
+        if (p.thumbnail) {
+            app._projectThumbsCache.set(p.id, p.thumbnail);
+            app.storage.saveProjectThumb(p.id, p.thumbnail).catch(() => {});
+            const { thumbnail: _omit, ...rest } = p;
+            return rest;
+        }
+        return p;
+    });
+    await app.storage.saveUiState('projects_list', cleanList, true);
+}
+
 export async function initProjectSystem(app) {
-    let list = await app.storage.loadGlobalSetting('projects_list');
+    if (!app._projectThumbsCache) app._projectThumbsCache = new Map();
+
+    let [list, thumbsMap, currentId] = await Promise.all([
+        app.storage.loadUiState('projects_list'),
+        app.storage.loadAllProjectThumbs(),
+        app.storage.loadUiState('current_project_id')
+    ]);
+
+    if (thumbsMap) {
+        for (const pid in thumbsMap) {
+            app._projectThumbsCache.set(pid, thumbsMap[pid]);
+        }
+    }
+
+    // One-time migration from legacy settings/localStorage projects_list
     if (!list || !Array.isArray(list) || list.length === 0) {
-        list = [{ id: 'default', name: 'ORIGINAL', settings: { chunkSize: 1024, quality: 0.92 } }];
-        await app.storage.saveGlobalSetting('projects_list', list);
+        const legacyList = await app.storage.loadGlobalSetting('projects_list');
+        if (legacyList && Array.isArray(legacyList) && legacyList.length > 0) {
+            list = legacyList;
+            await saveProjectsMetadata(app, list);
+        } else {
+            list = [{ id: 'default', name: 'ORIGINAL', settings: { chunkSize: 1024, quality: 0.92 } }];
+            await app.storage.saveUiState('projects_list', list, true);
+        }
+    } else {
+        // Strip any stray inline thumbnails left in list into projectThumbs
+        let stripped = false;
+        for (let i = 0; i < list.length; i++) {
+            if (list[i] && list[i].thumbnail) {
+                app._projectThumbsCache.set(list[i].id, list[i].thumbnail);
+                app.storage.saveProjectThumb(list[i].id, list[i].thumbnail).catch(() => {});
+                const { thumbnail: _omit, ...rest } = list[i];
+                list[i] = rest;
+                stripped = true;
+            }
+        }
+        if (stripped) {
+            app.storage.saveUiState('projects_list', list, false).catch(() => {});
+        }
     }
     app.projects = list;
 
-    let currentId = await app.storage.loadGlobalSetting('current_project_id');
+    if (!currentId) {
+        currentId = await app.storage.loadGlobalSetting('current_project_id');
+        if (currentId) {
+            app.storage.saveUiState('current_project_id', currentId, true).catch(() => {});
+        }
+    }
     if (!currentId || !app.projects.some(p => p.id === currentId)) {
         currentId = app.projects[0].id;
-        await app.storage.saveGlobalSetting('current_project_id', currentId);
+        await app.storage.saveUiState('current_project_id', currentId, true);
     }
 
     app.currentProjectId = currentId;
     app.storage.setProjectId(currentId);
     app.engine.currentProjectId = currentId;
-    app.engine.loadViewport(currentId);
-    
+    await app.engine.loadViewport(currentId);
+
     // Set Engine settings from current project
     const project = app.projects.find(p => p.id === currentId);
     if (project && project.settings) {
@@ -331,7 +388,7 @@ export async function initProjectSystem(app) {
         }
         syncStaticSettingsUI(app);
     }
-    
+
     await renderProjectList(app);
 
     // Setup Cross-Tab BroadcastChannel sync
@@ -339,9 +396,15 @@ export async function initProjectSystem(app) {
         try {
             app._projectChannel = new BroadcastChannel('concept_brute_sync');
             app._projectChannel.onmessage = async (event) => {
-                const { type, projects, currentProjectId } = event.data || {};
+                const { type, projects } = event.data || {};
                 if (type === 'PROJECTS_UPDATED' && projects && Array.isArray(projects)) {
                     app.projects = projects;
+                    const updatedThumbs = await app.storage.loadAllProjectThumbs();
+                    if (updatedThumbs) {
+                        for (const pid in updatedThumbs) {
+                            app._projectThumbsCache.set(pid, updatedThumbs[pid]);
+                        }
+                    }
                     await renderProjectList(app);
                 }
             };
@@ -355,10 +418,10 @@ export async function initProjectSystem(app) {
             if (!document.hidden) {
                 try {
                     await app.storage.ensureReady();
-                    const storedProjects = await app.storage.loadGlobalSetting('projects_list');
+                    const storedProjects = await app.storage.loadUiState('projects_list');
                     if (storedProjects && Array.isArray(storedProjects) && storedProjects.length > 0) {
-                        const storedStr = JSON.stringify(storedProjects.map(p => ({ id: p.id, name: p.name, thumb: !!p.thumbnail })));
-                        const currentStr = JSON.stringify((app.projects || []).map(p => ({ id: p.id, name: p.name, thumb: !!p.thumbnail })));
+                        const storedStr = JSON.stringify(storedProjects.map(p => ({ id: p.id, name: p.name })));
+                        const currentStr = JSON.stringify((app.projects || []).map(p => ({ id: p.id, name: p.name })));
                         if (storedStr !== currentStr) {
                             app.projects = storedProjects;
                             await renderProjectList(app);
@@ -523,11 +586,12 @@ export async function renderProjectList(app) {
 
         const thumbContainer = document.createElement('div');
         thumbContainer.className = 'project-thumb-wrap';
+        const thumbSrc = (app._projectThumbsCache && app._projectThumbsCache.get(proj.id)) || proj.thumbnail || '';
 
-        if (proj.thumbnail) {
+        if (thumbSrc) {
             const thumb = document.createElement('img');
             thumb.className = 'project-thumb';
-            thumb.src = proj.thumbnail;
+            thumb.src = thumbSrc;
             thumb.style.width = '100%';
             thumb.style.height = '100%';
             thumb.style.objectFit = 'cover';
@@ -674,6 +738,12 @@ export async function switchProject(app, id, options = {}) {
 
     app._isSwitchingProject = true;
     app._activeSwitchTargetId = id;
+    if (app.layerColorController?.isOpen) {
+        try { app.layerColorController.cancel(); } catch (_) {}
+    }
+    if (app.imgHandler?.modal && !app.imgHandler.modal.classList.contains('hidden')) {
+        try { app.imgHandler.closeEditor(); } catch (_) {}
+    }
     if (app.engine) {
         app.engine._isLoadingProject = true;
     }
@@ -723,6 +793,13 @@ export async function switchProject(app, id, options = {}) {
             if (switchToken !== app._switchProjectGeneration || app._queuedSwitchId) return;
         }
 
+        if (app.tipManager?.flushPendingSave) {
+            app.tipManager.flushPendingSave();
+        }
+        if (app.storage?.flushPendingWrites) {
+            await app.storage.flushPendingWrites().catch(() => {});
+        }
+
         let shouldSaveProjectsList = !!options.projectsListDirty;
 
         // Save outgoing project ONLY if it actually has unsaved changes or completed loading without a thumbnail
@@ -732,7 +809,8 @@ export async function switchProject(app, id, options = {}) {
             const isDirty = hasDirtyChunks || hasDirtyRefs;
             const currentProj = app.projects ? app.projects.find(p => p.id === outgoingId) : null;
             const outgoingReady = app._projectLoadedCompletely !== false;
-            const needsThumb = outgoingReady && (!currentProj || !currentProj.thumbnail);
+            const existingThumb = (app._projectThumbsCache && app._projectThumbsCache.get(outgoingId)) || currentProj?.thumbnail;
+            const needsThumb = outgoingReady && (!existingThumb);
 
             if (isDirty || needsThumb) {
                 if (switchToken !== app._switchProjectGeneration || app._queuedSwitchId) {
@@ -749,9 +827,10 @@ export async function switchProject(app, id, options = {}) {
 
                 if (outgoingReady && (needsThumb || isDirty)) {
                     const thumbnail = await generateThumbnail(app, { skipGpuPromote: true });
-                    if (currentProj && thumbnail) {
-                        currentProj.thumbnail = thumbnail;
-                        shouldSaveProjectsList = true;
+                    if (thumbnail) {
+                        if (!app._projectThumbsCache) app._projectThumbsCache = new Map();
+                        app._projectThumbsCache.set(outgoingId, thumbnail);
+                        app.storage.saveProjectThumb(outgoingId, thumbnail).catch(() => {});
                     }
                 }
 
@@ -783,10 +862,10 @@ export async function switchProject(app, id, options = {}) {
         app.storage.setProjectId(id);
         if (app.engine) app.engine.currentProjectId = id;
 
-        // Persist global metadata concurrently
-        const metaSaves = [app.storage.saveGlobalSetting('current_project_id', id)];
+        // Persist global metadata concurrently in IDB uiState compartment
+        const metaSaves = [app.storage.saveUiState('current_project_id', id, true)];
         if (shouldSaveProjectsList) {
-            metaSaves.push(app.storage.saveGlobalSetting('projects_list', app.projects));
+            metaSaves.push(saveProjectsMetadata(app, app.projects));
         }
         const metaSavePromise = Promise.all(metaSaves).then(() => {
             if (shouldSaveProjectsList && app._projectChannel) {
@@ -819,10 +898,10 @@ export async function switchProject(app, id, options = {}) {
         // Mark partial until loadProject / new init finishes so an aborted load won't overwrite thumbnails
         app._projectLoadedCompletely = false;
 
-        // Wipe engine state cleanly before configuring new board/viewport
-        app.engine.resetEngineState();
+        // Wipe engine & transient solver state cleanly while preserving compiled WebGL shader programs
+        app.engine.resetEngineState(outgoingId);
         app.engine._updateSelectionPreview();
-        app.engine.loadViewport(id);
+        await app.engine.loadViewport(id);
         if (app.engine.setupBoard) {
             app.engine.setupBoard();
         }
@@ -896,6 +975,11 @@ export async function switchProject(app, id, options = {}) {
 
         app._status('READY');
 
+        // Re-warm active brush/GPU pipelines after project switch or new canvas creation
+        if (typeof app.schedulePostSwitchWarmup === 'function') {
+            app.schedulePostSwitchWarmup();
+        }
+
         app._slotReadyTimer = setTimeout(() => {
             app._slotReadyTimer = null;
             if (app._switchProjectGeneration === switchToken) {
@@ -947,8 +1031,9 @@ export async function deleteProject(app, id) {
     }
     
     app.projects = app.projects.filter(p => p.id !== id);
-    await app.storage.saveGlobalSetting('projects_list', app.projects);
-    
+    if (app._projectThumbsCache) app._projectThumbsCache.delete(id);
+    await saveProjectsMetadata(app, app.projects);
+
     // If we deleted the active project, cleanly switch to default
     if (id === app.currentProjectId) {
         app._isSwitchingProject = false;
@@ -1216,10 +1301,10 @@ export async function loadProject(app, targetProjectId = null, switchToken = nul
         }
 
         // Pre-warm initial viewport chunk (0, 0) and strokeCanvas so the first user stroke
-        // never suffers a multi-canvas VRAM allocation freeze (e.g. 183ms on new project)
+        // never suffers a multi-canvas VRAM allocation freeze
         if (app.engine) {
             try {
-                if (app.engine.setupBoard) {
+                if (!app._isSwitchingProject && app.engine.setupBoard) {
                     app.engine.setupBoard();
                 }
                 const initChunk = app.engine._getChunk(0, 0);

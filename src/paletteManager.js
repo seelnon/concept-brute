@@ -176,6 +176,8 @@ export class PaletteManager {
         this.customPresets = [];
         this.activeIndex = 0;
         this._groupCoords = null;
+        this.storage = null;
+        this.projectId = 'default';
 
         this._loadFromStorage();
         if (this.config.groupLock) {
@@ -183,7 +185,27 @@ export class PaletteManager {
         }
     }
 
+    setStorage(storage, projectId = null) {
+        this.storage = storage || null;
+        if (projectId) this.projectId = projectId;
+    }
+
+    setProjectId(projectId) {
+        if (projectId) this.projectId = projectId;
+    }
+
+    _cloneConfig(cfg = this.config) {
+        const src = cfg || createDefaultPaletteConfig();
+        return {
+            ...src,
+            sliderGroups: { ...(src.sliderGroups || {}) },
+            locks: Array.isArray(src.locks) ? [...src.locks] : [false, false, false, false, false, false],
+            rows: Array.isArray(src.rows) ? src.rows.map(r => ({ ...r })) : createDefaultRows()
+        };
+    }
+
     _loadFromStorage() {
+        // Fallback/initial sync read only if legacy keys exist before IDB hydration removes them
         try {
             const savedColors = localStorage.getItem('canvas_palette');
             if (savedColors) {
@@ -211,23 +233,88 @@ export class PaletteManager {
         } catch (e) {}
     }
 
-    saveConfig() {
+    async hydrateFromStorage(projectId = null) {
+        if (!this.storage) return;
+        if (projectId) this.projectId = projectId;
+        const pid = projectId || this.projectId || 'default';
+        await this.storage.ensureReady();
+
+        const [cfgState, presets, projState] = await Promise.all([
+            this.storage.loadPaletteCompartment('config'),
+            this.storage.loadPaletteCompartment('presets'),
+            this.storage.loadPaletteCompartment(`p_${pid}`)
+        ]);
+
+        if (projState) {
+            this.applySerializedState(projState, { save: false });
+        } else if (cfgState) {
+            this.applySerializedState(cfgState, { save: false });
+        } else {
+            // Migrate legacy localStorage palette config once into IDB palette compartment
+            let hadLegacy = false;
+            try {
+                if (localStorage.getItem('canvas_palette') || localStorage.getItem('canvas_palette_config_v2')) {
+                    hadLegacy = true;
+                }
+            } catch (_) {}
+            if (hadLegacy) {
+                await this.storage.savePaletteCompartment('config', this.getSerializedState(), true);
+            }
+        }
+
+        if (Array.isArray(presets)) {
+            this.customPresets = presets;
+        } else {
+            try {
+                const legacyPresets = localStorage.getItem('canvas_palette_presets_v1');
+                if (legacyPresets) {
+                    const parsed = JSON.parse(legacyPresets);
+                    if (Array.isArray(parsed)) this.customPresets = parsed;
+                    await this.storage.savePaletteCompartment('presets', this.customPresets, true);
+                }
+            } catch (_) {}
+        }
+
+        // Remove legacy synchronous localStorage blobs after migration to IDB
         try {
-            localStorage.setItem('canvas_palette', JSON.stringify(this.baseColors));
-            localStorage.setItem('canvas_palette_config_v2', JSON.stringify(this.getSerializedState()));
-        } catch (e) {}
+            localStorage.removeItem('canvas_palette');
+            localStorage.removeItem('canvas_palette_config_v2');
+            localStorage.removeItem('canvas_palette_presets_v1');
+        } catch (_) {}
+    }
+
+    saveConfig() {
+        if (this.storage) {
+            this.storage.savePaletteCompartment('config', this.getSerializedState());
+        } else {
+            try {
+                localStorage.setItem('canvas_palette', JSON.stringify(this.baseColors));
+                localStorage.setItem('canvas_palette_config_v2', JSON.stringify(this.getSerializedState()));
+            } catch (e) {}
+        }
+    }
+
+    saveProjectPalette(projectId = null) {
+        const pid = projectId || this.projectId || this.storage?.projectId || 'default';
+        if (this.storage) {
+            this.storage.savePaletteCompartment(`p_${pid}`, this.getSerializedState());
+        }
     }
 
     saveCustomPresets() {
-        try {
-            localStorage.setItem('canvas_palette_presets_v1', JSON.stringify(this.customPresets));
-        } catch (e) {}
+        if (this.storage) {
+            this.storage.savePaletteCompartment('presets', this.customPresets, true);
+        } else {
+            try {
+                localStorage.setItem('canvas_palette_presets_v1', JSON.stringify(this.customPresets));
+            } catch (e) {}
+        }
     }
 
     getSerializedState() {
         return {
             baseColors: [...this.baseColors],
-            config: JSON.parse(JSON.stringify(this.config))
+            config: this._cloneConfig(this.config)
         };
     }
 
@@ -1111,7 +1198,7 @@ export class PaletteStudio {
         if (!this._pendingDeferredSave) return;
         this._pendingDeferredSave = false;
         this.app.palette.saveConfig();
-        this.app.storage?.saveSetting('palette', this.app.palette.getSerializedState());
+        this.app.palette.saveProjectPalette(this.app.currentProjectId);
         this.app.storage?.saveSetting('lastColor', this.getActiveHex());
     }
 
@@ -1206,7 +1293,7 @@ export class PaletteStudio {
                 this._scheduleDragUISync();
             } else {
                 this.app._renderPalette();
-                this.app.storage?.saveSetting('palette', palette.getSerializedState());
+                this.app.palette.saveProjectPalette(this.app.currentProjectId);
                 if (this.isOpen()) {
                     this.renderStudioDynamicSections({ includeHeavy: false });
                 }
@@ -1248,7 +1335,7 @@ export class PaletteStudio {
         this.app.setColor(hex, { skipSave: false, preserveHsv: true, deferUi: false });
         if (updateBase) {
             this.app._renderPalette();
-            this.app.storage?.saveSetting('palette', this.app.palette.getSerializedState());
+            this.app.palette.saveProjectPalette(this.app.currentProjectId);
         }
         if (this.isOpen()) {
             this.renderStudioDynamicSections({ includeHeavy: false });
@@ -2672,7 +2759,7 @@ export class PaletteStudio {
             btnGroupLock.addEventListener('click', () => {
                 const nextState = !this.app.palette.config.groupLock;
                 this.app.palette.setGroupLock(nextState);
-                this.app.storage?.saveSetting('palette', this.app.palette.getSerializedState());
+                this.app.palette.saveProjectPalette(this.app.currentProjectId);
                 this._updateGroupLockUI();
                 this.app._status?.(nextState
                     ? 'HARMONY RATIOS LOCKED · NODES MOVE TOGETHER'
@@ -2841,7 +2928,7 @@ export class PaletteStudio {
                     wheelSpace: this.app.palette.config.wheelSpace,
                     mixSpace: this.app.palette.config.mixSpace,
                     symmetry: this.app.palette.config.symmetry,
-                    config: JSON.parse(JSON.stringify(this.app.palette.config))
+                    config: this.app.palette._cloneConfig(this.app.palette.config)
                 });
                 this.app.palette.saveCustomPresets();
                 if (nameInput) nameInput.value = '';
@@ -2853,7 +2940,7 @@ export class PaletteStudio {
 
     _onStudioMutated({ rebuildSliders = false } = {}) {
         this.app.palette.saveConfig();
-        this.app.storage?.saveSetting('palette', this.app.palette.getSerializedState());
+        this.app.palette.saveProjectPalette(this.app.currentProjectId);
         this.applyDockedPanelLayout();
         if (!rebuildSliders) {
             this.renderDockedSliders();

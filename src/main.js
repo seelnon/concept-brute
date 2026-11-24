@@ -24,10 +24,12 @@ import { initAirPaint, activateAirPaint, deactivateAirPaint, syncAirSettingsFrom
 import { initSumiPaint, activateSumiPaint, deactivateSumiPaint, syncSumiSettingsFromTip, syncSumiTip, warmSumiSolver, updateSumiSubtoolUI } from './tools/sumiPaint.js';
 import { ensureSmudgeBuffers, warmSmudgeSolver } from './tools/smudge.js';
 import { warmLiquifySolver } from './tools/liquify.js';
+import { warmEraserSolver } from './tools/eraser.js';
 import { acquireBackupCanvas, releaseBackupCanvas } from './engine/backupPool.js';
 import { wasmCore } from './wasm/wasmBridge.js';
 import { PerfMonitor } from './perfMonitor.js';
 import { runPhantomToolsPrewarm } from './tools/prewarm.js';
+import { LayerColorController } from './colorCorrection.js';
 
 class App {
   constructor() {
@@ -71,18 +73,24 @@ class App {
         }
         this._status('PALETTE UPDATED (6 SELECTED)');
         this._updateRefImageList();
-        this.storage?.saveSetting('palette', this.palette.getSerializedState());
+        this.palette?.saveProjectPalette?.(this.currentProjectId);
         this.paletteStudio?.renderStudioDynamicSections();
     };
+    this.currentProjectId = 'default';
+    this._domCache = new Map();
+    this._dirtyTools = new Set();
+    this._perfPrewarmTools = true;
     this.storage = new SketchStorage();
     this.engine.storage = this.storage;
     this.palette = new PaletteManager();
+    this.palette.setStorage(this.storage, this.currentProjectId);
     this.engine.physicalColorMix = (this.palette.config.canvasMixMode !== 'digital');
     this.paletteStudio = new PaletteStudio(this);
     this.imgHandler = new ImgHandler(this.engine, () => {
         this._updateRefImageList();
         this._triggerAutoSave();
     });
+    this.layerColorController = new LayerColorController(this);
 
     this.activeTool = TOOLS.BRUSH;
     this.lastBrush = TOOLS.BRUSH; // Track for smart switching back to painting
@@ -90,177 +98,7 @@ class App {
     this.lastPaintLayer = 2; // Track last paint layer for easy toggling
     
     // Per-brush settings
-    this.brushSettings = {};
-    Object.values(TOOLS).forEach(tool => {
-        this.brushSettings[tool] = {
-            size: 40,
-            opacity: 1.0,
-            flow: 1.0,
-            speedSize: 15,
-            speedOpacity: 10,
-            speedValue: -20,
-            speedHue: -50,
-            speedHeight: 0,
-            speedWater: 0,
-            speedMax: 5.0,
-            paintHeight: 0,
-            oiliness: 0.5,
-            airbrush: 0.0,
-            smudgeFlowBoost: 1.0,
-            smudgePickup: 2.0,
-            smudgeAlpha: true,
-            brushSharpen: 0.0,
-            wireDensity: 30,
-            wireRange: 4.0,
-            wireMinDist: 0.5,
-            airWetness: 100,
-            airStreamFlow: 100,
-            airBloom: 50,
-            airEdge: 30,
-            airGranulation: 30,
-            airTipPour: 100,
-            airFollowStroke: false,
-            airTipAngle: 0,
-            airTipHardness: 55,
-            airPressureFlow: 35,
-            airUseHeightmap: false,
-            airHeightSource: 'surface',
-            fluidHeightShield: 65,
-            sumiMode: 'draw',
-            sumiInk: 78,
-            sumiInkAffection: 35,
-            sumiWater: 65,
-            sumiWaterWash: 75,
-            sumiEraserInk: 85,
-            sumiEraserWater: 25,
-            sumiBleed: 58,
-            sumiBristles: 28,
-            sumiStiffness: 60,
-            sumiSplit: 48,
-            sumiSpan: 550,
-            sumiGlue: 42,
-            sumiWarmth: 12,
-            sumiEvaporation: 28,
-            sumiCapillarity: 62,
-            sumiBackrun: 68,
-            sumiTurbulence: 0,
-            sumiSootSnag: 55,
-            sumiDeplete: true,
-            sumiSplitEnabled: true,
-            sumiTilt: true,
-            sumiAutoReDip: true,
-            sumiFollowStroke: false,
-            sumiTipAngle: 0,
-            sumiPressureFlow: 35,
-            sumiPressureGate: 20,
-            sumiMaxWater: 100,
-            sumiUseHeightmap: false,
-            sumiHeightSource: 'surface',
-            tip: null,
-            spacing: 0.05,
-            pressureEnabled: true,
-            pressureInfluence: 1.0,
-            pressureOpacityInfluence: 1.0,
-            pressureSizeInfluence: 1.0,
-            jitterSize: 0,
-            jitterAngle: 0,
-            jitterPos: 0,
-            jitterHue: 0,
-            _defaultsCalibratedV3: true,
-            _defaultsCalibratedV4: true,
-            _defaultsCalibratedV5: true
-        };
-    });
-    // Set some defaults
-    this.brushSettings[TOOLS.ERASER].opacity = 1.0;
-    this.brushSettings[TOOLS.SMUDGE].opacity = 1.0;
-    this.brushSettings[TOOLS.SMUDGE].flow = 1.0;
-    this.brushSettings[TOOLS.SMUDGE].pressureOpacityInfluence = 0.0;
-    this.brushSettings[TOOLS.WIREFRAME].size = 20;
-    this.brushSettings[TOOLS.WIREFRAME].pressureOpacityInfluence = 0.0;
-    this.brushSettings[TOOLS.LIQUIFY].size = 85;
-    this.brushSettings[TOOLS.LIQUIFY].flow = 0.40; // 40% strength is a great sweet spot!
-    this.brushSettings[TOOLS.LIQUIFY].falloff = 0.50; // default 50% falloff
-    this.brushSettings[TOOLS.LIQUIFY].liquifyQuality = 2; // default 2 (RESOLVE)
-    this.brushSettings[TOOLS.LIQUIFY].speedSize = 0;
-    this.brushSettings[TOOLS.LIQUIFY].pressureSizeInfluence = 0.0;
-    
-    // Fluid default settings
-    this.brushSettings[TOOLS.FLUID].size = 50;
-    this.brushSettings[TOOLS.FLUID].opacity = 1.0;
-    this.brushSettings[TOOLS.FLUID].flow = 1.0;
-    this.brushSettings[TOOLS.FLUID].fluidity = 80;
-    this.brushSettings[TOOLS.FLUID].bristles = 10;
-    this.brushSettings[TOOLS.FLUID].fluidFlow = 100;
-    this.brushSettings[TOOLS.FLUID].fluidVortex = 8;
-    this.brushSettings[TOOLS.FLUID].fluidTurb = 8;
-    this.brushSettings[TOOLS.FLUID].fluidRetention = 80;
-    this.brushSettings[TOOLS.FLUID].fluidPickup = 80;
-    this.brushSettings[TOOLS.FLUID].fluidDepth = 30;
-    this.brushSettings[TOOLS.FLUID].fluidHeightShield = 65;
-    this.brushSettings[TOOLS.FLUID].fluidGloss = 100;
-    this.brushSettings[TOOLS.FLUID].fluidShading = true;
-    this.brushSettings[TOOLS.FLUID].fluidFollowStroke = false;
-    this.brushSettings[TOOLS.FLUID].fluidTipAngle = 0;
-    this.brushSettings[TOOLS.FLUID].fluidBristleContrast = 65;
-    this.brushSettings[TOOLS.FLUID].fluidBleed = 50;
-    this.brushSettings[TOOLS.FLUID].fluidTipHardness = 50;
-    this.brushSettings[TOOLS.FLUID].fluidPressureFlow = 35;
-
-    // Air (Watercolor) default settings
-    this.brushSettings[TOOLS.AIR].size = 70;
-    this.brushSettings[TOOLS.AIR].opacity = 0.55;
-    this.brushSettings[TOOLS.AIR].flow = 0.70;
-    this.brushSettings[TOOLS.AIR].speedWater = 0;
-    this.brushSettings[TOOLS.AIR].airWetness = 100;
-    this.brushSettings[TOOLS.AIR].airStreamFlow = 100;
-    this.brushSettings[TOOLS.AIR].airBloom = 50;
-    this.brushSettings[TOOLS.AIR].airEdge = 30;
-    this.brushSettings[TOOLS.AIR].airGranulation = 30;
-    this.brushSettings[TOOLS.AIR].airTipPour = 100;
-    this.brushSettings[TOOLS.AIR].airFollowStroke = false;
-    this.brushSettings[TOOLS.AIR].airTipAngle = 0;
-    this.brushSettings[TOOLS.AIR].airTipHardness = 55;
-    this.brushSettings[TOOLS.AIR].airPressureFlow = 35;
-    this.brushSettings[TOOLS.AIR].airUseHeightmap = false;
-    this.brushSettings[TOOLS.AIR].airHeightSource = 'surface';
-
-    // Sumi-e default settings
-    this.brushSettings[TOOLS.SUMI].size = 40;
-    this.brushSettings[TOOLS.SUMI].opacity = 1.0;
-    this.brushSettings[TOOLS.SUMI].flow = 1.0;
-    this.brushSettings[TOOLS.SUMI].pressureOpacityInfluence = 0.0;
-    this.brushSettings[TOOLS.SUMI].speedWater = -45;
-    this.brushSettings[TOOLS.SUMI].sumiMode = 'draw';
-    this.brushSettings[TOOLS.SUMI].sumiInk = 78;
-    this.brushSettings[TOOLS.SUMI].sumiInkAffection = 35;
-    this.brushSettings[TOOLS.SUMI].sumiWater = 65;
-    this.brushSettings[TOOLS.SUMI].sumiWaterWash = 75;
-    this.brushSettings[TOOLS.SUMI].sumiEraserInk = 85;
-    this.brushSettings[TOOLS.SUMI].sumiEraserWater = 25;
-    this.brushSettings[TOOLS.SUMI].sumiBleed = 58;
-    this.brushSettings[TOOLS.SUMI].sumiBristles = 28;
-    this.brushSettings[TOOLS.SUMI].sumiStiffness = 60;
-    this.brushSettings[TOOLS.SUMI].sumiSplit = 48;
-    this.brushSettings[TOOLS.SUMI].sumiSpan = 550;
-    this.brushSettings[TOOLS.SUMI].sumiGlue = 42;
-    this.brushSettings[TOOLS.SUMI].sumiWarmth = 12;
-    this.brushSettings[TOOLS.SUMI].sumiEvaporation = 28;
-    this.brushSettings[TOOLS.SUMI].sumiCapillarity = 62;
-    this.brushSettings[TOOLS.SUMI].sumiBackrun = 68;
-    this.brushSettings[TOOLS.SUMI].sumiTurbulence = 0;
-    this.brushSettings[TOOLS.SUMI].sumiSootSnag = 55;
-    this.brushSettings[TOOLS.SUMI].sumiDeplete = true;
-    this.brushSettings[TOOLS.SUMI].sumiSplitEnabled = true;
-    this.brushSettings[TOOLS.SUMI].sumiTilt = true;
-    this.brushSettings[TOOLS.SUMI].sumiAutoReDip = true;
-    this.brushSettings[TOOLS.SUMI].sumiFollowStroke = false;
-    this.brushSettings[TOOLS.SUMI].sumiTipAngle = 0;
-    this.brushSettings[TOOLS.SUMI].sumiPressureFlow = 35;
-    this.brushSettings[TOOLS.SUMI].sumiPressureGate = 20;
-    this.brushSettings[TOOLS.SUMI].sumiMaxWater = 100;
-    this.brushSettings[TOOLS.SUMI].sumiUseHeightmap = false;
-    this.brushSettings[TOOLS.SUMI].sumiHeightSource = 'surface';
+    this.brushSettings = this._createDefaultBrushSettings();
 
     this.tipManager = new TipManager(document.getElementById('panel-brush-tips'), (tip, height, oiliness, airbrush, skipStorage = false) => {
         const tool = this.activeTool;
@@ -366,13 +204,13 @@ class App {
         }
         this._updateBrushSettingsUI(tool);
         if (!skipStorage) {
+            this._dirtyTools.add(tool);
             this._saveBrushSettings();
         }
     }, this.storage);
 
     this._lastCanvasActivityTime = 0;
     this._brushSettingsDirty = false;
-    this._lastSavedBrushJson = null;
     this._saveBrushSettingsIdleId = null;
     this.tipManager.shouldDeferSave = () => this._shouldDeferSettingsSave();
 
@@ -383,7 +221,6 @@ class App {
     
     this.projects = [];
     this._projectSlotStates = new Map();
-    this.currentProjectId = 'default';
     this._switchProjectGeneration = 0;
     this._isSwitchingProject = false;
     this._activeSwitchTargetId = null;
@@ -398,9 +235,9 @@ class App {
 
     this.windowPositions = {};
 
-    this.init();
     this._initToggles();
     this._initCategories();
+    this.init();
 
     window.addEventListener('resize', () => {
         if (typeof this.clampPanelsToView === 'function') {
@@ -424,54 +261,283 @@ class App {
     }, true);
   }
 
+  _el(id) {
+    if (!id) return null;
+    let node = this._domCache?.get(id);
+    if (node && node.isConnected) return node;
+    node = document.getElementById(id);
+    if (node && this._domCache) this._domCache.set(id, node);
+    return node;
+  }
+
+  _createDefaultBrushSettings() {
+    const map = {};
+    Object.values(TOOLS).forEach(tool => {
+        map[tool] = {
+            size: 40,
+            opacity: 1.0,
+            flow: 1.0,
+            speedSize: 15,
+            speedOpacity: 10,
+            speedValue: -20,
+            speedHue: -50,
+            speedHeight: 0,
+            speedWater: 0,
+            speedMax: 5.0,
+            paintHeight: 0,
+            oiliness: 0.5,
+            airbrush: 0.0,
+            smudgeFlowBoost: 1.0,
+            smudgePickup: 2.0,
+            smudgeAlpha: true,
+            brushSharpen: 0.0,
+            wireDensity: 30,
+            wireRange: 4.0,
+            wireMinDist: 0.5,
+            airWetness: 100,
+            airStreamFlow: 100,
+            airBloom: 50,
+            airEdge: 30,
+            airGranulation: 30,
+            airTipPour: 100,
+            airFollowStroke: false,
+            airTipAngle: 0,
+            airTipHardness: 55,
+            airPressureFlow: 35,
+            airUseHeightmap: false,
+            airHeightSource: 'surface',
+            fluidHeightShield: 65,
+            sumiMode: 'draw',
+            sumiInk: 78,
+            sumiInkAffection: 35,
+            sumiWater: 65,
+            sumiWaterWash: 75,
+            sumiEraserInk: 85,
+            sumiEraserWater: 25,
+            sumiBleed: 58,
+            sumiBristles: 28,
+            sumiStiffness: 60,
+            sumiSplit: 48,
+            sumiSpan: 550,
+            sumiGlue: 42,
+            sumiWarmth: 12,
+            sumiEvaporation: 28,
+            sumiCapillarity: 62,
+            sumiBackrun: 68,
+            sumiTurbulence: 0,
+            sumiSootSnag: 55,
+            sumiDeplete: true,
+            sumiSplitEnabled: true,
+            sumiTilt: true,
+            sumiAutoReDip: true,
+            sumiFollowStroke: false,
+            sumiTipAngle: 0,
+            sumiPressureFlow: 35,
+            sumiPressureGate: 20,
+            sumiMaxWater: 100,
+            sumiUseHeightmap: false,
+            sumiHeightSource: 'surface',
+            tip: null,
+            spacing: 0.05,
+            pressureEnabled: true,
+            pressureInfluence: 1.0,
+            pressureOpacityInfluence: 1.0,
+            pressureSizeInfluence: 1.0,
+            jitterSize: 0,
+            jitterAngle: 0,
+            jitterPos: 0,
+            jitterHue: 0,
+            _defaultsCalibratedV3: true,
+            _defaultsCalibratedV4: true,
+            _defaultsCalibratedV5: true
+        };
+    });
+    map[TOOLS.ERASER].opacity = 1.0;
+    map[TOOLS.SMUDGE].opacity = 1.0;
+    map[TOOLS.SMUDGE].flow = 1.0;
+    map[TOOLS.SMUDGE].pressureOpacityInfluence = 0.0;
+    map[TOOLS.WIREFRAME].size = 20;
+    map[TOOLS.WIREFRAME].pressureOpacityInfluence = 0.0;
+    map[TOOLS.LIQUIFY].size = 85;
+    map[TOOLS.LIQUIFY].flow = 0.40;
+    map[TOOLS.LIQUIFY].falloff = 0.50;
+    map[TOOLS.LIQUIFY].liquifyQuality = 2;
+    map[TOOLS.LIQUIFY].speedSize = 0;
+    map[TOOLS.LIQUIFY].pressureSizeInfluence = 0.0;
+
+    map[TOOLS.FLUID].size = 50;
+    map[TOOLS.FLUID].opacity = 1.0;
+    map[TOOLS.FLUID].flow = 1.0;
+    map[TOOLS.FLUID].fluidity = 80;
+    map[TOOLS.FLUID].bristles = 10;
+    map[TOOLS.FLUID].fluidFlow = 100;
+    map[TOOLS.FLUID].fluidVortex = 8;
+    map[TOOLS.FLUID].fluidTurb = 8;
+    map[TOOLS.FLUID].fluidRetention = 80;
+    map[TOOLS.FLUID].fluidPickup = 80;
+    map[TOOLS.FLUID].fluidDepth = 30;
+    map[TOOLS.FLUID].fluidHeightShield = 65;
+    map[TOOLS.FLUID].fluidGloss = 100;
+    map[TOOLS.FLUID].fluidShading = true;
+    map[TOOLS.FLUID].fluidFollowStroke = false;
+    map[TOOLS.FLUID].fluidTipAngle = 0;
+    map[TOOLS.FLUID].fluidBristleContrast = 65;
+    map[TOOLS.FLUID].fluidBleed = 50;
+    map[TOOLS.FLUID].fluidTipHardness = 50;
+    map[TOOLS.FLUID].fluidPressureFlow = 35;
+
+    map[TOOLS.AIR].size = 70;
+    map[TOOLS.AIR].opacity = 0.55;
+    map[TOOLS.AIR].flow = 0.70;
+    map[TOOLS.AIR].speedWater = 0;
+    map[TOOLS.AIR].airWetness = 100;
+    map[TOOLS.AIR].airStreamFlow = 100;
+    map[TOOLS.AIR].airBloom = 50;
+    map[TOOLS.AIR].airEdge = 30;
+    map[TOOLS.AIR].airGranulation = 30;
+    map[TOOLS.AIR].airTipPour = 100;
+    map[TOOLS.AIR].airFollowStroke = false;
+    map[TOOLS.AIR].airTipAngle = 0;
+    map[TOOLS.AIR].airTipHardness = 55;
+    map[TOOLS.AIR].airPressureFlow = 35;
+    map[TOOLS.AIR].airUseHeightmap = false;
+    map[TOOLS.AIR].airHeightSource = 'surface';
+
+    map[TOOLS.SUMI].size = 40;
+    map[TOOLS.SUMI].opacity = 1.0;
+    map[TOOLS.SUMI].flow = 1.0;
+    map[TOOLS.SUMI].pressureOpacityInfluence = 0.0;
+    map[TOOLS.SUMI].speedWater = -45;
+    map[TOOLS.SUMI].sumiMode = 'draw';
+    map[TOOLS.SUMI].sumiInk = 78;
+    map[TOOLS.SUMI].sumiInkAffection = 35;
+    map[TOOLS.SUMI].sumiWater = 65;
+    map[TOOLS.SUMI].sumiWaterWash = 75;
+    map[TOOLS.SUMI].sumiEraserInk = 85;
+    map[TOOLS.SUMI].sumiEraserWater = 25;
+    map[TOOLS.SUMI].sumiBleed = 58;
+    map[TOOLS.SUMI].sumiBristles = 28;
+    map[TOOLS.SUMI].sumiStiffness = 60;
+    map[TOOLS.SUMI].sumiSplit = 48;
+    map[TOOLS.SUMI].sumiSpan = 550;
+    map[TOOLS.SUMI].sumiGlue = 42;
+    map[TOOLS.SUMI].sumiWarmth = 12;
+    map[TOOLS.SUMI].sumiEvaporation = 28;
+    map[TOOLS.SUMI].sumiCapillarity = 62;
+    map[TOOLS.SUMI].sumiBackrun = 68;
+    map[TOOLS.SUMI].sumiTurbulence = 0;
+    map[TOOLS.SUMI].sumiSootSnag = 55;
+    map[TOOLS.SUMI].sumiDeplete = true;
+    map[TOOLS.SUMI].sumiSplitEnabled = true;
+    map[TOOLS.SUMI].sumiTilt = true;
+    map[TOOLS.SUMI].sumiAutoReDip = true;
+    map[TOOLS.SUMI].sumiFollowStroke = false;
+    map[TOOLS.SUMI].sumiTipAngle = 0;
+    map[TOOLS.SUMI].sumiPressureFlow = 35;
+    map[TOOLS.SUMI].sumiPressureGate = 20;
+    map[TOOLS.SUMI].sumiMaxWater = 100;
+    map[TOOLS.SUMI].sumiUseHeightmap = false;
+    map[TOOLS.SUMI].sumiHeightSource = 'surface';
+    return map;
+  }
+
   _initCategories() {
-    document.querySelectorAll('.settings-category').forEach(cat => {
+    this._categoryEls = Array.from(document.querySelectorAll('.settings-category'));
+    this._categoryEls.forEach(cat => {
         const header = cat.querySelector('.category-header');
+        if (!header) return;
         header.onclick = () => {
             cat.classList.toggle('category-collapsed');
-            localStorage.setItem(`cat_collapsed_${cat.id}`, cat.classList.contains('category-collapsed'));
+            this.storage?.saveUiState(`cat_collapsed_${cat.id}`, cat.classList.contains('category-collapsed'));
         };
-
-        // Restore state
-        const isCollapsed = localStorage.getItem(`cat_collapsed_${cat.id}`) === 'true';
-        if (isCollapsed) cat.classList.add('category-collapsed');
     });
   }
 
   _initToggles() {
-    const toggles = [
+    this._uiToggles = [
         { btn: 'toggle-tools', target: 'tool-group', key: 'toggle_tools' },
         { btn: 'toggle-sliders', target: 'slider-group', key: 'toggle_sliders' },
         { btn: 'toggle-sensitivity', target: 'sensitivity-group', key: 'toggle_sensitivity' }
     ];
 
-    toggles.forEach(t => {
-        const btn = document.getElementById(t.btn);
-        const target = document.getElementById(t.target);
+    this._uiToggles.forEach(t => {
+        const btn = this._el(t.btn);
+        const target = this._el(t.target);
         if (btn && target) {
-            // Load state
-            const saved = localStorage.getItem(t.key);
-            // Default to open (not collapsed) for sensitivity, others follow their HTML classes
-            if (saved === 'collapsed') {
-                target.classList.add('group-collapsed');
-            } else if (saved === 'open') {
-                target.classList.remove('group-collapsed');
-            } else if (t.key === 'toggle_sensitivity') {
-                // Default if no saved state
+            if (t.key === 'toggle_sensitivity') {
                 target.classList.remove('group-collapsed');
             }
-
-            // Sync visual
             btn.style.opacity = target.classList.contains('group-collapsed') ? '0.3' : '1';
-
             btn.onclick = () => {
                 target.classList.toggle('group-collapsed');
                 const isCollapsed = target.classList.contains('group-collapsed');
                 btn.style.opacity = isCollapsed ? '0.3' : '1';
-                localStorage.setItem(t.key, isCollapsed ? 'collapsed' : 'open');
+                this.storage?.saveUiState(t.key, isCollapsed ? 'collapsed' : 'open');
             };
         }
     });
+  }
+
+  async _restoreUiTogglesAndCategories() {
+    const keys = [];
+    if (this._categoryEls) {
+      for (let i = 0; i < this._categoryEls.length; i++) {
+        keys.push(`cat_collapsed_${this._categoryEls[i].id}`);
+      }
+    }
+    if (this._uiToggles) {
+      for (let i = 0; i < this._uiToggles.length; i++) {
+        keys.push(this._uiToggles[i].key);
+      }
+    }
+    if (keys.length === 0) return;
+
+    const batch = await this.storage.loadUiStateBatch(keys);
+    if (this._categoryEls) {
+      for (let i = 0; i < this._categoryEls.length; i++) {
+        const cat = this._categoryEls[i];
+        const k = `cat_collapsed_${cat.id}`;
+        let val = batch[k];
+        if (val === null || val === undefined) {
+          try {
+            const legacy = localStorage.getItem(k);
+            if (legacy !== null) {
+              val = (legacy === 'true');
+              this.storage.saveUiState(k, val).catch(() => {});
+              localStorage.removeItem(k);
+            }
+          } catch (_) {}
+        }
+        if (val === true || val === 'true') {
+          cat.classList.add('category-collapsed');
+        }
+      }
+    }
+    if (this._uiToggles) {
+      for (let i = 0; i < this._uiToggles.length; i++) {
+        const t = this._uiToggles[i];
+        const btn = this._el(t.btn);
+        const target = this._el(t.target);
+        if (!btn || !target) continue;
+        let saved = batch[t.key];
+        if (saved === null || saved === undefined) {
+          try {
+            const legacy = localStorage.getItem(t.key);
+            if (legacy !== null) {
+              saved = legacy;
+              this.storage.saveUiState(t.key, saved).catch(() => {});
+              localStorage.removeItem(t.key);
+            }
+          } catch (_) {}
+        }
+        if (saved === 'collapsed') {
+          target.classList.add('group-collapsed');
+        } else if (saved === 'open') {
+          target.classList.remove('group-collapsed');
+        }
+        btn.style.opacity = target.classList.contains('group-collapsed') ? '0.3' : '1';
+      }
+    }
   }
 
   async initProjectSystem() {
@@ -498,55 +564,38 @@ class App {
     }
 
     try {
-        // 1. PANELS & UI FIRST (Immediate render & interactive frames)
-        const tUiStart = performance.now();
+        // 1. PANELS & UI FIRST (Immediate listener & hotkey wiring)
         this._status('INITIALIZING UI...');
         this._setupUI();
         this._setupHotkeys();
-        console.log(`[PERF] _setupUI() & _setupHotkeys() took ${(performance.now() - tUiStart).toFixed(2)}ms`);
 
-        const tWindowPositionsStart = performance.now();
-        await this._loadWindowPositions();
-        this._restoreWindowPositions();
-        console.log(`[PERF] _loadWindowPositions() & _restoreWindowPositions() took ${(performance.now() - tWindowPositionsStart).toFixed(2)}ms`);
-
-        // Force layout paint so the windows/palette render to the screen immediately for the user
-        await new Promise(resolve => setTimeout(resolve, 10));
-
-        // 2. STORAGE & PROJECTS SECONDO (Lightweight database handshake)
-        const tStorageStart = performance.now();
+        // 2. STORAGE & COMPARTMENTS SECONDO (Single IndexedDB open, zero artificial sleep)
         try {
             await this.storage.init();
-            console.log(`[PERF] storage.init() took ${(performance.now() - tStorageStart).toFixed(2)}ms`);
-            const tProjectSystemStart = performance.now();
+            await Promise.all([
+                this._loadWindowPositions(),
+                this._restoreUiTogglesAndCategories()
+            ]);
+            this._restoreWindowPositions();
+
             await this.initProjectSystem();
-            console.log(`[PERF] initProjectSystem() took ${(performance.now() - tProjectSystemStart).toFixed(2)}ms`);
+            this.palette.setProjectId(this.currentProjectId);
+            await this.palette.hydrateFromStorage(this.currentProjectId);
         } catch (e) {
             console.error("Storage init failed", e);
             this._status('STORAGE ERROR');
         }
 
-        const tTipManagerStart = performance.now();
         await this.tipManager.ready;
-        console.log(`[PERF] tipManager.ready took ${(performance.now() - tTipManagerStart).toFixed(2)}ms`);
 
-        // 3. LOAD NON-CANVAS SETTINGS (Fast settings properties restoration)
-        const tProjectSettingsStart = performance.now();
+        // 3. LOAD NON-CANVAS SETTINGS (Fast per-tool & UI compartment restoration)
         await this.loadProjectSettings();
-        console.log(`[PERF] loadProjectSettings() took ${(performance.now() - tProjectSettingsStart).toFixed(2)}ms`);
-
-        // Brief yield for snappy feedback
-        await new Promise(resolve => setTimeout(resolve, 10));
 
         // 4. HEAVY ASSETS LAST (Image references and large canvas chunk matrices)
-        const tHeavyAssetsStart = performance.now();
         await this.load();
-        console.log(`[PERF] load() (Heavy Assets) took ${(performance.now() - tHeavyAssetsStart).toFixed(2)}ms`);
 
         // Final viewport and layer sync
-        const tRefreshStart = performance.now();
         this.engine.refresh();
-        console.log(`[PERF] engine.refresh() took ${(performance.now() - tRefreshStart).toFixed(2)}ms`);
 
         // Query and restore the saved recording state for the active project
         if (this.recorder && typeof this.recorder.onProjectSwitched === "function") {
@@ -594,9 +643,13 @@ class App {
         this.engine.container.addEventListener('pointerup', markCanvasActivity, { passive: true, capture: true });
     }
     const flushDirtySettings = () => {
-        if (this._brushSettingsDirty) this._saveBrushSettings(true);
+        if (this._brushSettingsDirty || (this._dirtyTools && this._dirtyTools.size > 0)) {
+            this._saveBrushSettings(true);
+        }
+        if (this.paletteStudio?._flushDeferredSave) this.paletteStudio._flushDeferredSave();
         if (this.tipManager?.flushPendingSave) this.tipManager.flushPendingSave();
         if (this.engine?._viewportDirty && this.engine?.saveViewport) this.engine.saveViewport(null, true);
+        if (this.storage?.flushPendingWrites) this.storage.flushPendingWrites().catch(() => {});
     };
     window.addEventListener('pagehide', flushDirtySettings);
     document.addEventListener('visibilitychange', () => {
@@ -640,6 +693,8 @@ class App {
       warmAirSolver(this.engine);
     } else if (tool === TOOLS.SUMI) {
       warmSumiSolver(this.engine);
+    } else if (tool === TOOLS.ERASER) {
+      warmEraserSolver(this.engine);
     }
   }
 
@@ -688,14 +743,13 @@ class App {
         const c = acquireBackupCanvas(this.engine, bw, bh, false);
         releaseBackupCanvas(this.engine, c);
 
-        // Optional user setting: phantom 1-stroke prewarm across all 8 tools on isolated 128x128 scratch engine
-        if (localStorage.getItem('perf_prewarm_tools') === 'true') {
+        // Prewarm all heavy tools non-blockingly across rAF ticks when enabled
+        if (this._perfPrewarmTools && !this._allToolsPrewarmed) {
           this.prewarmAllTools(false);
           return;
         }
 
-        // Default: warm only the currently active heavy simulation tool on load;
-        // other simulation solvers warm lazily on first selection to prevent multi-second startup hitches & VRAM spikes.
+        // Fallback when user disabled full prewarm: still warm active heavy tool
         this._warmToolSolver(this.activeTool);
       } catch (e) {
         console.warn('Startup warmup skipped:', e);
@@ -708,7 +762,40 @@ class App {
       } else {
         runLightweightWarmup();
       }
-    }, 180);
+    }, 120);
+  }
+
+  schedulePostSwitchWarmup() {
+    if (this._postSwitchWarmupTimer) {
+      clearTimeout(this._postSwitchWarmupTimer);
+      this._postSwitchWarmupTimer = null;
+    }
+    const runWarmup = () => {
+      this._postSwitchWarmupTimer = null;
+      if (!this.engine || this.engine.isDrawing || this._isSwitchingProject) return;
+      try {
+        if (this.engine.brush && this.engine.brush.tip) {
+          const bSize = Math.round(this.engine.brush.size || 20);
+          const cacheSize = this.engine._getCacheSize(bSize);
+          this.engine._updateTipCache(cacheSize, this.engine.brush.airbrush || 0, this.engine.brush.color || '#000000');
+        }
+        const bw = this.engine.isStatic ? Math.min(2560, this.engine.staticWidth || 1024) : (this.engine.chunkSize || 1024);
+        const bh = this.engine.isStatic ? Math.min(2560, this.engine.staticHeight || 1024) : (this.engine.chunkSize || 1024);
+        const c = acquireBackupCanvas(this.engine, bw, bh, false);
+        releaseBackupCanvas(this.engine, c);
+        this._warmToolSolver(this.activeTool);
+        if (this._perfPrewarmTools && !this._allToolsPrewarmed) {
+          this.prewarmAllTools(false);
+        }
+      } catch (_) {}
+    };
+    this._postSwitchWarmupTimer = setTimeout(() => {
+      if (typeof window.requestIdleCallback === 'function') {
+        window.requestIdleCallback(runWarmup, { timeout: 350 });
+      } else {
+        runWarmup();
+      }
+    }, 40);
   }
 
   _clearSaveTimer() {
@@ -720,9 +807,11 @@ class App {
 
   _triggerAutoSave() {
     this._clearSaveTimer();
+    if (this._pauseAutosaveForModal) return;
     if (this.autosaveEnabled) {
         const delayMs = Number.isFinite(this.autosaveDelay) ? Math.max(1000, this.autosaveDelay) : 4000;
         this.saveTimeout = setTimeout(() => {
+            if (this._pauseAutosaveForModal) return;
             const isBusy = this.isCapturingTip || 
                            (this.engine && (this.engine.isDrawing || this.engine.isPanning || this.engine.isPanningMode));
             if (isBusy) {
@@ -769,7 +858,7 @@ class App {
       e.preventDefault();
       e.stopPropagation();
       
-      if (el.id === 'modal-ref-editor' || el.id === 'modal-color-studio' || el.id === 'modal-new-project' || el.id === 'modal-export') {
+      if (el.id === 'modal-ref-editor' || el.id === 'modal-color-studio' || el.id === 'modal-layer-color' || el.id === 'modal-new-project' || el.id === 'modal-export') {
         const rect = el.getBoundingClientRect();
         el.style.transform = 'none';
         el.style.left = rect.left + 'px';
@@ -825,6 +914,9 @@ class App {
   async loadProjectSettings(targetProjectId = null, options = {}) {
     const pid = targetProjectId || this.currentProjectId;
     let settings = {};
+    this._dirtyTools?.clear();
+    this._brushSettingsDirty = false;
+
     try {
         const keys = [
             'autosaveDelaySlider',
@@ -842,14 +934,48 @@ class App {
             'brushSpacing',
             'lastColor'
         ];
-        
+
+        const uiStateBatch = await this.storage.loadUiStateBatch([
+            'global_autosaveDelaySlider',
+            'global_autosaveEnabled',
+            'perf_prewarm_tools'
+        ]);
+
+        let prewarmPref = uiStateBatch['perf_prewarm_tools'];
+        if (prewarmPref === null || prewarmPref === undefined) {
+            try {
+                const legacyPrewarm = localStorage.getItem('perf_prewarm_tools');
+                if (legacyPrewarm !== null) {
+                    prewarmPref = (legacyPrewarm === 'true');
+                    localStorage.removeItem('perf_prewarm_tools');
+                } else {
+                    prewarmPref = true;
+                }
+                this.storage.saveUiState('perf_prewarm_tools', prewarmPref).catch(() => {});
+            } catch (_) {
+                prewarmPref = true;
+            }
+        }
+        this._perfPrewarmTools = (prewarmPref !== false && prewarmPref !== 'false');
+        const prewarmCheck = this._el('settings-perf-prewarm-tools');
+        if (prewarmCheck) prewarmCheck.checked = !!this._perfPrewarmTools;
+
+        let perToolMap = null;
         if (!options.isNewProject) {
-            settings = await this.storage.loadSettingsBatch(keys, pid);
+            const [batchRes, toolRes, _palRes] = await Promise.all([
+                this.storage.loadSettingsBatch(keys, pid),
+                this.storage.loadAllToolSettings(pid),
+                this.palette.hydrateFromStorage(pid)
+            ]);
+            settings = batchRes || {};
+            perToolMap = toolRes || {};
+        } else {
+            await this.palette.hydrateFromStorage(pid);
         }
 
-        // Load autosave settings safely (guard undefined, null, NaN across new/transferred projects)
-        const rawSlider = settings['autosaveDelaySlider'];
-        const rawEnabled = settings['autosaveEnabled'];
+        // Load autosave settings (UI state compartment -> per-project legacy fallback -> one-time localStorage migration)
+        const rawSlider = settings['autosaveDelaySlider'] ?? uiStateBatch['global_autosaveDelaySlider'];
+        const rawEnabled = settings['autosaveEnabled'] ?? uiStateBatch['global_autosaveEnabled'];
 
         let sliderVal = null;
         if (rawSlider !== null && rawSlider !== undefined && rawSlider !== '') {
@@ -865,7 +991,9 @@ class App {
                     const parsedGlobal = Number(globalRaw);
                     if (Number.isFinite(parsedGlobal)) {
                         sliderVal = Math.max(0, Math.min(100, parsedGlobal));
+                        this.storage.saveUiState('global_autosaveDelaySlider', sliderVal).catch(() => {});
                     }
+                    localStorage.removeItem('global_autosaveDelaySlider');
                 }
             } catch (_) {}
         }
@@ -873,9 +1001,9 @@ class App {
 
         const seconds = Math.round(4 * Math.pow(300 / 4, sliderVal / 100));
         this.autosaveDelay = (Number.isFinite(seconds) ? seconds : 4) * 1000;
-        const sliderEl = document.getElementById('settings-autosave');
+        const sliderEl = this._el('settings-autosave');
         if (sliderEl) sliderEl.value = sliderVal;
-        const valEl = document.getElementById('autosave-val');
+        const valEl = this._el('autosave-val');
         if (valEl) valEl.innerText = `${Number.isFinite(seconds) ? seconds : 4}s`;
 
         let enabledVal = null;
@@ -888,18 +1016,22 @@ class App {
                 const globalEn = localStorage.getItem('global_autosaveEnabled');
                 if (globalEn === 'true' || globalEn === 'false') {
                     enabledVal = (globalEn === 'true');
+                    this.storage.saveUiState('global_autosaveEnabled', enabledVal).catch(() => {});
                 }
+                if (globalEn !== null) localStorage.removeItem('global_autosaveEnabled');
             } catch (_) {}
         }
         if (enabledVal === null) enabledVal = true;
 
         this.autosaveEnabled = enabledVal;
-        const enableEl = document.getElementById('settings-autosave-enable');
+        const enableEl = this._el('settings-autosave-enable');
         if (enableEl) enableEl.checked = enabledVal;
 
+        // Legacy fallback if project palette wasn't yet in IDB palette compartment
         const savedPalette = settings['palette'];
-        if (savedPalette) {
-            this.palette.applySerializedState(savedPalette, { save: false });
+        const hasPaletteCompartment = await this.storage.loadPaletteCompartment(`p_${pid}`);
+        if (!hasPaletteCompartment && savedPalette) {
+            this.palette.applySerializedState(savedPalette, { save: true });
         }
         this.syncCanvasMixMode();
         this.paletteStudio?.applyDockedPanelLayout();
@@ -919,83 +1051,83 @@ class App {
         const canvasBg = projSet.canvasBg !== undefined ? projSet.canvasBg : settings['canvasBg'];
         if (canvasBg) {
             this.engine.canvasBg = canvasBg;
-            const bgEl = document.getElementById('settings-bg-color');
+            const bgEl = this._el('settings-bg-color');
             if (bgEl) bgEl.value = canvasBg;
         } else {
-            const bgEl = document.getElementById('settings-bg-color');
+            const bgEl = this._el('settings-bg-color');
             if (bgEl) bgEl.value = '#ffffff';
         }
 
         const gridColor = projSet.gridColor !== undefined ? projSet.gridColor : settings['gridColor'];
         if (gridColor) {
             this.engine.gridColor = gridColor;
-            const gcEl = document.getElementById('settings-grid-color');
+            const gcEl = this._el('settings-grid-color');
             if (gcEl) gcEl.value = gridColor;
         } else {
-            const gcEl = document.getElementById('settings-grid-color');
+            const gcEl = this._el('settings-grid-color');
             if (gcEl) gcEl.value = '#cccccc';
         }
 
         const gridPattern = projSet.gridPattern !== undefined ? projSet.gridPattern : settings['gridPattern'];
         if (gridPattern) {
             this.engine.gridPattern = gridPattern;
-            const gpEl = document.getElementById('settings-grid-pattern');
+            const gpEl = this._el('settings-grid-pattern');
             if (gpEl) gpEl.value = gridPattern;
         } else {
-            const gpEl = document.getElementById('settings-grid-pattern');
+            const gpEl = this._el('settings-grid-pattern');
             if (gpEl) gpEl.value = 'dots';
         }
 
         const gridSize = projSet.gridSize !== undefined ? projSet.gridSize : settings['gridSize'];
         if (gridSize) {
             this.engine.gridSize = parseInt(gridSize);
-            const gsEl = document.getElementById('settings-grid-size');
+            const gsEl = this._el('settings-grid-size');
             if (gsEl) gsEl.value = gridSize;
-            const gsvEl = document.getElementById('grid-size-val');
+            const gsvEl = this._el('grid-size-val');
             if (gsvEl) gsvEl.innerText = `${gridSize}px`;
         } else {
-            const gsEl = document.getElementById('settings-grid-size');
+            const gsEl = this._el('settings-grid-size');
             if (gsEl) gsEl.value = '64';
-            const gsvEl = document.getElementById('grid-size-val');
+            const gsvEl = this._el('grid-size-val');
             if (gsvEl) gsvEl.innerText = '64px';
         }
 
         const gridThickness = projSet.gridThickness !== undefined ? projSet.gridThickness : settings['gridThickness'];
         if (gridThickness) {
             this.engine.gridThickness = parseFloat(gridThickness);
-            const gtEl = document.getElementById('settings-grid-thickness');
+            const gtEl = this._el('settings-grid-thickness');
             if (gtEl) gtEl.value = gridThickness;
-            const gtvEl = document.getElementById('grid-thickness-val');
+            const gtvEl = this._el('grid-thickness-val');
             if (gtvEl) gtvEl.innerText = `${gridThickness}px`;
         } else {
             this.engine.gridThickness = 2;
-            const gtEl = document.getElementById('settings-grid-thickness');
+            const gtEl = this._el('settings-grid-thickness');
             if (gtEl) gtEl.value = '2';
-            const gtvEl = document.getElementById('grid-thickness-val');
+            const gtvEl = this._el('grid-thickness-val');
             if (gtvEl) gtvEl.innerText = '2px';
         }
 
         const gridIntensity = projSet.gridIntensity !== undefined ? projSet.gridIntensity : settings['gridIntensity'];
         if (gridIntensity) {
             this.engine.gridIntensity = parseInt(gridIntensity) / 100;
-            const giEl = document.getElementById('settings-grid-intensity');
+            const giEl = this._el('settings-grid-intensity');
             if (giEl) giEl.value = gridIntensity;
-            const givEl = document.getElementById('grid-intensity-val');
+            const givEl = this._el('grid-intensity-val');
             if (givEl) givEl.innerText = `${gridIntensity}%`;
         } else {
-            const giEl = document.getElementById('settings-grid-intensity');
+            const giEl = this._el('settings-grid-intensity');
             if (giEl) giEl.value = '50';
-            const givEl = document.getElementById('grid-intensity-val');
+            const givEl = this._el('grid-intensity-val');
             if (givEl) givEl.innerText = '50%';
         }
 
         const showGrid = projSet.showGrid !== undefined ? projSet.showGrid : settings['showGrid'];
         if (showGrid !== undefined) {
             this.engine.showGrid = showGrid;
-            const sgEl = document.getElementById('settings-grid-show');
+            const sgEl = this._el('settings-grid-show');
             if (sgEl) sgEl.checked = showGrid;
         } else {
-            const sgEl = document.getElementById('settings-grid-show');
+            const sgEl = this._el('settings-grid-show');
             if (sgEl) sgEl.checked = true;
         }
         
@@ -1015,29 +1147,44 @@ class App {
         // Refresh grid textures & application styles based on settings loaded
         this.engine.setupBoard();
 
-        // BRUSH SETTINGS
-        let savedBrushes = null;
-        try {
-            const raw = localStorage.getItem('brushSettings');
-            if (raw) savedBrushes = JSON.parse(raw);
-        } catch(e) {}
-        if (!savedBrushes) savedBrushes = settings['brushSettings'];
+        // PER-TOOL BRUSH SETTINGS (Start from clean defaults on existing project switch so zero leakage occurs)
+        if (!options.isNewProject) {
+            this.brushSettings = this._createDefaultBrushSettings();
+        }
+
+        let savedBrushes = (perToolMap && Object.keys(perToolMap).length > 0) ? perToolMap : null;
+        let migratedFromLegacyMonolith = false;
+        if (!savedBrushes && !options.isNewProject) {
+            savedBrushes = settings['brushSettings'] || null;
+            if (!savedBrushes) {
+                try {
+                    const raw = localStorage.getItem('brushSettings');
+                    if (raw) savedBrushes = JSON.parse(raw);
+                } catch (_) {}
+            }
+            if (savedBrushes) migratedFromLegacyMonolith = true;
+        }
+
         if (savedBrushes) {
             Object.keys(savedBrushes).forEach(tool => {
                 if (this.brushSettings[tool]) {
                     const migrated = { ...savedBrushes[tool] };
-                    // Auto-migrate old sensitivity ranges (-20 to 20) to new percentage scale (-100 to 100)
+                    let changed = migratedFromLegacyMonolith;
                     if (migrated.speedSize !== undefined && migrated.speedSize !== 0 && Math.abs(migrated.speedSize) <= 12) {
                         migrated.speedSize = Math.round(migrated.speedSize * 5);
+                        changed = true;
                     }
                     if (migrated.speedOpacity !== undefined && migrated.speedOpacity !== 0 && Math.abs(migrated.speedOpacity) <= 12) {
                         migrated.speedOpacity = Math.round(migrated.speedOpacity * 5);
+                        changed = true;
                     }
                     if (migrated.speedValue !== undefined && migrated.speedValue !== 0 && Math.abs(migrated.speedValue) <= 12) {
                         migrated.speedValue = Math.round(migrated.speedValue * 5);
+                        changed = true;
                     }
                     if (migrated.speedHue !== undefined && migrated.speedHue !== 0 && Math.abs(migrated.speedHue) <= 12) {
                         migrated.speedHue = Math.round(migrated.speedHue * 5);
+                        changed = true;
                     }
                     if (!migrated._smudgeCalibratedV2) {
                         if (migrated.smudgeFlowBoost === 10.0) {
@@ -1052,6 +1199,7 @@ class App {
                             });
                         }
                         migrated._smudgeCalibratedV2 = true;
+                        changed = true;
                     }
                     if (!migrated._defaultsCalibratedV3) {
                         const patchToolDefaults = (obj) => {
@@ -1088,6 +1236,7 @@ class App {
                             Object.keys(migrated.tips).forEach(tid => patchToolDefaults(migrated.tips[tid]));
                         }
                         migrated._defaultsCalibratedV3 = true;
+                        changed = true;
                     }
                     if (!migrated._defaultsCalibratedV4) {
                         if (tool === TOOLS.AIR) {
@@ -1102,6 +1251,7 @@ class App {
                             }
                         }
                         migrated._defaultsCalibratedV4 = true;
+                        changed = true;
                     }
                     if (!migrated._defaultsCalibratedV5) {
                         if (tool === TOOLS.SUMI) {
@@ -1140,6 +1290,7 @@ class App {
                             }
                         }
                         migrated._defaultsCalibratedV5 = true;
+                        changed = true;
                     }
                     if (tool === TOOLS.LIQUIFY && !migrated._liquifySizeLockV1) {
                         migrated.speedSize = 0;
@@ -1153,6 +1304,7 @@ class App {
                             });
                         }
                         migrated._liquifySizeLockV1 = true;
+                        changed = true;
                     }
                     if (tool === TOOLS.SUMI && !migrated._sumiPressOpacV1) {
                         migrated.pressureOpacityInfluence = 0.0;
@@ -1164,8 +1316,12 @@ class App {
                             });
                         }
                         migrated._sumiPressOpacV1 = true;
+                        changed = true;
                     }
                     this.brushSettings[tool] = { ...this.brushSettings[tool], ...migrated };
+                    if (changed) {
+                        this.storage.saveToolSetting(tool, this._serializeToolForStorage(this.brushSettings[tool]), pid, false).catch(() => {});
+                    }
                 }
             });
         }
@@ -1174,10 +1330,13 @@ class App {
         const fluidCfg = this.brushSettings[TOOLS.FLUID];
         if (fluidCfg && (!savedBrushes || !savedBrushes[TOOLS.FLUID] || savedBrushes[TOOLS.FLUID].fluidFlow === undefined)) {
             const readLegacyNum = (k, def) => {
-                const raw = localStorage.getItem(k);
-                if (raw === null) return def;
-                const n = parseFloat(raw);
-                return Number.isFinite(n) ? n : def;
+                try {
+                    const raw = localStorage.getItem(k);
+                    if (raw === null) return def;
+                    localStorage.removeItem(k);
+                    const n = parseFloat(raw);
+                    return Number.isFinite(n) ? n : def;
+                } catch (_) { return def; }
             };
             fluidCfg.fluidity = readLegacyNum('fluid_setting_slider-fluidity', fluidCfg.fluidity ?? 80);
             fluidCfg.bristles = readLegacyNum('fluid_setting_slider-bristles', fluidCfg.bristles ?? 10);
@@ -1188,17 +1347,26 @@ class App {
             fluidCfg.fluidPickup = readLegacyNum('fluid_setting_slider-fluid-pickup', fluidCfg.fluidPickup ?? 80);
             fluidCfg.fluidDepth = readLegacyNum('fluid_setting_slider-fluid-depth', fluidCfg.fluidDepth ?? 30);
             fluidCfg.fluidGloss = readLegacyNum('fluid_setting_slider-fluid-gloss', fluidCfg.fluidGloss ?? 100);
-            const rawShade = localStorage.getItem('fluid_setting_chk-surface-shading');
-            if (rawShade !== null) fluidCfg.fluidShading = (rawShade === 'true');
+            try {
+                const rawShade = localStorage.getItem('fluid_setting_chk-surface-shading');
+                if (rawShade !== null) {
+                    fluidCfg.fluidShading = (rawShade === 'true');
+                    localStorage.removeItem('fluid_setting_chk-surface-shading');
+                }
+            } catch (_) {}
+        }
+
+        if (migratedFromLegacyMonolith) {
+            try { localStorage.removeItem('brushSettings'); } catch (_) {}
         }
 
         const spacing = settings['brushSpacing'];
         if (spacing) {
             this.engine.brush.spacing = parseFloat(spacing);
-            const spEl = document.getElementById('settings-brush-spacing');
+            const spEl = this._el('settings-brush-spacing');
             if (spEl) spEl.value = spacing;
         } else {
-            const spEl = document.getElementById('settings-brush-spacing');
+            const spEl = this._el('settings-brush-spacing');
             if (spEl) spEl.value = '0.05';
         }
 
@@ -1210,9 +1378,9 @@ class App {
     this._renderPalette();
     this._initColorSelector();
     
-    // Retrieve last color value from batch settings
+    // Retrieve last color value without triggering a redundant write
     const lastColor = (settings && settings['lastColor']) || this.palette.baseColors[0];
-    this.setColor(lastColor);
+    this.setColor(lastColor, { skipSave: true });
     this._updateHSVFromHex(lastColor);
     
     // 5. APPLY BRUSH (Sync UI sliders)
@@ -1220,19 +1388,29 @@ class App {
   }
 
   _saveWindowPositions() {
-      localStorage.setItem('window_positions', JSON.stringify(this.windowPositions));
+      this.storage?.saveUiState('window_positions', this.windowPositions);
   }
 
   async _loadWindowPositions() {
       try {
-          const raw = localStorage.getItem('window_positions');
-          if (raw) this.windowPositions = JSON.parse(raw);
+          let saved = await this.storage.loadUiState('window_positions');
+          if (!saved) {
+              const raw = localStorage.getItem('window_positions');
+              if (raw) {
+                  saved = JSON.parse(raw);
+                  this.storage.saveUiState('window_positions', saved).catch(() => {});
+                  localStorage.removeItem('window_positions');
+              }
+          }
+          if (saved && typeof saved === 'object') {
+              this.windowPositions = saved;
+          }
       } catch (e) {}
   }
 
   _restoreWindowPositions() {
       Object.keys(this.windowPositions).forEach(id => {
-          if (id === 'modal-ref-editor' || id === 'modal-color-studio' || id === 'modal-new-project' || id === 'modal-export') return;
+          if (id === 'modal-ref-editor' || id === 'modal-color-studio' || id === 'modal-layer-color' || id === 'modal-new-project' || id === 'modal-export') return;
           const el = document.getElementById(id);
           if (!el) return;
 
@@ -1330,7 +1508,7 @@ class App {
 
   resetUILayout() {
       this.windowPositions = {};
-      localStorage.removeItem('window_positions');
+      this.storage?.deleteUiState('window_positions');
 
       const cssDefaultPanels = [
           'panel-color',
@@ -1377,6 +1555,13 @@ class App {
 
   _setupHotkeys() {
     window.addEventListener('keydown', (e) => {
+      if (this.layerColorController && this.layerColorController.isOpen) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          this.layerColorController.cancel();
+        }
+        return;
+      }
       const refEditor = document.getElementById('modal-ref-editor');
       if (refEditor && !refEditor.classList.contains('hidden')) {
         const key = e.key.toLowerCase();
@@ -1608,7 +1793,7 @@ class App {
     const maxSize = (this.activeTool === TOOLS.LIQUIFY) ? 1500 : 500;
     const newSize = Math.max(1, Math.min(maxSize, currentSize + effectiveDelta));
     
-    this.updateActiveSetting('size', newSize);
+    this.updateActiveSetting('size', newSize, null, skipSave);
     
     if (el) el.value = this._mapSizeToSlider(newSize);
     if (valEl) valEl.innerText = newSize;
@@ -1911,7 +2096,7 @@ class App {
     this.setColor(hex);
     this._renderPalette();
     this._updateColorUI();
-    this.storage.saveSetting('palette', this.palette.getSerializedState());
+    this.palette.saveProjectPalette(this.currentProjectId);
     this.paletteStudio?.renderStudioDynamicSections();
   }
 
@@ -1940,260 +2125,209 @@ class App {
   }
 
   _updateBrushSettingsUI(tool) {
-    if (!tool) return;
+    if (!tool || this.activeTool !== tool) return;
     const settings = this.brushSettings[tool];
     const tipSettings = this.getCurrentTipSettings() || settings;
-    if (this.activeTool === tool) {
-        // Toggle visibility of specific properties based on tool
-        const heightCtrl = document.getElementById('height-control');
-        const oilCtrl = document.getElementById('oiliness-control');
-        const smudgeAlphaCtrl = document.getElementById('smudge-alpha-control');
-        const smudgePickupCtrl = document.getElementById('smudge-pickup-control');
-        const airCtrl = document.getElementById('airbrush-control');
-        const sumiSpanCtrl = document.getElementById('sumi-span-control');
-        const sumiBristlesCtrl = document.getElementById('sumi-bristles-control');
-        const sumiSplitCtrl = document.getElementById('sumi-split-control');
-        const advBtn = document.getElementById('btn-advanced-brush');
+    const el = (id) => this._el(id);
+    const setDisp = (id, disp) => {
+        const node = el(id);
+        if (node && node._lastDisp !== disp) {
+            node._lastDisp = disp;
+            node.style.display = disp;
+        }
+        return node;
+    };
 
-        if (heightCtrl) heightCtrl.style.display = (tool === TOOLS.BRUSH) ? 'block' : 'none';
-        if (oilCtrl) oilCtrl.style.display = (tool === TOOLS.BRUSH) ? 'block' : 'none';
-        if (smudgeAlphaCtrl) smudgeAlphaCtrl.style.display = (tool === TOOLS.SMUDGE) ? 'block' : 'none';
-        if (smudgePickupCtrl) smudgePickupCtrl.style.display = (tool === TOOLS.SMUDGE) ? 'block' : 'none';
-        if (airCtrl) airCtrl.style.display = (tool === TOOLS.BRUSH || tool === TOOLS.SMUDGE) ? 'block' : 'none';
-        if (sumiSpanCtrl) sumiSpanCtrl.style.display = (tool === TOOLS.SUMI) ? 'block' : 'none';
-        if (sumiBristlesCtrl) sumiBristlesCtrl.style.display = (tool === TOOLS.SUMI) ? 'block' : 'none';
-        if (sumiSplitCtrl) sumiSplitCtrl.style.display = (tool === TOOLS.SUMI) ? 'block' : 'none';
+    const isBrush = tool === TOOLS.BRUSH;
+    const isSmudge = tool === TOOLS.SMUDGE;
+    const isEraser = tool === TOOLS.ERASER;
+    const isWire = tool === TOOLS.WIREFRAME;
+    const isLiq = tool === TOOLS.LIQUIFY;
+    const isFluid = tool === TOOLS.FLUID;
+    const isAir = tool === TOOLS.AIR;
+    const isSumi = tool === TOOLS.SUMI;
+    const hasAdv = isBrush || isSmudge || isWire || isEraser || isFluid || isAir || isSumi;
 
-        const opacCtrl = document.getElementById('control-opacity');
-        const flowCtrl = document.getElementById('control-flow');
-        const flowLbl = document.getElementById('lbl-flow');
-        if (opacCtrl) opacCtrl.style.display = (tool === TOOLS.LIQUIFY || tool === TOOLS.SUMI) ? 'none' : 'block';
-        if (flowCtrl) flowCtrl.style.display = (tool === TOOLS.SUMI) ? 'none' : 'block';
-        if (flowLbl) flowLbl.innerText = (tool === TOOLS.LIQUIFY) ? 'STRENGTH' : 'FLOW';
-        
-        const falloffCtrl = document.getElementById('control-falloff');
-        if (falloffCtrl) {
-            falloffCtrl.style.display = (tool === TOOLS.LIQUIFY) ? 'block' : 'none';
-        }
-        const liqQualityCtrl = document.getElementById('control-liquify-quality');
-        if (liqQualityCtrl) {
-            liqQualityCtrl.style.display = (tool === TOOLS.LIQUIFY) ? 'block' : 'none';
-        }
+    setDisp('height-control', isBrush ? 'block' : 'none');
+    setDisp('oiliness-control', isBrush ? 'block' : 'none');
+    setDisp('smudge-alpha-control', isSmudge ? 'block' : 'none');
+    setDisp('smudge-pickup-control', isSmudge ? 'block' : 'none');
+    setDisp('airbrush-control', (isBrush || isSmudge) ? 'block' : 'none');
+    setDisp('sumi-span-control', isSumi ? 'block' : 'none');
+    setDisp('sumi-bristles-control', isSumi ? 'block' : 'none');
+    setDisp('sumi-split-control', isSumi ? 'block' : 'none');
 
-        const fluidityCtrl = document.getElementById('control-fluidity');
-        const bristlesCtrl = document.getElementById('control-bristles');
-        if (fluidityCtrl) {
-            fluidityCtrl.style.display = (tool === TOOLS.FLUID) ? 'block' : 'none';
-        }
-        if (bristlesCtrl) {
-            bristlesCtrl.style.display = (tool === TOOLS.FLUID) ? 'block' : 'none';
-        }
-        
-        // Advanced settings button visibility
-        if (advBtn) {
-            const hasAdv = (tool === TOOLS.BRUSH || tool === TOOLS.SMUDGE || tool === TOOLS.WIREFRAME || tool === TOOLS.ERASER || tool === TOOLS.FLUID || tool === TOOLS.AIR || tool === TOOLS.SUMI);
-            advBtn.style.display = hasAdv ? 'block' : 'none';
-        }
-        const advTitle = document.querySelector('#panel-advanced-brush .panel-title');
-        if (advTitle) {
-            advTitle.innerText = (tool === TOOLS.ERASER)
-                ? 'ADVANCED ERASER'
-                : (tool === TOOLS.FLUID ? 'ADVANCED FLUID' : (tool === TOOLS.AIR ? 'ADVANCED WATERCOLOR' : (tool === TOOLS.SUMI ? 'ADVANCED SUMI-E' : 'ADVANCED BRUSH')));
-        }
+    setDisp('control-opacity', (isLiq || isSumi) ? 'none' : 'block');
+    setDisp('control-flow', isSumi ? 'none' : 'block');
+    const flowLbl = el('lbl-flow');
+    if (flowLbl) flowLbl.innerText = isLiq ? 'STRENGTH' : 'FLOW';
 
-        // Update UI Sliders
-        document.getElementById('brush-size').value = this._mapSizeToSlider(tipSettings.size);
-        document.getElementById('size-val').innerText = tipSettings.size;
+    setDisp('control-falloff', isLiq ? 'block' : 'none');
+    setDisp('control-liquify-quality', isLiq ? 'block' : 'none');
+    setDisp('control-fluidity', isFluid ? 'block' : 'none');
+    setDisp('control-bristles', isFluid ? 'block' : 'none');
+    setDisp('btn-advanced-brush', hasAdv ? 'block' : 'none');
 
-        const touchSizeInput = document.getElementById('touch-brush-size');
-        if (touchSizeInput) touchSizeInput.value = this._mapSizeToSlider(tipSettings.size);
-        const touchSizeRangeVal = document.getElementById('touch-size-val');
-        if (touchSizeRangeVal) touchSizeRangeVal.innerText = tipSettings.size;
-        
-        const opacEl = document.getElementById('brush-opacity');
-        if (opacEl) {
-            opacEl.value = tipSettings.opacity * 100;
-            document.getElementById('opacity-val').innerText = `${Math.round(tipSettings.opacity * 100)}%`;
-        }
+    setDisp('cat-pressure', hasAdv ? 'block' : 'none');
+    setDisp('cat-jitter', (isBrush || isSmudge || isWire || isEraser || isAir || isFluid) ? 'block' : 'none');
+    setDisp('cat-smudge', (isBrush || isSmudge) ? 'block' : 'none');
+    setDisp('cat-wireframe', isWire ? 'block' : 'none');
+    setDisp('cat-fluid', isFluid ? 'block' : 'none');
+    setDisp('cat-air', isAir ? 'block' : 'none');
+    setDisp('cat-sumi-brush', isSumi ? 'block' : 'none');
+    setDisp('cat-sumi-paper', isSumi ? 'block' : 'none');
+    setDisp('cat-speed-tuning', hasAdv ? 'block' : 'none');
 
-        const flowEl = document.getElementById('brush-flow');
-        if (flowEl) {
-            flowEl.value = tipSettings.flow * 100;
-            document.getElementById('flow-val').innerText = `${Math.round(tipSettings.flow * 100)}%`;
-        }
+    if (!this._advTitleEl) this._advTitleEl = document.querySelector('#panel-advanced-brush .panel-title');
+    if (this._advTitleEl) {
+        this._advTitleEl.innerText = isEraser
+            ? 'ADVANCED ERASER'
+            : (isFluid ? 'ADVANCED FLUID' : (isAir ? 'ADVANCED WATERCOLOR' : (isSumi ? 'ADVANCED SUMI-E' : 'ADVANCED BRUSH')));
+    }
 
-        const falloffEl = document.getElementById('brush-falloff');
-        if (falloffEl) {
-            const fValue = (tipSettings.falloff !== undefined) ? tipSettings.falloff : 0.50;
-            falloffEl.value = fValue * 100;
-            const fValDisplay = document.getElementById('falloff-val');
-            if (fValDisplay) fValDisplay.innerText = `${Math.round(fValue * 100)}%`;
-        }
+    const getVal = (key, defaultVal) => (tipSettings[key] !== undefined ? tipSettings[key] : defaultVal);
+    const setValSlider = (sliderId, valId, v, formatter) => {
+        const s = el(sliderId);
+        if (!s) return;
+        s.value = v;
+        const lbl = valId ? el(valId) : null;
+        if (lbl) lbl.innerText = formatter ? formatter(v) : String(v);
+    };
 
-        const liqQualEl = document.getElementById('brush-liquify-quality');
+    // Common Size / Flow / Opacity
+    const mappedSize = this._mapSizeToSlider(tipSettings.size);
+    const sizeInput = el('brush-size');
+    if (sizeInput) sizeInput.value = mappedSize;
+    const sizeValEl = el('size-val');
+    if (sizeValEl) sizeValEl.innerText = tipSettings.size;
+
+    const touchSizeInput = el('touch-brush-size');
+    if (touchSizeInput) touchSizeInput.value = mappedSize;
+    const touchSizeRangeVal = el('touch-size-val');
+    if (touchSizeRangeVal) touchSizeRangeVal.innerText = tipSettings.size;
+
+    if (!isLiq && !isSumi) {
+        setValSlider('brush-opacity', 'opacity-val', tipSettings.opacity * 100, (v) => `${Math.round(v)}%`);
+    }
+    if (!isSumi) {
+        setValSlider('brush-flow', 'flow-val', tipSettings.flow * 100, (v) => `${Math.round(v)}%`);
+    }
+
+    // Tool-specific primary controls (skip hidden tools completely)
+    if (isLiq) {
+        setValSlider('brush-falloff', 'falloff-val', (tipSettings.falloff ?? 0.50) * 100, (v) => `${Math.round(v)}%`);
+        const liqQualEl = el('brush-liquify-quality');
         if (liqQualEl) {
             const qModeNames = { 1: 'FAST', 2: 'CRISP', 3: 'ULTRA' };
             const qVal = Math.max(1, Math.min(3, parseInt(tipSettings.liquifyQuality ?? 2, 10) || 2));
             liqQualEl.value = qVal;
-            const liqQualDisplay = document.getElementById('liquify-quality-val');
+            const liqQualDisplay = el('liquify-quality-val');
             if (liqQualDisplay) liqQualDisplay.innerText = qModeNames[qVal] || 'CRISP';
         }
+    }
 
-
-        const heightEl = document.getElementById('brush-height');
-        if (heightEl) {
-            heightEl.value = (tipSettings.paintHeight || 0) * 100;
-            const hVal = document.getElementById('height-val');
-            if (hVal) hVal.innerText = `${Math.round((tipSettings.paintHeight || 0) * 100)}%`;
+    if (isBrush || isSmudge) {
+        if (isBrush) {
+            setValSlider('brush-height', 'height-val', (tipSettings.paintHeight || 0) * 100, (v) => `${Math.round(v)}%`);
+            setValSlider('brush-oiliness', 'oiliness-val', (tipSettings.oiliness ?? 0.5) * 100, (v) => `${Math.round(v)}%`);
         }
+        setValSlider('brush-airbrush', 'airbrush-val', (tipSettings.airbrush || 0) * 100, (v) => `${Math.round(v)}%`);
 
-        const oilEl = document.getElementById('brush-oiliness');
-        if (oilEl) {
-            oilEl.value = (tipSettings.oiliness ?? 0.5) * 100;
-            const oVal = document.getElementById('oiliness-val');
-            if (oVal) oVal.innerText = `${Math.round((tipSettings.oiliness ?? 0.5) * 100)}%`;
-        }
-
-        const airEl = document.getElementById('brush-airbrush');
-        if (airEl) {
-            airEl.value = (tipSettings.airbrush || 0) * 100;
-            const aVal = document.getElementById('airbrush-val');
-            if (aVal) aVal.innerText = `${Math.round((tipSettings.airbrush || 0) * 100)}%`;
-        }
-
-        const smudgeAlphaEl = document.getElementById('brush-smudge-alpha');
+        const smudgeAlphaEl = el('brush-smudge-alpha');
         if (smudgeAlphaEl) {
             const isAlphaOn = (tipSettings.smudgeAlpha !== undefined) ? !!tipSettings.smudgeAlpha : true;
             smudgeAlphaEl.value = isAlphaOn ? 1 : 0;
-            const valEl = document.getElementById('smudge-alpha-val');
+            const valEl = el('smudge-alpha-val');
             if (valEl) valEl.innerText = isAlphaOn ? 'ON' : 'OFF';
         }
+        setValSlider('brush-smudge-pickup', 'smudge-pickup-val', tipSettings.smudgePickup ?? 2.0, (v) => v.toFixed(1));
+        setValSlider('adv-smudge-flow-boost', 'adv-smudge-flow-boost-val', getVal('smudgeFlowBoost', 1.0), (v) => v.toFixed(1));
+    }
 
-        const smudgePickupEl = document.getElementById('brush-smudge-pickup');
-        if (smudgePickupEl) {
-            const pVal = tipSettings.smudgePickup !== undefined ? tipSettings.smudgePickup : 2.0;
-            smudgePickupEl.value = pVal;
-            const valEl = document.getElementById('smudge-pickup-val');
-            if (valEl) valEl.innerText = pVal.toFixed(1);
-        }
+    if (hasAdv) {
+        setValSlider('speed-size', 's-size-val', tipSettings.speedSize, (v) => String(Math.round(v)));
+        setValSlider('speed-opacity', 's-opac-val', tipSettings.speedOpacity, (v) => String(Math.round(v)));
+        setValSlider('speed-value', 's-val-val', tipSettings.speedValue, (v) => String(Math.round(v)));
+        setValSlider('speed-hue', 's-hue-val', tipSettings.speedHue, (v) => String(Math.round(v)));
 
-        // Update Sensitivity UI
-        const sSize = document.getElementById('speed-size');
-        if (sSize) {
-            sSize.value = tipSettings.speedSize;
-            const val = document.getElementById('s-size-val');
-            if (val) val.innerText = Math.round(tipSettings.speedSize);
-        }
-        const sOpac = document.getElementById('speed-opacity');
-        if (sOpac) {
-            sOpac.value = tipSettings.speedOpacity;
-            const val = document.getElementById('s-opac-val');
-            if (val) val.innerText = Math.round(tipSettings.speedOpacity);
-        }
-        const sVal = document.getElementById('speed-value');
-        if (sVal) {
-            sVal.value = tipSettings.speedValue;
-            const val = document.getElementById('s-val-val');
-            if (val) val.innerText = Math.round(tipSettings.speedValue);
-        }
-        const sHue = document.getElementById('speed-hue');
-        if (sHue) {
-            sHue.value = tipSettings.speedHue;
-            const val = document.getElementById('s-hue-val');
-            if (val) val.innerText = Math.round(tipSettings.speedHue);
-        }
-        const sHeightCont = document.getElementById('s-height-container');
-        if (sHeightCont) {
-            sHeightCont.style.display = (tool === TOOLS.FLUID) ? '' : 'none';
-        }
-        const sHeightEl = document.getElementById('speed-height');
-        if (sHeightEl) {
-            const shVal = tipSettings.speedHeight ?? 0;
-            sHeightEl.value = shVal;
-            const valEl = document.getElementById('s-height-val');
-            if (valEl) valEl.innerText = Math.round(shVal);
-        }
-        const sWaterCont = document.getElementById('s-water-container');
-        if (sWaterCont) {
-            sWaterCont.style.display = (tool === TOOLS.AIR || tool === TOOLS.SUMI) ? '' : 'none';
-        }
-        const sWaterEl = document.getElementById('speed-water');
-        if (sWaterEl) {
-            const swVal = tipSettings.speedWater ?? (tool === TOOLS.SUMI ? -45 : 0);
-            sWaterEl.value = swVal;
-            const valEl = document.getElementById('s-water-val');
-            if (valEl) valEl.innerText = Math.round(swVal);
-        }
-        const maxWaterCont = document.getElementById('max-water-container');
-        if (maxWaterCont) {
-            maxWaterCont.style.display = (tool === TOOLS.SUMI) ? '' : 'none';
-        }
-        const maxWaterEl = document.getElementById('sumi-max-water');
-        if (maxWaterEl) {
-            const mwVal = tipSettings.sumiMaxWater ?? 100;
-            maxWaterEl.value = mwVal;
-            const valEl = document.getElementById('max-water-val');
-            if (valEl) valEl.innerText = `${Math.round(mwVal)}%`;
+        setDisp('s-height-container', isFluid ? '' : 'none');
+        if (isFluid) {
+            setValSlider('speed-height', 's-height-val', tipSettings.speedHeight ?? 0, (v) => String(Math.round(v)));
         }
 
-        // Update Advanced Sliders
-        const getVal = (key, defaultVal) => {
-            return tipSettings[key] !== undefined ? tipSettings[key] : defaultVal;
-        };
-
-        const smudgeBoost = document.getElementById('adv-smudge-flow-boost');
-        if (smudgeBoost) {
-            const bVal = getVal('smudgeFlowBoost', 1.0);
-            smudgeBoost.value = bVal;
-            const valEl = document.getElementById('adv-smudge-flow-boost-val');
-            if (valEl) valEl.innerText = bVal.toFixed(1);
-        }
-        
-        const sharpen = document.getElementById('adv-brush-sharpen');
-        if (sharpen) {
-            const sVal = getVal('brushSharpen', 0.0);
-            sharpen.value = sVal;
-            const valEl = document.getElementById('adv-brush-sharpen-val');
-            if (valEl) valEl.innerText = sVal.toFixed(2);
-        }
-        
-        const wireDensity = document.getElementById('adv-wire-density');
-        if (wireDensity) {
-            const dVal = getVal('wireDensity', 30);
-            wireDensity.value = dVal;
-            const valEl = document.getElementById('adv-wire-density-val');
-            if (valEl) valEl.innerText = dVal;
-        }
-        
-        const wireRange = document.getElementById('adv-wire-range');
-        if (wireRange) {
-            const rVal = getVal('wireRange', 4.0);
-            wireRange.value = rVal;
-            const valEl = document.getElementById('adv-wire-range-val');
-            if (valEl) valEl.innerText = rVal.toFixed(1);
-        }
-        
-        const wireMinDist = document.getElementById('adv-wire-min-dist');
-        if (wireMinDist) {
-            const mVal = getVal('wireMinDist', 0.5);
-            wireMinDist.value = mVal;
-            const valEl = document.getElementById('adv-wire-min-dist-val');
-            if (valEl) valEl.innerText = mVal.toFixed(1);
+        setDisp('s-water-container', (isAir || isSumi) ? '' : 'none');
+        if (isAir || isSumi) {
+            setValSlider('speed-water', 's-water-val', tipSettings.speedWater ?? (isSumi ? -45 : 0), (v) => String(Math.round(v)));
         }
 
+        setDisp('max-water-container', isSumi ? '' : 'none');
+        if (isSumi) {
+            setValSlider('sumi-max-water', 'max-water-val', tipSettings.sumiMaxWater ?? 100, (v) => `${Math.round(v)}%`);
+        }
+
+        setValSlider('adv-brush-sharpen', 'adv-brush-sharpen-val', getVal('brushSharpen', 0.0), (v) => v.toFixed(2));
+        setDisp('group-brush-spacing', isSumi ? 'none' : '');
+        setDisp('group-sumi-pressure-gate', isSumi ? '' : 'none');
+        if (!isSumi) {
+            const spacingEl = el('settings-brush-spacing');
+            if (spacingEl) spacingEl.value = getVal('spacing', 0.05);
+        }
+
+        const pressureEnable = el('settings-pressure-enable');
+        if (pressureEnable) pressureEnable.checked = getVal('pressureEnabled', true);
+
+        const pressureOpacityLbl = el('lbl-pressure-opacity');
+        if (pressureOpacityLbl) pressureOpacityLbl.innerText = isSumi ? 'AFFECTED INK CONC.' : 'AFFECTED OPACITY';
+
+        const defOpInf = (isSmudge || isWire || isSumi) ? 0.0 : 1.0;
+        setValSlider('settings-pressure-opacity-influence', 'pressure-opacity-val', getVal('pressureOpacityInfluence', defOpInf), (v) => v.toFixed(1));
+        setValSlider('settings-pressure-size-influence', 'pressure-size-val', getVal('pressureSizeInfluence', 1.0), (v) => v.toFixed(1));
+        setValSlider('adv-speed-max', 'adv-speed-max-val', getVal('speedMax', 5.0), (v) => v.toFixed(1));
+    }
+
+    if (hasAdv && !isSumi) {
+        const jSizeVal = getVal('jitterSize', 0);
+        const jitterSize = el('settings-jitter-size');
+        if (jitterSize) {
+            jitterSize.value = this._mapPrecisionToSlider(jSizeVal, 100);
+            const valEl = el('jitter-size-val');
+            if (valEl) valEl.innerText = `${jSizeVal}%`;
+        }
+        const jAngleVal = getVal('jitterAngle', 0);
+        const jitterAngle = el('settings-jitter-angle');
+        if (jitterAngle) {
+            jitterAngle.value = this._mapPrecisionToSlider(jAngleVal, 180);
+            const valEl = el('jitter-angle-val');
+            if (valEl) valEl.innerText = `${jAngleVal}°`;
+        }
+        const jPosVal = getVal('jitterPos', 0);
+        const jitterPos = el('settings-jitter-pos');
+        if (jitterPos) {
+            jitterPos.value = this._mapPrecisionToSlider(jPosVal, 200);
+            const valEl = el('jitter-pos-val');
+            if (valEl) valEl.innerText = `${jPosVal}%`;
+        }
+        const jHueVal = getVal('jitterHue', 0);
+        const jitterHue = el('settings-jitter-hue');
+        if (jitterHue) {
+            jitterHue.value = this._mapPrecisionToSlider(jHueVal, 100);
+            const valEl = el('jitter-hue-val');
+            if (valEl) valEl.innerText = `${jHueVal}%`;
+        }
+    }
+
+    if (isWire) {
+        setValSlider('adv-wire-density', 'adv-wire-density-val', getVal('wireDensity', 30), (v) => String(v));
+        setValSlider('adv-wire-range', 'adv-wire-range-val', getVal('wireRange', 4.0), (v) => v.toFixed(1));
+        setValSlider('adv-wire-min-dist', 'adv-wire-min-dist-val', getVal('wireMinDist', 0.5), (v) => v.toFixed(1));
+    }
+
+    if (isAir) {
         const syncAirUi = (elId, valId, key, defVal) => {
-            const el = document.getElementById(elId);
             const val = getVal(key, defVal);
-            if (el) {
-                el.value = val;
-                const valEl = document.getElementById(valId);
-                if (valEl) valEl.innerText = `${val}%`;
-            }
-            if (this.engine && this.engine.brush) {
-                this.engine.brush[key] = val;
-            }
+            setValSlider(elId, valId, val, (v) => `${v}%`);
+            if (this.engine?.brush) this.engine.brush[key] = val;
         };
-
         syncAirUi('adv-air-wetness', 'adv-air-wetness-val', 'airWetness', 100);
         syncAirUi('adv-air-stream', 'adv-air-stream-val', 'airStreamFlow', 100);
         syncAirUi('adv-air-bloom', 'adv-air-bloom-val', 'airBloom', 50);
@@ -2201,184 +2335,47 @@ class App {
         syncAirUi('adv-air-granulation', 'adv-air-granulation-val', 'airGranulation', 30);
 
         const airPourVal = getVal('airTipPour', 100);
-        const airPourAdv = document.getElementById('adv-air-tip-pour');
-        const airPourAdvLbl = document.getElementById('adv-air-tip-pour-val');
-        const airPourPanel = document.getElementById('slider-air-tip-pour');
-        const airPourPanelLbl = document.getElementById('air-tip-pour-val');
-        if (airPourAdv) airPourAdv.value = airPourVal;
-        if (airPourAdvLbl) airPourAdvLbl.innerText = `${Math.round(airPourVal)}%`;
-        if (airPourPanel) airPourPanel.value = airPourVal;
-        if (airPourPanelLbl) airPourPanelLbl.innerText = `${Math.round(airPourVal)}%`;
+        setValSlider('adv-air-tip-pour', 'adv-air-tip-pour-val', airPourVal, (v) => `${Math.round(v)}%`);
+        setValSlider('slider-air-tip-pour', 'air-tip-pour-val', airPourVal, (v) => `${Math.round(v)}%`);
 
-        const btnDraw = document.getElementById('btn-air-mode-draw');
-        const btnMix = document.getElementById('btn-air-mode-mix');
-        const btnPour = document.getElementById('btn-air-mode-pour');
+        const btnDraw = el('btn-air-mode-draw');
+        const btnMix = el('btn-air-mode-mix');
+        const btnPour = el('btn-air-mode-pour');
         if (btnDraw && btnMix && btnPour) {
             btnDraw.classList.toggle('active-btn', airPourVal <= 12);
             btnMix.classList.toggle('active-btn', airPourVal > 12 && airPourVal < 65);
             btnPour.classList.toggle('active-btn', airPourVal >= 65);
         }
 
-        const airFollow = document.getElementById('adv-air-follow-stroke');
+        const airFollow = el('adv-air-follow-stroke');
         if (airFollow) airFollow.checked = !!getVal('airFollowStroke', false);
-
-        const airAngleEl = document.getElementById('adv-air-tip-angle');
-        const airAngleVal = getVal('airTipAngle', 0);
-        if (airAngleEl) {
-            airAngleEl.value = airAngleVal;
-            const airAngleLbl = document.getElementById('adv-air-tip-angle-val');
-            if (airAngleLbl) airAngleLbl.innerText = `${Math.round(airAngleVal)}°`;
-        }
+        setValSlider('adv-air-tip-angle', 'adv-air-tip-angle-val', getVal('airTipAngle', 0), (v) => `${Math.round(v)}°`);
         syncAirUi('adv-air-tip-hardness', 'adv-air-tip-hardness-val', 'airTipHardness', 55);
         syncAirUi('adv-air-pressure-flow', 'adv-air-pressure-flow-val', 'airPressureFlow', 35);
 
         const airUseH = !!getVal('airUseHeightmap', false);
         const airHSrc = getVal('airHeightSource', 'surface') === 'layer' ? 'layer' : 'surface';
         const airHSrcLbl = airHSrc === 'layer' ? 'LAYER' : 'SURFACE';
-        const chkAirH = document.getElementById('chk-air-use-heightmap');
-        const advChkAirH = document.getElementById('adv-air-use-heightmap');
-        const btnAirSrc = document.getElementById('btn-air-height-source');
-        const advBtnAirSrc = document.getElementById('adv-air-height-source');
+        const chkAirH = el('chk-air-use-heightmap');
+        const advChkAirH = el('adv-air-use-heightmap');
+        const btnAirSrc = el('btn-air-height-source');
+        const advBtnAirSrc = el('adv-air-height-source');
         if (chkAirH) chkAirH.checked = airUseH;
         if (advChkAirH) advChkAirH.checked = airUseH;
-        if (btnAirSrc) {
-            btnAirSrc.innerText = airHSrcLbl;
-            btnAirSrc.style.opacity = airUseH ? '1' : '0.45';
-        }
-        if (advBtnAirSrc) {
-            advBtnAirSrc.innerText = airHSrcLbl;
-            advBtnAirSrc.style.opacity = airUseH ? '1' : '0.45';
-        }
-        if (this.engine && this.engine.brush) {
+        if (btnAirSrc) { btnAirSrc.innerText = airHSrcLbl; btnAirSrc.style.opacity = airUseH ? '1' : '0.45'; }
+        if (advBtnAirSrc) { advBtnAirSrc.innerText = airHSrcLbl; advBtnAirSrc.style.opacity = airUseH ? '1' : '0.45'; }
+        if (this.engine?.brush) {
             this.engine.brush.airUseHeightmap = airUseH;
             this.engine.brush.airHeightSource = airHSrc;
         }
+    }
 
-        const spacingGroup = document.getElementById('group-brush-spacing');
-        if (spacingGroup) {
-            spacingGroup.style.display = (tool === TOOLS.SUMI) ? 'none' : '';
-        }
-        const sumiGateGroup = document.getElementById('group-sumi-pressure-gate');
-        if (sumiGateGroup) {
-            sumiGateGroup.style.display = (tool === TOOLS.SUMI) ? '' : 'none';
-        }
-        const spacingEl = document.getElementById('settings-brush-spacing');
-        if (spacingEl) {
-            spacingEl.value = getVal('spacing', 0.05);
-        }
-
-        const pressureEnable = document.getElementById('settings-pressure-enable');
-        if (pressureEnable) {
-            pressureEnable.checked = getVal('pressureEnabled', true);
-        }
-
-        const pressureOpacityLbl = document.getElementById('lbl-pressure-opacity');
-        if (pressureOpacityLbl) {
-            pressureOpacityLbl.innerText = (tool === TOOLS.SUMI) ? 'AFFECTED INK CONC.' : 'AFFECTED OPACITY';
-        }
-        const pressureOpacityInf = document.getElementById('settings-pressure-opacity-influence');
-        if (pressureOpacityInf) {
-            const defOpInf = (tool === TOOLS.SMUDGE || tool === TOOLS.WIREFRAME || tool === TOOLS.SUMI) ? 0.0 : 1.0;
-            const opVal = getVal('pressureOpacityInfluence', defOpInf);
-            pressureOpacityInf.value = opVal;
-            const valEl = document.getElementById('pressure-opacity-val');
-            if (valEl) valEl.innerText = opVal.toFixed(1);
-        }
-
-        const pressureSizeInf = document.getElementById('settings-pressure-size-influence');
-        if (pressureSizeInf) {
-            const szVal = getVal('pressureSizeInfluence', 1.0);
-            pressureSizeInf.value = szVal;
-            const valEl = document.getElementById('pressure-size-val');
-            if (valEl) valEl.innerText = szVal.toFixed(1);
-        }
-
-        const advSpeedMax = document.getElementById('adv-speed-max');
-        if (advSpeedMax) {
-            const sMaxVal = getVal('speedMax', 5.0);
-            advSpeedMax.value = sMaxVal;
-            const valEl = document.getElementById('adv-speed-max-val');
-            if (valEl) valEl.innerText = sMaxVal.toFixed(1);
-        }
-
-        // Jitter Sliders
-        const jitterSize = document.getElementById('settings-jitter-size');
-        if (jitterSize) {
-            const jSizeVal = getVal('jitterSize', 0);
-            jitterSize.value = this._mapPrecisionToSlider(jSizeVal, 100);
-            const valEl = document.getElementById('jitter-size-val');
-            if (valEl) valEl.innerText = `${jSizeVal}%`;
-        }
-        const jitterAngle = document.getElementById('settings-jitter-angle');
-        if (jitterAngle) {
-            const jAngleVal = getVal('jitterAngle', 0);
-            jitterAngle.value = this._mapPrecisionToSlider(jAngleVal, 180);
-            const valEl = document.getElementById('jitter-angle-val');
-            if (valEl) valEl.innerText = `${jAngleVal}°`;
-        }
-        const jitterPos = document.getElementById('settings-jitter-pos');
-        if (jitterPos) {
-            const jPosVal = getVal('jitterPos', 0);
-            jitterPos.value = this._mapPrecisionToSlider(jPosVal, 200);
-            const valEl = document.getElementById('jitter-pos-val');
-            if (valEl) valEl.innerText = `${jPosVal}%`;
-        }
-        const jitterHue = document.getElementById('settings-jitter-hue');
-        if (jitterHue) {
-            const jHueVal = getVal('jitterHue', 0);
-            jitterHue.value = this._mapPrecisionToSlider(jHueVal, 100);
-            const valEl = document.getElementById('jitter-hue-val');
-            if (valEl) valEl.innerText = `${jHueVal}%`;
-        }
-
-        const catPressure = document.getElementById('cat-pressure');
-        const catJitter = document.getElementById('cat-jitter');
-        const catSmudge = document.getElementById('cat-smudge');
-        const catWireframe = document.getElementById('cat-wireframe');
-        const catFluid = document.getElementById('cat-fluid');
-        const catAir = document.getElementById('cat-air');
-        const catSumiBrush = document.getElementById('cat-sumi-brush');
-        const catSumiPaper = document.getElementById('cat-sumi-paper');
-        const catSpeedTuning = document.getElementById('cat-speed-tuning');
-        
-        if (catPressure) catPressure.style.display = (tool === TOOLS.BRUSH || tool === TOOLS.SMUDGE || tool === TOOLS.WIREFRAME || tool === TOOLS.ERASER || tool === TOOLS.AIR || tool === TOOLS.FLUID || tool === TOOLS.SUMI) ? 'block' : 'none';
-        if (catJitter) catJitter.style.display = (tool === TOOLS.BRUSH || tool === TOOLS.SMUDGE || tool === TOOLS.WIREFRAME || tool === TOOLS.ERASER || tool === TOOLS.AIR || tool === TOOLS.FLUID) ? 'block' : 'none';
-        if (catSmudge) catSmudge.style.display = (tool === TOOLS.BRUSH || tool === TOOLS.SMUDGE) ? 'block' : 'none';
-        if (catWireframe) catWireframe.style.display = (tool === TOOLS.WIREFRAME) ? 'block' : 'none';
-        if (catFluid) catFluid.style.display = (tool === TOOLS.FLUID) ? 'block' : 'none';
-        if (catAir) catAir.style.display = (tool === TOOLS.AIR) ? 'block' : 'none';
-        if (catSumiBrush) catSumiBrush.style.display = (tool === TOOLS.SUMI) ? 'block' : 'none';
-        if (catSumiPaper) catSumiPaper.style.display = (tool === TOOLS.SUMI) ? 'block' : 'none';
-        if (catSpeedTuning) catSpeedTuning.style.display = (tool === TOOLS.BRUSH || tool === TOOLS.SMUDGE || tool === TOOLS.WIREFRAME || tool === TOOLS.ERASER || tool === TOOLS.AIR || tool === TOOLS.FLUID || tool === TOOLS.SUMI) ? 'block' : 'none';
-        
-        // Fluidity and Bristles updating
-        const fldEl = document.getElementById('slider-fluidity');
-        if (fldEl) {
-            const fldValue = getVal('fluidity', 80);
-            fldEl.value = fldValue;
-            const fldValDisplay = document.getElementById('val-fluidity');
-            if (fldValDisplay) fldValDisplay.innerText = `${Math.round(fldValue)}%`;
-        }
-
-        const brsEl = document.getElementById('slider-bristles');
-        if (brsEl) {
-            const brsValue = getVal('bristles', 10);
-            brsEl.value = brsValue;
-            const brsValDisplay = document.getElementById('val-bristles');
-            if (brsValDisplay) brsValDisplay.innerText = Math.round(brsValue);
-        }
-
-        // Sync Fluid Tuning & Advanced Fluid controls per active brush tip
+    if (isFluid) {
         const syncFluidUiSlider = (elId, valId, key, defVal, unit = '%') => {
-            const el = document.getElementById(elId);
-            const v = getVal(key, defVal);
-            if (el) {
-                el.value = v;
-                const valEl = document.getElementById(valId);
-                if (valEl) valEl.innerText = `${Math.round(v)}${unit}`;
-            }
+            setValSlider(elId, valId, getVal(key, defVal), (v) => `${Math.round(v)}${unit}`);
         };
-
+        syncFluidUiSlider('slider-fluidity', 'val-fluidity', 'fluidity', 80);
+        syncFluidUiSlider('slider-bristles', 'val-bristles', 'bristles', 10, '');
         syncFluidUiSlider('slider-fluid-flow', 'val-fluid-flow', 'fluidFlow', 100);
         syncFluidUiSlider('slider-fluid-vortex', 'val-fluid-vortex', 'fluidVortex', 8);
         syncFluidUiSlider('slider-fluid-turb', 'val-fluid-turb', 'fluidTurb', 8);
@@ -2388,111 +2385,97 @@ class App {
         syncFluidUiSlider('slider-fluid-height-shield', 'val-fluid-height-shield', 'fluidHeightShield', 65);
         syncFluidUiSlider('slider-fluid-gloss', 'val-fluid-gloss', 'fluidGloss', 100);
 
-        const chkShading = document.getElementById('chk-surface-shading');
-        if (chkShading) {
-            chkShading.checked = getVal('fluidShading', true);
-        }
-
-        const chkFollow = document.getElementById('adv-fluid-follow-stroke');
-        if (chkFollow) {
-            chkFollow.checked = !!getVal('fluidFollowStroke', false);
-        }
+        const chkShading = el('chk-surface-shading');
+        if (chkShading) chkShading.checked = getVal('fluidShading', true);
+        const chkFollow = el('adv-fluid-follow-stroke');
+        if (chkFollow) chkFollow.checked = !!getVal('fluidFollowStroke', false);
         syncFluidUiSlider('adv-fluid-tip-angle', 'adv-fluid-tip-angle-val', 'fluidTipAngle', 0, '°');
         syncFluidUiSlider('adv-fluid-bristle-contrast', 'adv-fluid-bristle-contrast-val', 'fluidBristleContrast', 65);
         syncFluidUiSlider('adv-fluid-bleed', 'adv-fluid-bleed-val', 'fluidBleed', 50);
         syncFluidUiSlider('adv-fluid-tip-hardness', 'adv-fluid-tip-hardness-val', 'fluidTipHardness', 50);
         syncFluidUiSlider('adv-fluid-pressure-flow', 'adv-fluid-pressure-flow-val', 'fluidPressureFlow', 35);
+    }
 
-        if (tool === TOOLS.FLUID) {
-            syncFluidSettingsFromTip(tipSettings);
-        }
-        if (tool === TOOLS.AIR) {
-            syncAirSettingsFromTip(tipSettings);
-        }
-
-        // Sync Sumi-e controls (Sidebar + Floating Panel + Advanced Category)
-        syncFluidUiSlider('brush-sumi-span', 'sumi-span-val', 'sumiSpan', 550, 'px');
-        syncFluidUiSlider('brush-sumi-bristles', 'sumi-bristles-val', 'sumiBristles', 28, '');
-        syncFluidUiSlider('brush-sumi-split', 'sumi-split-val', 'sumiSplit', 48, '%');
+    if (isSumi) {
+        const syncSumiSlider = (elId, valId, key, defVal, unit = '%') => {
+            setValSlider(elId, valId, getVal(key, defVal), (v) => `${Math.round(v)}${unit}`);
+        };
+        syncSumiSlider('brush-sumi-span', 'sumi-span-val', 'sumiSpan', 550, 'px');
+        syncSumiSlider('brush-sumi-bristles', 'sumi-bristles-val', 'sumiBristles', 28, '');
+        syncSumiSlider('brush-sumi-split', 'sumi-split-val', 'sumiSplit', 48, '%');
         const activeSumiMode = getVal('sumiMode', 'draw');
         const inkKey = activeSumiMode === 'water' ? 'sumiInkAffection' : (activeSumiMode === 'eraser' ? 'sumiEraserInk' : 'sumiInk');
         const inkDef = activeSumiMode === 'water' ? 35 : (activeSumiMode === 'eraser' ? 85 : 78);
         const watKey = activeSumiMode === 'water' ? 'sumiWaterWash' : (activeSumiMode === 'eraser' ? 'sumiEraserWater' : 'sumiWater');
         const watDef = activeSumiMode === 'water' ? 75 : (activeSumiMode === 'eraser' ? 25 : 65);
-        syncFluidUiSlider('slider-sumi-ink', 'val-sumi-ink', inkKey, inkDef, '%');
-        syncFluidUiSlider('slider-sumi-water', 'val-sumi-water', watKey, watDef, '%');
-        syncFluidUiSlider('slider-sumi-bleed', 'val-sumi-bleed', 'sumiBleed', 58, '%');
-        syncFluidUiSlider('adv-sumi-stiffness', 'adv-sumi-stiffness-val', 'sumiStiffness', 60, '%');
-        syncFluidUiSlider('adv-sumi-glue', 'adv-sumi-glue-val', 'sumiGlue', 42, '%');
-        syncFluidUiSlider('adv-sumi-warmth', 'adv-sumi-warmth-val', 'sumiWarmth', 12, '');
-        syncFluidUiSlider('adv-sumi-evaporation', 'adv-sumi-evaporation-val', 'sumiEvaporation', 28, '%');
-        syncFluidUiSlider('adv-sumi-capillarity', 'adv-sumi-capillarity-val', 'sumiCapillarity', 62, '%');
-        syncFluidUiSlider('adv-sumi-backrun', 'adv-sumi-backrun-val', 'sumiBackrun', 68, '%');
-        syncFluidUiSlider('adv-sumi-turbulence', 'adv-sumi-turbulence-val', 'sumiTurbulence', 0, '%');
-        syncFluidUiSlider('adv-sumi-soot-snag', 'adv-sumi-soot-snag-val', 'sumiSootSnag', 55, '%');
-        syncFluidUiSlider('adv-sumi-tip-angle', 'adv-sumi-tip-angle-val', 'sumiTipAngle', 0, '°');
-        syncFluidUiSlider('adv-sumi-pressure-flow', 'adv-sumi-pressure-flow-val', 'sumiPressureFlow', 35, '%');
-        syncFluidUiSlider('adv-sumi-pressure-gate', 'sumi-pressure-gate-val', 'sumiPressureGate', 20, '%');
+        syncSumiSlider('slider-sumi-ink', 'val-sumi-ink', inkKey, inkDef, '%');
+        syncSumiSlider('slider-sumi-water', 'val-sumi-water', watKey, watDef, '%');
+        syncSumiSlider('slider-sumi-bleed', 'val-sumi-bleed', 'sumiBleed', 58, '%');
+        syncSumiSlider('adv-sumi-stiffness', 'adv-sumi-stiffness-val', 'sumiStiffness', 60, '%');
+        syncSumiSlider('adv-sumi-glue', 'adv-sumi-glue-val', 'sumiGlue', 42, '%');
+        syncSumiSlider('adv-sumi-warmth', 'adv-sumi-warmth-val', 'sumiWarmth', 12, '');
+        syncSumiSlider('adv-sumi-evaporation', 'adv-sumi-evaporation-val', 'sumiEvaporation', 28, '%');
+        syncSumiSlider('adv-sumi-capillarity', 'adv-sumi-capillarity-val', 'sumiCapillarity', 62, '%');
+        syncSumiSlider('adv-sumi-backrun', 'adv-sumi-backrun-val', 'sumiBackrun', 68, '%');
+        syncSumiSlider('adv-sumi-turbulence', 'adv-sumi-turbulence-val', 'sumiTurbulence', 0, '%');
+        syncSumiSlider('adv-sumi-soot-snag', 'adv-sumi-soot-snag-val', 'sumiSootSnag', 55, '%');
+        syncSumiSlider('adv-sumi-tip-angle', 'adv-sumi-tip-angle-val', 'sumiTipAngle', 0, '°');
+        syncSumiSlider('adv-sumi-pressure-flow', 'adv-sumi-pressure-flow-val', 'sumiPressureFlow', 35, '%');
+        syncSumiSlider('adv-sumi-pressure-gate', 'adv-sumi-pressure-gate-val', 'sumiPressureGate', 20, '%');
 
-        const chkSumiDeplete = document.getElementById('adv-sumi-deplete');
+        const chkSumiDeplete = el('adv-sumi-deplete');
         if (chkSumiDeplete) chkSumiDeplete.checked = getVal('sumiDeplete', true);
-        const chkSumiSplit = document.getElementById('adv-sumi-split-enabled');
+        const chkSumiSplit = el('adv-sumi-split-enabled');
         if (chkSumiSplit) chkSumiSplit.checked = getVal('sumiSplitEnabled', true);
-        const chkSumiTilt = document.getElementById('adv-sumi-tilt');
+        const chkSumiTilt = el('adv-sumi-tilt');
         if (chkSumiTilt) chkSumiTilt.checked = getVal('sumiTilt', true);
-        const chkSumiFollow = document.getElementById('adv-sumi-follow-stroke');
+        const chkSumiFollow = el('adv-sumi-follow-stroke');
         if (chkSumiFollow) chkSumiFollow.checked = !!getVal('sumiFollowStroke', false);
 
         const sumiUseH = !!getVal('sumiUseHeightmap', false);
         const sumiHSrc = getVal('sumiHeightSource', 'surface') === 'layer' ? 'layer' : 'surface';
         const sumiHSrcLbl = sumiHSrc === 'layer' ? 'LAYER' : 'SURFACE';
-        const chkSumiH = document.getElementById('chk-sumi-use-heightmap');
-        const advChkSumiH = document.getElementById('adv-sumi-use-heightmap');
-        const btnSumiSrc = document.getElementById('btn-sumi-height-source');
-        const advBtnSumiSrc = document.getElementById('adv-sumi-height-source');
+        const chkSumiH = el('chk-sumi-use-heightmap');
+        const advChkSumiH = el('adv-sumi-use-heightmap');
+        const btnSumiSrc = el('btn-sumi-height-source');
+        const advBtnSumiSrc = el('adv-sumi-height-source');
         if (chkSumiH) chkSumiH.checked = sumiUseH;
         if (advChkSumiH) advChkSumiH.checked = sumiUseH;
-        if (btnSumiSrc) {
-            btnSumiSrc.innerText = sumiHSrcLbl;
-            btnSumiSrc.style.opacity = sumiUseH ? '1' : '0.45';
-        }
-        if (advBtnSumiSrc) {
-            advBtnSumiSrc.innerText = sumiHSrcLbl;
-            advBtnSumiSrc.style.opacity = sumiUseH ? '1' : '0.45';
-        }
-        if (this.engine && this.engine.brush) {
+        if (btnSumiSrc) { btnSumiSrc.innerText = sumiHSrcLbl; btnSumiSrc.style.opacity = sumiUseH ? '1' : '0.45'; }
+        if (advBtnSumiSrc) { advBtnSumiSrc.innerText = sumiHSrcLbl; advBtnSumiSrc.style.opacity = sumiUseH ? '1' : '0.45'; }
+        if (this.engine?.brush) {
             this.engine.brush.sumiUseHeightmap = sumiUseH;
             this.engine.brush.sumiHeightSource = sumiHSrc;
         }
 
-        const btnAutoDip = document.getElementById('btn-sumi-auto-redip');
+        const btnAutoDip = el('btn-sumi-auto-redip');
         if (btnAutoDip) {
             const autoDip = getVal('sumiAutoReDip', true);
             btnAutoDip.classList.toggle('active-btn', !!autoDip);
             btnAutoDip.innerText = autoDip ? 'AUTO DIP' : 'MANUAL DIP';
         }
-        if (tool === TOOLS.SUMI) {
-            syncSumiSettingsFromTip(tipSettings);
-            updateSumiSubtoolUI(getVal('sumiMode', 'draw'));
-            syncSumiTip(this.engine);
-        }
+        updateSumiSubtoolUI(getVal('sumiMode', 'draw'));
+    }
 
-        // Update active tip label badges in Advanced, Fluid, Air, and Sumi panels
-        let tipBadge = 'MAIN #1';
-        if (this.tipManager) {
-            if (this.tipManager.activeBankIndex >= 0) {
-                tipBadge = `MAIN #${this.tipManager.activeBankIndex + 1}`;
-            } else if (this.tipManager.activeGeneratedIndex >= 0) {
-                tipBadge = `GEN #${this.tipManager.activeGeneratedIndex + 1}`;
-            }
+    // Active tip label badge for visible panel
+    let tipBadge = 'MAIN #1';
+    if (this.tipManager) {
+        if (this.tipManager.activeBankIndex >= 0) {
+            tipBadge = `MAIN #${this.tipManager.activeBankIndex + 1}`;
+        } else if (this.tipManager.activeGeneratedIndex >= 0) {
+            tipBadge = `GEN #${this.tipManager.activeGeneratedIndex + 1}`;
         }
-        const advTipLbl = document.getElementById('adv-active-tip-label');
-        if (advTipLbl) advTipLbl.innerText = `TIP: ${tipBadge}`;
-        const fldTipLbl = document.getElementById('fluid-active-tip-label');
+    }
+    const advTipLbl = el('adv-active-tip-label');
+    if (advTipLbl) advTipLbl.innerText = `TIP: ${tipBadge}`;
+    if (isFluid) {
+        const fldTipLbl = el('fluid-active-tip-label');
         if (fldTipLbl) fldTipLbl.innerText = tipBadge;
-        const airTipLbl = document.getElementById('air-active-tip-label');
+    } else if (isAir) {
+        const airTipLbl = el('air-active-tip-label');
         if (airTipLbl) airTipLbl.innerText = tipBadge;
-        const sumiTipLbl = document.getElementById('sumi-active-tip-label');
+    } else if (isSumi) {
+        const sumiTipLbl = el('sumi-active-tip-label');
         if (sumiTipLbl) sumiTipLbl.innerText = tipBadge;
     }
   }
@@ -2611,7 +2594,7 @@ class App {
     return settings.tips[tipId];
   }
 
-  updateActiveSetting(key, val, mappedVal = null) {
+  updateActiveSetting(key, val, mappedVal = null, skipSave = false) {
     if (!this.activeTool) return;
     
     this.brushSettings[this.activeTool][key] = val;
@@ -2636,7 +2619,12 @@ class App {
     const engineVal = (mappedVal !== null) ? mappedVal : val;
     this.engine.brush[key] = engineVal;
     
-    this._saveBrushSettings();
+    this._dirtyTools.add(this.activeTool);
+    if (!skipSave) {
+        this._saveBrushSettings();
+    } else {
+        this._brushSettingsDirty = true;
+    }
   }
 
   setTool(tool, force = false) {
@@ -2689,11 +2677,13 @@ class App {
         }
     }
     
+    if (!this._toolBtnList) {
+        this._toolBtnList = Array.from(document.querySelectorAll('.tool-group .tool-btn'));
+    }
     if (!tool) {
-        // Deselecting all tools
-        document.querySelectorAll('.tool-group .tool-btn').forEach(btn => {
-            btn.classList.remove('active-tool');
-        });
+        for (let i = 0; i < this._toolBtnList.length; i++) {
+            this._toolBtnList[i].classList.remove('active-tool');
+        }
         return;
     }
 
@@ -2716,7 +2706,7 @@ class App {
     if (
         this.engine &&
         !this.engine._isLoadingProject &&
-        (tool === TOOLS.LIQUIFY || tool === TOOLS.SMUDGE || tool === TOOLS.FLUID || tool === TOOLS.AIR || tool === TOOLS.SUMI)
+        (tool === TOOLS.LIQUIFY || tool === TOOLS.SMUDGE || tool === TOOLS.FLUID || tool === TOOLS.AIR || tool === TOOLS.SUMI || tool === TOOLS.ERASER)
     ) {
         this._toolWarmupTimer = setTimeout(() => {
             this._toolWarmupTimer = null;
@@ -2756,24 +2746,20 @@ class App {
     }
     
     // Update UI Buttons
-    document.querySelectorAll('.tool-group .tool-btn').forEach(btn => {
-      btn.classList.remove('active-tool');
-    });
+    for (let i = 0; i < this._toolBtnList.length; i++) {
+        this._toolBtnList[i].classList.remove('active-tool');
+    }
 
     let activeBtnId = `btn-${tool === TOOLS.AIR ? 'air' : tool}`;
-    const btn = document.getElementById(activeBtnId);
+    const btn = this._el(activeBtnId);
     if (btn) {
       btn.classList.add('active-tool');
     }
 
     // Update Touch Eyedropper highlight
-    const touchPickerBtn = document.getElementById('btn-touch-picker');
+    const touchPickerBtn = this._el('btn-touch-picker');
     if (touchPickerBtn) {
-        if (tool === TOOLS.PICKER) {
-            touchPickerBtn.classList.add('active-tool');
-        } else {
-            touchPickerBtn.classList.remove('active-tool');
-        }
+        touchPickerBtn.classList.toggle('active-tool', tool === TOOLS.PICKER);
     }
 
     if (this.prevTool === TOOLS.FLUID) {
@@ -2818,6 +2804,11 @@ class App {
     if (this.activeTool === TOOLS.ERASER || this.activeTool === TOOLS.LASSO || this.activeTool === TOOLS.SMUDGE || this.activeTool === TOOLS.PICKER) {
         this.setTool(this.lastBrush || TOOLS.BRUSH);
     }
+  }
+
+  openLayerColorCorrection(layerIndex) {
+    if (!this.layerColorController || layerIndex <= 0) return;
+    this.layerColorController.open(layerIndex);
   }
 
   setLayer(index) {
@@ -2900,6 +2891,23 @@ class App {
     );
   }
 
+  _serializeToolForStorage(s) {
+    if (!s) return null;
+    const clean = { ...s };
+    if (clean.tip instanceof HTMLCanvasElement) clean.tip = null;
+    if (s.tips) {
+      clean.tips = {};
+      const tipKeys = Object.keys(s.tips);
+      for (let i = 0; i < tipKeys.length; i++) {
+        const tk = tipKeys[i];
+        const ts = { ...s.tips[tk] };
+        if (ts.tip instanceof HTMLCanvasElement) ts.tip = null;
+        clean.tips[tk] = ts;
+      }
+    }
+    return clean;
+  }
+
   _saveBrushSettings(immediate = false) {
     if (this._saveBrushSettingsTimeout) {
         clearTimeout(this._saveBrushSettingsTimeout);
@@ -2913,43 +2921,32 @@ class App {
         this._saveBrushSettingsTimeout = null;
         this._saveBrushSettingsIdleId = null;
         if (!immediate && this._shouldDeferSettingsSave()) {
-            this._saveBrushSettingsTimeout = setTimeout(scheduleIdleFlush, 600);
+            this._saveBrushSettingsTimeout = setTimeout(scheduleIdleFlush, 400);
             return;
         }
         this._brushSettingsDirty = false;
-        const toSave = {};
-        Object.keys(this.brushSettings).forEach(tool => {
-            const s = this.brushSettings[tool];
-            toSave[tool] = { ...s };
-            // Canvas elements cannot be cloned in IndexedDB/Storage
-            if (toSave[tool].tip instanceof HTMLCanvasElement) {
-                toSave[tool].tip = null; 
-            }
-            if (s.tips) {
-                toSave[tool].tips = {};
-                Object.keys(s.tips).forEach(tipId => {
-                    toSave[tool].tips[tipId] = { ...s.tips[tipId] };
-                    if (toSave[tool].tips[tipId].tip instanceof HTMLCanvasElement) {
-                        toSave[tool].tips[tipId].tip = null;
-                    }
-                });
-            }
-        });
-        const json = JSON.stringify(toSave);
-        if (json !== this._lastSavedBrushJson) {
-            this._lastSavedBrushJson = json;
-            try { localStorage.setItem('brushSettings', json); } catch (_) {}
-            this.storage.saveSetting('brushSettings', toSave);
+        const dirtyList = (this._dirtyTools && this._dirtyTools.size > 0)
+            ? Array.from(this._dirtyTools)
+            : (this.activeTool ? [this.activeTool] : []);
+        this._dirtyTools?.clear();
+
+        const pid = this.currentProjectId;
+        for (let i = 0; i < dirtyList.length; i++) {
+            const toolId = dirtyList[i];
+            const raw = this.brushSettings[toolId];
+            if (!raw) continue;
+            const clean = this._serializeToolForStorage(raw);
+            this.storage.saveToolSetting(toolId, clean, pid, immediate).catch(() => {});
         }
     };
     const scheduleIdleFlush = () => {
         this._saveBrushSettingsTimeout = null;
         if (this._shouldDeferSettingsSave()) {
-            this._saveBrushSettingsTimeout = setTimeout(scheduleIdleFlush, 600);
+            this._saveBrushSettingsTimeout = setTimeout(scheduleIdleFlush, 400);
             return;
         }
         if (typeof requestIdleCallback === 'function') {
-            this._saveBrushSettingsIdleId = requestIdleCallback(flush, { timeout: 1500 });
+            this._saveBrushSettingsIdleId = requestIdleCallback(flush, { timeout: 900 });
         } else {
             flush();
         }
@@ -2958,7 +2955,7 @@ class App {
         flush();
     } else {
         this._brushSettingsDirty = true;
-        this._saveBrushSettingsTimeout = setTimeout(scheduleIdleFlush, 950);
+        this._saveBrushSettingsTimeout = setTimeout(scheduleIdleFlush, 260);
     }
   }
 
@@ -2975,6 +2972,7 @@ class App {
         syncSumiSettingsFromTip(tipSettings);
         syncSumiTip(this.engine);
     }
+    this._dirtyTools.add(this.activeTool);
     this._saveBrushSettings(true);
     let tipBadge = 'MAIN #1';
     if (this.tipManager) {
@@ -3087,6 +3085,7 @@ class App {
         }
     }
 
+    this._dirtyTools.add(this.activeTool);
     if (this.tipManager) {
         this.tipManager.refreshTip(false);
     } else {

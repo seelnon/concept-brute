@@ -1905,3 +1905,19 @@ export let fluidEngineMode = 'oil';
 export function setFluidEngineMode(mode) {
   fluidEngineMode = mode;
 }
+
+export function flushFluidCaches(engine = null) {
+  cancelFluidAfterEffect(engine);
+  if (_tileReadCanvas) { _tileReadCanvas.width = 0; _tileReadCanvas.height = 0; _tileReadCanvas = null; _tileReadCtx = null; }
+  if (_litCanvas) { _litCanvas.width = 0; _litCanvas.height = 0; _litCanvas = null; _litCtx = null; _litImageData = null; }
+  _scratchW = 0;
+  _scratchH = 0;
+  _patchPixels = new Uint8ClampedArray(0);
+  _patchH = new Float32Array(0);
+  _patchDist = new Float32Array(0);
+  _patchCover = new Float32Array(0);
+  _patchAdvRGB = new Uint8ClampedArray(0);
+  _patchAdvH = new Float32Array(0);
+  _patchAdvDist = new Float32Array(0);
+  _patchAdvCover = new Float32Array(0);
+}

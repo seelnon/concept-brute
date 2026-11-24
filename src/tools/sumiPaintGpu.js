@@ -24,6 +24,8 @@ import { GLSL_SURFACE_BIOME_SAMPLER } from '../engine/canvasSurfaceGpu.js';
 const TILE_SIZE = 256;
 const WORK_RES = 768;
 const MAX_POOL_TILES = 96;
+const MAX_ACTIVE_WET = 48;
+const MAX_PASSIVE_TILES = 160;
 const MAX_INSTANCES = 4096;
 
 const QUAD_VS = `#version 300 es
@@ -1172,6 +1174,150 @@ void main() {
   }
 }`;
 
+// Lightweight 3x3 workbox frontier water probe (36 bytes readback) for organic progressive tile expansion
+const EDGE_PROBE_FRAG = `#version 300 es
+precision highp float;
+
+uniform sampler2D u_surf;
+uniform sampler2D u_pore;
+uniform vec4 u_innerUv; // (u0, v0, u1, v1)
+uniform vec2 u_bandUv;  // (bandU, bandV)
+
+out vec4 outProbe;
+
+void main() {
+  ivec2 c = ivec2(floor(gl_FragCoord.xy));
+  float u0 = u_innerUv.x;
+  float v0 = u_innerUv.y;
+  float u1 = u_innerUv.z;
+  float v1 = u_innerUv.w;
+  float bu = min(u_bandUv.x, max(0.001, (u1 - u0) * 0.45));
+  float bv = min(u_bandUv.y, max(0.001, (v1 - v0) * 0.45));
+
+  float su0;
+  float su1;
+  float sv0;
+  float sv1;
+
+  if (c.x == 0) {
+    su0 = u0;
+    su1 = u0 + bu;
+  } else if (c.x == 2) {
+    su0 = u1 - bu;
+    su1 = u1;
+  } else {
+    su0 = (c.y == 1) ? u0 : mix(u0, u1, 0.06);
+    su1 = (c.y == 1) ? u1 : mix(u0, u1, 0.94);
+  }
+
+  if (c.y == 0) {
+    sv0 = v0;
+    sv1 = v0 + bv;
+  } else if (c.y == 2) {
+    sv0 = v1 - bv;
+    sv1 = v1;
+  } else {
+    sv0 = (c.x == 1) ? v0 : mix(v0, v1, 0.06);
+    sv1 = (c.x == 1) ? v1 : mix(v0, v1, 0.94);
+  }
+
+  float maxW = 0.0;
+  float maxSurf = 0.0;
+  for (int iy = 0; iy < 4; iy++) {
+    float fy = (float(iy) + 0.5) * 0.25;
+    float v = mix(sv0, sv1, fy);
+    for (int ix = 0; ix < 4; ix++) {
+      float fx = (float(ix) + 0.5) * 0.25;
+      vec2 uv = vec2(mix(su0, su1, fx), v);
+      float s = texture(u_surf, uv).r;
+      float p = texture(u_pore, uv).r;
+      maxSurf = max(maxSurf, s);
+      maxW = max(maxW, s + p);
+    }
+  }
+  outProbe = vec4(clamp(maxW / 0.5, 0.0, 1.0), clamp(maxSurf / 0.5, 0.0, 1.0), 0.0, 1.0);
+}`;
+
+// Compact RGBA8 archival packing for fixed fiber soot (dryPig RGBA16F -> RGBA8)
+const PACK_DRY_FRAG = `#version 300 es
+precision highp float;
+uniform sampler2D u_dryPig;
+in vec2 v_uv;
+out vec4 outPacked;
+void main() {
+  vec4 d = texture(u_dryPig, v_uv);
+  if (d.a <= 0.0002) {
+    outPacked = vec4(0.0);
+    return;
+  }
+  float mNorm = clamp(sqrt(clamp(d.a, 0.0, 8.0) / 8.0), 0.0, 1.0);
+  outPacked = vec4(clamp(d.rgb, 0.0, 1.0), max(mNorm, 1.0 / 255.0));
+}`;
+
+const UNPACK_DRY_FRAG = `#version 300 es
+precision highp float;
+uniform sampler2D u_packedDry;
+in vec2 v_uv;
+out vec4 outDryPig;
+void main() {
+  vec4 p = texture(u_packedDry, v_uv);
+  if (p.a <= 0.001) {
+    outDryPig = vec4(0.0);
+    return;
+  }
+  float mass = (p.a * p.a) * 8.0;
+  outDryPig = vec4(clamp(p.rgb, 0.0, 1.0), mass);
+}`;
+
+// Reconcile passive fiber archive if user edited/erased the layer with another tool while away from Sumi-e
+const RECONCILE_PASSIVE_FRAG = `#version 300 es
+precision highp float;
+uniform sampler2D u_curLayer;
+uniform sampler2D u_savedComp;
+uniform sampler2D u_savedBase;
+uniform sampler2D u_savedDry;
+uniform int u_hasSavedBase;
+
+in vec2 v_uv;
+
+layout(location = 0) out vec4 outBaseBg;
+layout(location = 1) out vec4 outDryPig;
+
+void main() {
+  vec4 cur = texture(u_curLayer, v_uv);
+  vec4 sComp = texture(u_savedComp, v_uv);
+  vec4 sBase = u_hasSavedBase == 1 ? texture(u_savedBase, v_uv) : vec4(0.0);
+  vec4 sDry = texture(u_savedDry, v_uv);
+
+  if (cur.a <= 0.002) {
+    outBaseBg = vec4(0.0);
+    outDryPig = vec4(0.0);
+    return;
+  }
+  if (sDry.a <= 0.0002) {
+    outBaseBg = cur;
+    outDryPig = vec4(0.0);
+    return;
+  }
+
+  float diff = length(cur.rgb - sComp.rgb) + abs(cur.a - sComp.a);
+  if (diff < 0.035) {
+    outBaseBg = sBase;
+    outDryPig = sDry;
+    return;
+  }
+  if (cur.a < sComp.a - 0.01) {
+    float keep = clamp(cur.a / max(sComp.a, 0.002), 0.0, 1.0);
+    outBaseBg = sBase * keep;
+    outDryPig = vec4(sDry.rgb, sDry.a * keep);
+    return;
+  }
+
+  float bury = smoothstep(0.04, 0.35, diff);
+  outBaseBg = cur;
+  outDryPig = vec4(sDry.rgb, sDry.a * (1.0 - bury));
+}`;
+
 export class GpuSumiSolver {
   constructor(gpuRenderer) {
     this.gpuRenderer = gpuRenderer;
@@ -1184,10 +1330,15 @@ export class GpuSumiSolver {
     this.projectId = null;
     this.strokeId = 1;
     this._tileTick = 0;
+    this._passiveTick = 0;
+    this._probeTick = 0;
+    this._activeWetCount = 0;
     this._hasCpuDirty = false;
+    this._needsDryOnClose = false;
     this.lastParams = {};
 
     this.activeTiles = new Map();
+    this.passiveTiles = new Map();
     this.tilePool = [];
     this.touchedChunks = new Map();
 
@@ -1204,6 +1355,9 @@ export class GpuSumiSolver {
     this._focusY = 0;
 
     this._readBuf = new Uint8Array(TILE_SIZE * TILE_SIZE * 4);
+    this._packBuf = new Uint8Array(TILE_SIZE * TILE_SIZE * 4);
+    this._basePackBuf = new Uint8Array(TILE_SIZE * TILE_SIZE * 4);
+    this._probeBuf = new Uint8Array(36);
     this._commitCanvas = document.createElement('canvas');
     this._commitCanvas.width = TILE_SIZE;
     this._commitCanvas.height = TILE_SIZE;
@@ -1292,13 +1446,18 @@ export class GpuSumiSolver {
     this.progSurfSeep = this._compileProg(QUAD_VS, SURF_SEEP_FRAG, 'surfSeep');
     this.progPerc = this._compileProg(QUAD_VS, PERCOLATION_FRAG, 'perc');
     this.progComp = this._compileProg(QUAD_VS, SUMI_COMPOSITE_FRAG, 'comp');
+    this.progEdgeProbe = this._compileProg(QUAD_VS, EDGE_PROBE_FRAG, 'edgeProbe');
+    this.progPackDry = this._compileProg(QUAD_VS, PACK_DRY_FRAG, 'packDry');
+    this.progUnpackDry = this._compileProg(QUAD_VS, UNPACK_DRY_FRAG, 'unpackDry');
+    this.progReconcile = this._compileProg(QUAD_VS, RECONCILE_PASSIVE_FRAG, 'reconcile');
 
     if (
       !this.progRectMap || !this.progUnpremult || !this.progSubBake || !this.progBristle ||
       !this.progRewet || !this.progBrushApply || !this.progVelAdvect ||
       !this.progDiv || !this.progPress || !this.progGradSub ||
       !this.progSurfStep || !this.progBaseStep || !this.progSurfSeep ||
-      !this.progPerc || !this.progComp
+      !this.progPerc || !this.progComp || !this.progEdgeProbe ||
+      !this.progPackDry || !this.progUnpackDry || !this.progReconcile
     ) {
       return;
     }
@@ -1319,6 +1478,11 @@ export class GpuSumiSolver {
     this.texStamp = this._makeTexFBO(WORK_RES, WORK_RES, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, floatFilter);
     this.texOutput = this._makeTexFBO(WORK_RES, WORK_RES, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.LINEAR);
     this.texTileUnpremult = this._makeTexFBO(TILE_SIZE, TILE_SIZE, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.NEAREST);
+    this.texUploadDry = this._makeTexFBO(TILE_SIZE, TILE_SIZE, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.NEAREST);
+    this.texUploadBase = this._makeTexFBO(TILE_SIZE, TILE_SIZE, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.NEAREST);
+    this.texTileBaseTmp = this._makeTexFBO(TILE_SIZE, TILE_SIZE, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.NEAREST);
+    this.texTileDryTmp = this._makeTexFBO(TILE_SIZE, TILE_SIZE, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.NEAREST);
+    this.texProbe = this._makeTexFBO(3, 3, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.NEAREST);
 
     this.dummyTex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, this.dummyTex);
@@ -1418,8 +1582,182 @@ export class GpuSumiSolver {
       'u_surf', 'u_surfPig', 'u_pore', 'u_porePig', 'u_dryPig', 'u_baseBg', 'u_sub',
       'u_inkWarmth', 'u_alphaLock'
     ]);
+    this.locEdgeProbe = u(this.progEdgeProbe, ['u_surf', 'u_pore', 'u_innerUv', 'u_bandUv']);
+    this.locPackDry = u(this.progPackDry, ['u_dryPig']);
+    this.locUnpackDry = u(this.progUnpackDry, ['u_packedDry']);
+    this.locReconcile = u(this.progReconcile, [
+      'u_curLayer', 'u_savedComp', 'u_savedBase', 'u_savedDry', 'u_hasSavedBase'
+    ]);
 
+    this._pipelinesWarmed = false;
     this.ready = true;
+  }
+
+  prewarmPipelines(engine = null) {
+    const gl = this.gl;
+    if (!this.ready || !gl || gl.isContextLost() || !this.gpuRenderer?.vao) return;
+    if (this._pipelinesWarmed) return;
+
+    const prevFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+    const prevBlend = gl.isEnabled(gl.BLEND);
+    const prevScissor = gl.isEnabled(gl.SCISSOR_TEST);
+
+    gl.disable(gl.BLEND);
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(0, 0, 4, 4);
+    gl.viewport(0, 0, WORK_RES, WORK_RES);
+    gl.bindVertexArray(this.gpuRenderer.vao);
+
+    // Warm full-screen quad shaders with tiny 4x4 scissored draws
+    const warmQuad = (prog, targetFbo, setupFn) => {
+      if (!prog || !targetFbo) return;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, targetFbo);
+      gl.useProgram(prog);
+      if (setupFn) setupFn();
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    };
+
+    const dummy = this.dummyTex;
+    const bindTex = (unit, loc, tex) => {
+      if (loc === null || loc === undefined) return;
+      gl.activeTexture(gl.TEXTURE0 + unit);
+      gl.bindTexture(gl.TEXTURE_2D, tex || dummy);
+      gl.uniform1i(loc, unit);
+    };
+
+    warmQuad(this.progRectMap, this.texOutput.fbo, () => {
+      gl.uniform4f(this.locRectMap.u_srcRect, 0, 0, 64, 64);
+      gl.uniform4f(this.locRectMap.u_dstRect, 0, 0, 64, 64);
+      gl.uniform4f(this.locRectMap.u_uvSubRect, 0, 0, 1, 1);
+      bindTex(0, this.locRectMap.u_tex, dummy);
+    });
+    warmQuad(this.progUnpremult, this.texTileUnpremult.fbo, () => {
+      bindTex(0, this.locUnpremult.u_tex, dummy);
+    });
+    warmQuad(this.progSubBake, this.texSub.fbo, () => {
+      bindTex(0, this.locSubBake.u_surfaceMap, dummy);
+      bindTex(1, this.locSubBake.u_poreMap, dummy);
+      gl.uniform1i(this.locSubBake.u_hasSurface, 0);
+      gl.uniform1i(this.locSubBake.u_useHeightmap, 0);
+      gl.uniform1i(this.locSubBake.u_heightSource, 0);
+      gl.uniform1f(this.locSubBake.u_surfaceInvScale, 1.0 / 320.0);
+      gl.uniform1f(this.locSubBake.u_surfaceBiomeMix, 0.88);
+      gl.uniform1f(this.locSubBake.u_surfaceAllowRotate, 1.0);
+      gl.uniform1f(this.locSubBake.u_surfaceScaleSpread, 1.0);
+      gl.uniform1f(this.locSubBake.u_sizing, 0.5);
+      gl.uniform1f(this.locSubBake.u_coarseness, 0.25);
+      gl.uniform2f(this.locSubBake.u_workOrigin, 0, 0);
+    });
+    warmQuad(this.progRewet, this.ppSurfPig.b.fbo, () => {
+      bindTex(0, this.locRewet.u_stamp, this.texStamp.tex);
+      bindTex(1, this.locRewet.u_surfPig, this.ppSurfPig.a.tex);
+      bindTex(2, this.locRewet.u_dryPig, this.ppDryPig.a.tex);
+      gl.uniform1f(this.locRewet.u_waterCharge, 0.5);
+      gl.uniform1f(this.locRewet.u_sizing, 0.5);
+      gl.uniform1f(this.locRewet.u_inkAffection, 0.5);
+    });
+    warmQuad(this.progBrushApply, this.ppSurf.b.fbo, () => {
+      bindTex(0, this.locApply.u_stamp, this.texStamp.tex);
+      bindTex(1, this.locApply.u_surf, this.ppSurf.a.tex);
+      bindTex(2, this.locApply.u_surfPig, this.ppSurfPig.a.tex);
+      bindTex(3, this.locApply.u_vel, this.ppVel.a.tex);
+      bindTex(4, this.locApply.u_strokeCov, this.ppStrokeCov.a.tex);
+      bindTex(5, this.locApply.u_sub, this.texSub.tex);
+    });
+    warmQuad(this.progVelAdvect, this.ppVel.b.fbo, () => {
+      bindTex(0, this.locVelAdv.u_vel, this.ppVel.a.tex);
+      bindTex(1, this.locVelAdv.u_surf, this.ppSurf.a.tex);
+      bindTex(2, this.locVelAdv.u_sub, this.texSub.tex);
+      bindTex(3, this.locVelAdv.u_surfaceMap, dummy);
+      bindTex(4, this.locVelAdv.u_baseBg, this.ppBaseBg.a.tex);
+    });
+    warmQuad(this.progDiv, this.texDiv.fbo, () => {
+      bindTex(0, this.locDiv.u_vel, this.ppVel.a.tex);
+    });
+    warmQuad(this.progPress, this.ppPress.b.fbo, () => {
+      bindTex(0, this.locPress.u_press, this.ppPress.a.tex);
+      bindTex(1, this.locPress.u_div, this.texDiv.tex);
+    });
+    warmQuad(this.progGradSub, this.ppVel.b.fbo, () => {
+      bindTex(0, this.locGradSub.u_press, this.ppPress.a.tex);
+      bindTex(1, this.locGradSub.u_vel, this.ppVel.a.tex);
+    });
+    warmQuad(this.progSurfStep, this.ppSurf.b.fbo, () => {
+      bindTex(0, this.locSurfStep.u_surf, this.ppSurf.a.tex);
+      bindTex(1, this.locSurfStep.u_surfPig, this.ppSurfPig.a.tex);
+      bindTex(2, this.locSurfStep.u_vel, this.ppVel.a.tex);
+    });
+    warmQuad(this.progBaseStep, this.ppBaseBg.b.fbo, () => {
+      bindTex(0, this.locBaseStep.u_baseBg, this.ppBaseBg.a.tex);
+      bindTex(1, this.locBaseStep.u_surf, this.ppSurf.a.tex);
+      bindTex(2, this.locBaseStep.u_vel, this.ppVel.a.tex);
+      bindTex(3, this.locBaseStep.u_pore, this.ppPore.a.tex);
+      bindTex(4, this.locBaseStep.u_sub, this.texSub.tex);
+    });
+    warmQuad(this.progSurfSeep, this.ppSurf.b.fbo, () => {
+      bindTex(0, this.locSurfSeep.u_surf, this.ppSurf.a.tex);
+      bindTex(1, this.locSurfSeep.u_surfPig, this.ppSurfPig.a.tex);
+      bindTex(2, this.locSurfSeep.u_pore, this.ppPore.a.tex);
+      bindTex(3, this.locSurfSeep.u_porePig, this.ppPorePig.a.tex);
+      bindTex(4, this.locSurfSeep.u_sub, this.texSub.tex);
+    });
+    warmQuad(this.progPerc, this.ppPore.b.fbo, () => {
+      bindTex(0, this.locPerc.u_surf, this.ppSurf.a.tex);
+      bindTex(1, this.locPerc.u_surfPig, this.ppSurfPig.a.tex);
+      bindTex(2, this.locPerc.u_pore, this.ppPore.a.tex);
+      bindTex(3, this.locPerc.u_porePig, this.ppPorePig.a.tex);
+      bindTex(4, this.locPerc.u_dryPig, this.ppDryPig.a.tex);
+      bindTex(5, this.locPerc.u_sub, this.texSub.tex);
+    });
+    warmQuad(this.progComp, this.texOutput.fbo, () => {
+      bindTex(0, this.locComp.u_surf, this.ppSurf.a.tex);
+      bindTex(1, this.locComp.u_surfPig, this.ppSurfPig.a.tex);
+      bindTex(2, this.locComp.u_pore, this.ppPore.a.tex);
+      bindTex(3, this.locComp.u_porePig, this.ppPorePig.a.tex);
+      bindTex(4, this.locComp.u_dryPig, this.ppDryPig.a.tex);
+      bindTex(5, this.locComp.u_baseBg, this.ppBaseBg.a.tex);
+      bindTex(6, this.locComp.u_sub, this.texSub.tex);
+    });
+    warmQuad(this.progEdgeProbe, this.texProbe.fbo, () => {
+      bindTex(0, this.locEdgeProbe.u_surf, this.ppSurf.a.tex);
+      bindTex(1, this.locEdgeProbe.u_pore, this.ppPore.a.tex);
+      gl.uniform4f(this.locEdgeProbe.u_innerUv, 0, 0, 0.25, 0.25);
+      gl.uniform2f(this.locEdgeProbe.u_bandUv, 28 / WORK_RES, 28 / WORK_RES);
+    });
+    warmQuad(this.progPackDry, this.texTileUnpremult.fbo, () => {
+      bindTex(0, this.locPackDry.u_dryPig, this.texTileDryTmp.tex);
+    });
+    warmQuad(this.progUnpackDry, this.texTileDryTmp.fbo, () => {
+      bindTex(0, this.locUnpackDry.u_packedDry, this.texUploadDry.tex);
+    });
+    warmQuad(this.progReconcile, this.texTileBaseTmp.fbo, () => {
+      bindTex(0, this.locReconcile.u_curLayer, this.texUploadBase.tex);
+      bindTex(1, this.locReconcile.u_savedComp, this.texTileUnpremult.tex);
+      bindTex(2, this.locReconcile.u_savedBase, this.texUploadBase.tex);
+      bindTex(3, this.locReconcile.u_savedDry, this.texTileDryTmp.tex);
+      gl.uniform1i(this.locReconcile.u_hasSavedBase, 0);
+    });
+
+    // Warm instanced bristle program
+    if (this.progBristle && this.bristleVao) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.texStamp.fbo);
+      gl.useProgram(this.progBristle);
+      gl.uniform2f(this.locBristle.u_invWorkRes, 1.0 / WORK_RES, 1.0 / WORK_RES);
+      gl.bindVertexArray(this.bristleVao);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, 1);
+      gl.bindVertexArray(this.gpuRenderer.vao);
+    }
+
+    // Ensure at least 2 warm pooled tiles exist
+    while (this.tilePool.length < 2 && this.activeTiles.size === 0) {
+      this.tilePool.push(this._allocTileGpu());
+    }
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, prevFbo);
+    if (!prevScissor) gl.disable(gl.SCISSOR_TEST);
+    if (prevBlend) gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    this._pipelinesWarmed = true;
   }
 
   _allocTileGpu() {
@@ -1439,7 +1777,10 @@ export class GpuSumiSolver {
       tx: 0, ty: 0, wx: 0, wy: 0,
       subKey: '',
       cpuDirty: false, dirty: false,
+      loadedFromPassive: false,
       minX: TILE_SIZE, minY: TILE_SIZE, maxX: 0, maxY: 0,
+      wMinX: TILE_SIZE, wMinY: TILE_SIZE, wMaxX: 0, wMaxY: 0,
+      genDepth: 0,
       wetTicks: 0,
       lastUsed: 0
     };
@@ -1460,11 +1801,17 @@ export class GpuSumiSolver {
       if (this.tilePool.length < MAX_POOL_TILES) {
         tile.cpuDirty = false;
         tile.dirty = false;
+        tile.loadedFromPassive = false;
         tile.wetTicks = 0;
+        tile.genDepth = 0;
         tile.minX = TILE_SIZE;
         tile.minY = TILE_SIZE;
         tile.maxX = 0;
         tile.maxY = 0;
+        tile.wMinX = TILE_SIZE;
+        tile.wMinY = TILE_SIZE;
+        tile.wMaxX = 0;
+        tile.wMaxY = 0;
         this.tilePool.push(tile);
       } else {
         this._destroyTileGpu(tile);
@@ -1472,6 +1819,270 @@ export class GpuSumiSolver {
     });
     this.activeTiles.clear();
     this._hasCpuDirty = false;
+    this._activeWetCount = 0;
+  }
+
+  _getPassiveKey(projId, layer, tx, ty) {
+    return `${projId || 'default'}|${layer}|${tx},${ty}`;
+  }
+
+  _trimPassiveArchive() {
+    while (this.passiveTiles.size > MAX_PASSIVE_TILES) {
+      let oldestKey = null;
+      let oldestTick = Infinity;
+      this.passiveTiles.forEach((entry, k) => {
+        if (entry.lastUsed < oldestTick) {
+          oldestTick = entry.lastUsed;
+          oldestKey = k;
+        }
+      });
+      if (!oldestKey) break;
+      this.passiveTiles.delete(oldestKey);
+    }
+  }
+
+  clearPassiveArchive(projId = null, layer = null) {
+    if (this.passiveTiles.size === 0) return;
+    if (projId === null && layer === null) {
+      this.passiveTiles.clear();
+      return;
+    }
+    for (const [k, entry] of this.passiveTiles.entries()) {
+      if (projId !== null && entry.projId !== projId) continue;
+      if (layer !== null && entry.layer !== layer) continue;
+      this.passiveTiles.delete(k);
+    }
+  }
+
+  _archiveSingleTile(engine, tile, params = {}) {
+    if (!tile || !engine || (!tile.dirty && !tile.loadedFromPassive)) return;
+    const gl = this.gl;
+    if (!gl || gl.isContextLost()) return;
+    const layer = this.layer >= 0 ? this.layer : engine.activeLayer;
+    const projId = this.projectId || engine.currentProjectId || 'default';
+    const key = this._getPassiveKey(projId, layer, tile.tx, tile.ty);
+
+    gl.disable(gl.BLEND);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.bindVertexArray(this.gpuRenderer.vao);
+    gl.viewport(0, 0, TILE_SIZE, TILE_SIZE);
+
+    // Pack fixed dryPig (RGBA16F) into compact RGBA8 for lightweight passive storage
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.texTileUnpremult.fbo);
+    gl.useProgram(this.progPackDry);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tile.dryPig.tex);
+    gl.uniform1i(this.locPackDry.u_dryPig, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    gl.readPixels(0, 0, TILE_SIZE, TILE_SIZE, gl.RGBA, gl.UNSIGNED_BYTE, this._packBuf);
+    let hasDry = false;
+    for (let i = 3; i < this._packBuf.length; i += 4) {
+      if (this._packBuf[i] > 0) {
+        hasDry = true;
+        break;
+      }
+    }
+    if (!hasDry) {
+      this.passiveTiles.delete(key);
+      return;
+    }
+
+    const dryPigBytes = new Uint8Array(this._packBuf);
+
+    // Also snapshot underlying non-Sumi underpaint (`baseBg`) only if non-empty
+    gl.bindFramebuffer(gl.FRAMEBUFFER, tile.baseBg.fbo);
+    gl.readPixels(0, 0, TILE_SIZE, TILE_SIZE, gl.RGBA, gl.UNSIGNED_BYTE, this._basePackBuf);
+    let hasBase = false;
+    for (let i = 3; i < this._basePackBuf.length; i += 4) {
+      if (this._basePackBuf[i] > 2) {
+        hasBase = true;
+        break;
+      }
+    }
+    const baseBgBytes = hasBase ? new Uint8Array(this._basePackBuf) : null;
+
+    const chunkRevs = [];
+    const sCX = engine.isStatic ? 0 : Math.floor(tile.wx / engine.chunkSize);
+    const eCX = engine.isStatic ? 0 : Math.floor((tile.wx + TILE_SIZE - 1) / engine.chunkSize);
+    const sCY = engine.isStatic ? 0 : Math.floor(tile.wy / engine.chunkSize);
+    const eCY = engine.isStatic ? 0 : Math.floor((tile.wy + TILE_SIZE - 1) / engine.chunkSize);
+    for (let cx = sCX; cx <= eCX; cx++) {
+      for (let cy = sCY; cy <= eCY; cy++) {
+        const id = engine.isStatic ? '0,0' : `${cx},${cy}`;
+        const ch = engine.isStatic ? engine._getChunk(0, 0) : engine.chunks.get(id);
+        chunkRevs.push([id, ch && ch.nonSumiRev ? (ch.nonSumiRev[layer] || 0) : 0]);
+      }
+    }
+
+    this.passiveTiles.set(key, {
+      key,
+      projId,
+      layer,
+      tx: tile.tx,
+      ty: tile.ty,
+      dryPigBytes,
+      baseBgBytes,
+      warmth: params?.warmth ?? this.lastParams?.warmth ?? 12,
+      chunkRevs,
+      lastUsed: ++this._passiveTick
+    });
+    this._trimPassiveArchive();
+  }
+
+  _archiveActiveTiles(engine, params = {}) {
+    if (!engine || this.activeTiles.size === 0) return;
+    this.activeTiles.forEach((tile) => {
+      if (tile.dirty || tile.loadedFromPassive) {
+        this._archiveSingleTile(engine, tile, params);
+      }
+    });
+  }
+
+  _revsMatchPassive(engine, layer, passive) {
+    if (!engine || !passive || !passive.chunkRevs) return false;
+    for (let i = 0; i < passive.chunkRevs.length; i++) {
+      const [id, savedRev] = passive.chunkRevs[i];
+      const ch = engine.isStatic ? engine._getChunk(0, 0) : engine.chunks.get(id);
+      const curRev = ch && ch.nonSumiRev ? (ch.nonSumiRev[layer] || 0) : 0;
+      if (curRev !== savedRev) return false;
+    }
+    return true;
+  }
+
+  _hydrateTileFromPassive(engine, tile, passive, layer, hasAnyChunkPixels) {
+    const gl = this.gl;
+    if (!hasAnyChunkPixels) {
+      this.passiveTiles.delete(passive.key);
+      return false;
+    }
+
+    const revsMatch = this._revsMatchPassive(engine, layer, passive);
+    passive.lastUsed = ++this._passiveTick;
+
+    gl.disable(gl.BLEND);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.bindVertexArray(this.gpuRenderer.vao);
+    gl.viewport(0, 0, TILE_SIZE, TILE_SIZE);
+
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+
+    gl.bindTexture(gl.TEXTURE_2D, this.texUploadDry.tex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TILE_SIZE, TILE_SIZE, gl.RGBA, gl.UNSIGNED_BYTE, passive.dryPigBytes);
+
+    if (revsMatch) {
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, tile.dryPig.fbo);
+      gl.useProgram(this.progUnpackDry);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.texUploadDry.tex);
+      gl.uniform1i(this.locUnpackDry.u_packedDry, 0);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+      if (passive.baseBgBytes) {
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+        gl.bindTexture(gl.TEXTURE_2D, tile.baseBg.tex);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TILE_SIZE, TILE_SIZE, gl.RGBA, gl.UNSIGNED_BYTE, passive.baseBgBytes);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+      } else {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, tile.baseBg.fbo);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+      }
+      tile.loadedFromPassive = true;
+      return true;
+    }
+
+    // Reconcile passive fiber archive against external non-Sumi layer edits (Eraser, Brush, Undo, etc.)
+    if (passive.baseBgBytes) {
+      gl.bindTexture(gl.TEXTURE_2D, this.texUploadBase.tex);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TILE_SIZE, TILE_SIZE, gl.RGBA, gl.UNSIGNED_BYTE, passive.baseBgBytes);
+    }
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+
+    // 1. Copy current chunk baseBg -> texTileBaseTmp
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.texTileBaseTmp.fbo);
+    gl.useProgram(this.progRectMap);
+    gl.uniform4f(this.locRectMap.u_srcRect, 0, 0, TILE_SIZE, TILE_SIZE);
+    gl.uniform4f(this.locRectMap.u_dstRect, 0, 0, TILE_SIZE, TILE_SIZE);
+    gl.uniform4f(this.locRectMap.u_uvSubRect, 0, 0, 1, 1);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tile.baseBg.tex);
+    gl.uniform1i(this.locRectMap.u_tex, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 2. Unpack passive dryPig -> texTileDryTmp
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.texTileDryTmp.fbo);
+    gl.useProgram(this.progUnpackDry);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.texUploadDry.tex);
+    gl.uniform1i(this.locUnpackDry.u_packedDry, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 3. Reconstruct saved composite (`savedComp`) -> texTileUnpremult
+    const activeParams = this.lastParams || {};
+    this._bakeTileSubIfNeeded(engine, tile, activeParams);
+    const layerSet = engine.layerSettings && engine.layerSettings[layer];
+    const alphaLock = (layerSet && layerSet.alphaLock) ? 1 : 0;
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.texTileUnpremult.fbo);
+    gl.useProgram(this.progComp);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.dummyTex);
+    gl.uniform1i(this.locComp.u_surf, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.dummyTex);
+    gl.uniform1i(this.locComp.u_surfPig, 1);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.dummyTex);
+    gl.uniform1i(this.locComp.u_pore, 2);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.dummyTex);
+    gl.uniform1i(this.locComp.u_porePig, 3);
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, this.texTileDryTmp.tex);
+    gl.uniform1i(this.locComp.u_dryPig, 4);
+    gl.activeTexture(gl.TEXTURE5);
+    gl.bindTexture(gl.TEXTURE_2D, passive.baseBgBytes ? this.texUploadBase.tex : this.dummyTex);
+    gl.uniform1i(this.locComp.u_baseBg, 5);
+    gl.activeTexture(gl.TEXTURE6);
+    gl.bindTexture(gl.TEXTURE_2D, tile.sub.tex);
+    gl.uniform1i(this.locComp.u_sub, 6);
+    gl.uniform1f(this.locComp.u_inkWarmth, (passive.warmth ?? 12) / 100);
+    gl.uniform1i(this.locComp.u_alphaLock, alphaLock);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    // 4. Reconcile curLayer vs savedComp into tile.baseBg + tile.dryPig (2 MRT)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.mrtFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tile.baseBg.tex, 0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, tile.dryPig.tex, 0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT2, gl.TEXTURE_2D, null, 0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT3, gl.TEXTURE_2D, null, 0);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+
+    gl.useProgram(this.progReconcile);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.texTileBaseTmp.tex);
+    gl.uniform1i(this.locReconcile.u_curLayer, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.texTileUnpremult.tex);
+    gl.uniform1i(this.locReconcile.u_savedComp, 1);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, passive.baseBgBytes ? this.texUploadBase.tex : this.dummyTex);
+    gl.uniform1i(this.locReconcile.u_savedBase, 2);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.texTileDryTmp.tex);
+    gl.uniform1i(this.locReconcile.u_savedDry, 3);
+    gl.uniform1i(this.locReconcile.u_hasSavedBase, passive.baseBgBytes ? 1 : 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, null, 0);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    tile.loadedFromPassive = true;
+    return true;
   }
 
   _evictLruTile(engine, excludeBox = null) {
@@ -1502,14 +2113,23 @@ export class GpuSumiSolver {
     if (oldest.cpuDirty && engine) {
       this._syncSingleTileToCanvas2D(engine, oldest, this.lastParams || {});
     }
+    if (engine && (oldest.dirty || oldest.loadedFromPassive)) {
+      this._archiveSingleTile(engine, oldest, this.lastParams || {});
+    }
     this.activeTiles.delete(`${oldest.tx},${oldest.ty}`);
     oldest.cpuDirty = false;
     oldest.dirty = false;
+    oldest.loadedFromPassive = false;
     oldest.wetTicks = 0;
+    oldest.genDepth = 0;
     oldest.minX = TILE_SIZE;
     oldest.minY = TILE_SIZE;
     oldest.maxX = 0;
     oldest.maxY = 0;
+    oldest.wMinX = TILE_SIZE;
+    oldest.wMinY = TILE_SIZE;
+    oldest.wMaxX = 0;
+    oldest.wMaxY = 0;
     return oldest;
   }
 
@@ -1532,6 +2152,9 @@ export class GpuSumiSolver {
 
     const gl = this.gl;
     const layer = this.layer >= 0 ? this.layer : engine.activeLayer;
+    const projId = this.projectId || engine.currentProjectId || 'default';
+    const passiveKey = this._getPassiveKey(projId, layer, tx, ty);
+    const passive = this.passiveTiles.get(passiveKey) || null;
 
     tile.tx = tx;
     tile.ty = ty;
@@ -1540,11 +2163,17 @@ export class GpuSumiSolver {
     tile.subKey = '';
     tile.cpuDirty = false;
     tile.dirty = false;
-    tile.wetTicks = 0;
+    tile.loadedFromPassive = false;
     tile.minX = TILE_SIZE;
     tile.minY = TILE_SIZE;
     tile.maxX = 0;
     tile.maxY = 0;
+    tile.wMinX = TILE_SIZE;
+    tile.wMinY = TILE_SIZE;
+    tile.wMaxX = 0;
+    tile.wMaxY = 0;
+    tile.genDepth = 0;
+    tile.wetTicks = 0;
     tile.lastUsed = ++this._tileTick;
 
     gl.disable(gl.BLEND);
@@ -1558,46 +2187,69 @@ export class GpuSumiSolver {
       gl.clear(gl.COLOR_BUFFER_BIT);
     }
 
-    // Seed tile.baseBg from current parent layer chunks
-    gl.bindFramebuffer(gl.FRAMEBUFFER, tile.baseBg.fbo);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-
-    gl.useProgram(this.progRectMap);
-    gl.uniform4f(this.locRectMap.u_dstRect, tile.wx, tile.wy, TILE_SIZE, TILE_SIZE);
-    gl.uniform4f(this.locRectMap.u_uvSubRect, 0, 0, 1, 1);
-    gl.uniform1i(this.locRectMap.u_tex, 0);
-
+    let hasAnyChunkPixels = false;
     const sCX = engine.isStatic ? 0 : Math.floor(tile.wx / engine.chunkSize);
     const eCX = engine.isStatic ? 0 : Math.floor((tile.wx + TILE_SIZE - 1) / engine.chunkSize);
     const sCY = engine.isStatic ? 0 : Math.floor(tile.wy / engine.chunkSize);
     const eCY = engine.isStatic ? 0 : Math.floor((tile.wy + TILE_SIZE - 1) / engine.chunkSize);
 
-    for (let cx = sCX; cx <= eCX; cx++) {
-      for (let cy = sCY; cy <= eCY; cy++) {
-        const chunk = engine.isStatic ? engine._getChunk(0, 0) : engine.chunks.get(`${cx},${cy}`);
-        if (!chunk) continue;
+    const exactPassiveHit = !!(passive && this._revsMatchPassive(engine, layer, passive));
 
-        const isEmpty = chunk.isEmpty && chunk.isEmpty[layer] && (!chunk.gpuDirty || !chunk.gpuDirty[layer]);
-        if (isEmpty && (!chunk.gpuTextures || !chunk.gpuTextures[layer])) continue;
+    // Seed tile.baseBg from current parent layer chunks (skipped when exact passive snapshot matches)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, tile.baseBg.fbo);
+    gl.clear(gl.COLOR_BUFFER_BIT);
 
-        if (!chunk.gpuTextures) chunk.gpuTextures = new Array(engine.layerSettings.length).fill(null);
-        if (!chunk.gpuDirty) chunk.gpuDirty = new Array(engine.layerSettings.length).fill(true);
-        if (chunk.gpuDirty[layer] || !chunk.gpuTextures[layer]) {
-          chunk.gpuTextures[layer] = this.gpuRenderer._createOrUpdateTexture(
-            chunk.gpuTextures[layer],
-            chunk.canvases[layer],
-            true
-          );
-          chunk.gpuDirty[layer] = false;
+    if (!exactPassiveHit) {
+      gl.useProgram(this.progRectMap);
+      gl.uniform4f(this.locRectMap.u_dstRect, tile.wx, tile.wy, TILE_SIZE, TILE_SIZE);
+      gl.uniform4f(this.locRectMap.u_uvSubRect, 0, 0, 1, 1);
+      gl.uniform1i(this.locRectMap.u_tex, 0);
+
+      for (let cx = sCX; cx <= eCX; cx++) {
+        for (let cy = sCY; cy <= eCY; cy++) {
+          const chunk = engine.isStatic ? engine._getChunk(0, 0) : engine.chunks.get(`${cx},${cy}`);
+          if (!chunk) continue;
+
+          const isEmpty = chunk.isEmpty && chunk.isEmpty[layer] && (!chunk.gpuDirty || !chunk.gpuDirty[layer]);
+          if (isEmpty && (!chunk.gpuTextures || !chunk.gpuTextures[layer])) continue;
+
+          hasAnyChunkPixels = true;
+          if (!chunk.gpuTextures) chunk.gpuTextures = new Array(engine.layerSettings.length).fill(null);
+          if (!chunk.gpuDirty) chunk.gpuDirty = new Array(engine.layerSettings.length).fill(true);
+          if (chunk.gpuDirty[layer] || !chunk.gpuTextures[layer]) {
+            chunk.gpuTextures[layer] = this.gpuRenderer._createOrUpdateTexture(
+              chunk.gpuTextures[layer],
+              chunk.canvases[layer],
+              true
+            );
+            chunk.gpuDirty[layer] = false;
+          }
+
+          const wx = engine.isStatic ? -engine.staticWidth * 0.5 : cx * engine.chunkSize;
+          const wy = engine.isStatic ? -engine.staticHeight * 0.5 : cy * engine.chunkSize;
+          gl.uniform4f(this.locRectMap.u_srcRect, wx, wy, chunk.width, chunk.height);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, chunk.gpuTextures[layer]);
+          gl.drawArrays(gl.TRIANGLES, 0, 6);
         }
-
-        const wx = engine.isStatic ? -engine.staticWidth * 0.5 : cx * engine.chunkSize;
-        const wy = engine.isStatic ? -engine.staticHeight * 0.5 : cy * engine.chunkSize;
-        gl.uniform4f(this.locRectMap.u_srcRect, wx, wy, chunk.width, chunk.height);
-        gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, chunk.gpuTextures[layer]);
-        gl.drawArrays(gl.TRIANGLES, 0, 6);
       }
+    } else {
+      for (let cx = sCX; cx <= eCX; cx++) {
+        for (let cy = sCY; cy <= eCY; cy++) {
+          const chunk = engine.isStatic ? engine._getChunk(0, 0) : engine.chunks.get(`${cx},${cy}`);
+          if (!chunk) continue;
+          const isEmpty = chunk.isEmpty && chunk.isEmpty[layer] && (!chunk.gpuDirty || !chunk.gpuDirty[layer]);
+          if (!isEmpty || (chunk.gpuTextures && chunk.gpuTextures[layer])) {
+            hasAnyChunkPixels = true;
+            break;
+          }
+        }
+        if (hasAnyChunkPixels) break;
+      }
+    }
+
+    if (passive) {
+      this._hydrateTileFromPassive(engine, tile, passive, layer, hasAnyChunkPixels);
     }
 
     this.activeTiles.set(key, tile);
@@ -1841,7 +2493,7 @@ export class GpuSumiSolver {
         const id = `${cx},${cy}`;
         if (engine.isDrawing && !engine.currentStrokeDirtyChunks.has(id)) {
           backupChunkLayer(engine, chunk, id, { layer });
-          engine._markDirty(id, layer, false);
+          engine._markDirty(id, layer, false, true);
           if (chunk.gpuDirty) chunk.gpuDirty[layer] = false;
         }
         if (!this.touchedChunks.has(id)) {
@@ -1929,7 +2581,9 @@ export class GpuSumiSolver {
     const maxU = Math.max(minU, (boxW - 0.5) * texel);
     const maxV = Math.max(minV, (boxH - 0.5) * texel);
 
-    const evapRate = (params?.evaporation ?? 28) / 100;
+    const baseEvap = (params?.evaporation ?? 28) / 100;
+    const spreadPressure = this._activeWetCount > 28 ? Math.min(1.0, (this._activeWetCount - 28) / 20) : 0.0;
+    const evapRate = Math.min(1.8, baseEvap + spreadPressure * 0.16);
     const backrunRim = (params?.backrun ?? 68) / 100;
     const glueVisc = (params?.glue ?? 42) / 100;
     const maxWaterCap = Math.max(0.15, Math.min(2.90, ((params?.maxWater ?? 100) / 100) * 1.45));
@@ -2206,8 +2860,10 @@ export class GpuSumiSolver {
     const layer = engine.activeLayer;
     const projId = engine.currentProjectId || 'default';
 
-    if (this.active && (this.layer !== layer || this.projectId !== projId)) {
+    let isSameSession = this.active && this.layer === layer && this.projectId === projId;
+    if (this.active && !isSameSession) {
       this.commitToChunks(engine, this.lastParams || {}, true);
+      isSameSession = false;
     } else if (this.active && this._hasCpuDirty) {
       // Ensure previous stroke's finished idle bleed is synced to Canvas2D BEFORE new Undo snapshot is taken
       this.syncTilesToCanvas2D(engine, this.lastParams || {});
@@ -2223,31 +2879,25 @@ export class GpuSumiSolver {
     const evap = params?.evaporation ?? 28;
     this.simActiveFrames = evap < 2 ? 320 : 480;
 
-    this.wetMinX = worldPos.x - 32;
-    this.wetMinY = worldPos.y - 32;
-    this.wetMaxX = worldPos.x + 32;
-    this.wetMaxY = worldPos.y + 32;
+    if (!isSameSession) {
+      this.wetMinX = worldPos.x - 32;
+      this.wetMinY = worldPos.y - 32;
+      this.wetMaxX = worldPos.x + 32;
+      this.wetMaxY = worldPos.y + 32;
+    } else {
+      // Preserve currently spreading pools cleanly while expanding union for new water
+      this.wetMinX = Math.min(this.wetMinX, worldPos.x - 32);
+      this.wetMinY = Math.min(this.wetMinY, worldPos.y - 32);
+      this.wetMaxX = Math.max(this.wetMaxX, worldPos.x + 32);
+      this.wetMaxY = Math.max(this.wetMaxY, worldPos.y + 32);
+    }
     this._focusX = worldPos.x;
     this._focusY = worldPos.y;
     this.gpuRenderer.sumiOverlay = null;
     return true;
   }
 
-  _markWetTilesInBounds(minX, minY, maxX, maxY, ticks = 480) {
-    const tx0 = Math.floor(minX / TILE_SIZE);
-    const tx1 = Math.floor(maxX / TILE_SIZE);
-    const ty0 = Math.floor(minY / TILE_SIZE);
-    const ty1 = Math.floor(maxY / TILE_SIZE);
-    for (let tx = tx0; tx <= tx1; tx++) {
-      for (let ty = ty0; ty <= ty1; ty++) {
-        const t = this.activeTiles.get(`${tx},${ty}`);
-        if (t) {
-          t.wetTicks = Math.max(t.wetTicks || 0, ticks);
-        }
-      }
-    }
-    // Cap simultaneous wet tiles (especially at 0% evaporation) by retiring oldest quiet tiles
-    const MAX_ACTIVE_WET = 20;
+  _retireExcessWetTiles() {
     let wetList = null;
     this.activeTiles.forEach((t) => {
       if (t.wetTicks > 0) {
@@ -2255,13 +2905,90 @@ export class GpuSumiSolver {
         wetList.push(t);
       }
     });
+    this._activeWetCount = wetList ? wetList.length : 0;
     if (wetList && wetList.length > MAX_ACTIVE_WET) {
-      wetList.sort((a, b) => (a.wetTicks - b.wetTicks) || (a.lastUsed - b.lastUsed));
+      wetList.sort((a, b) => (b.genDepth - a.genDepth) || (a.wetTicks - b.wetTicks) || (a.lastUsed - b.lastUsed));
       const retireCount = wetList.length - MAX_ACTIVE_WET;
       for (let i = 0; i < retireCount; i++) {
         wetList[i].wetTicks = 0;
       }
+      this._activeWetCount = MAX_ACTIVE_WET;
     }
+  }
+
+  _markWetTilesInBounds(minX, minY, maxX, maxY, ticks = 480, isStamp = true) {
+    const tx0 = Math.floor(minX / TILE_SIZE);
+    const tx1 = Math.floor((maxX - 1e-4) / TILE_SIZE);
+    const ty0 = Math.floor(minY / TILE_SIZE);
+    const ty1 = Math.floor((maxY - 1e-4) / TILE_SIZE);
+    for (let tx = tx0; tx <= tx1; tx++) {
+      for (let ty = ty0; ty <= ty1; ty++) {
+        const t = this.activeTiles.get(`${tx},${ty}`);
+        if (t) {
+          const lx0 = Math.max(0, Math.floor(minX - t.wx));
+          const ly0 = Math.max(0, Math.floor(minY - t.wy));
+          const lx1 = Math.min(TILE_SIZE, Math.ceil(maxX - t.wx));
+          const ly1 = Math.min(TILE_SIZE, Math.ceil(maxY - t.wy));
+          if (lx1 > lx0 && ly1 > ly0) {
+            t.wMinX = Math.min(t.wMinX, lx0);
+            t.wMinY = Math.min(t.wMinY, ly0);
+            t.wMaxX = Math.max(t.wMaxX, lx1);
+            t.wMaxY = Math.max(t.wMaxY, ly1);
+          }
+          if (isStamp) {
+            t.genDepth = 0;
+          }
+          t.wetTicks = Math.max(t.wetTicks || 0, ticks);
+        }
+      }
+    }
+    this._retireExcessWetTiles();
+  }
+
+  _expandWetBounds(engine, minX, minY, maxX, maxY, parentTicks, parentGenDepth = 0) {
+    if (this._activeWetCount >= MAX_ACTIVE_WET && parentGenDepth >= 3) return;
+    this.dirtyMinX = Math.min(this.dirtyMinX, minX);
+    this.dirtyMinY = Math.min(this.dirtyMinY, minY);
+    this.dirtyMaxX = Math.max(this.dirtyMaxX, maxX);
+    this.dirtyMaxY = Math.max(this.dirtyMaxY, maxY);
+    this.wetMinX = Math.min(this.wetMinX, minX);
+    this.wetMinY = Math.min(this.wetMinY, minY);
+    this.wetMaxX = Math.max(this.wetMaxX, maxX);
+    this.wetMaxY = Math.max(this.wetMaxY, maxY);
+
+    const tx0 = Math.floor(minX / TILE_SIZE);
+    const tx1 = Math.floor((maxX - 1e-4) / TILE_SIZE);
+    const ty0 = Math.floor(minY / TILE_SIZE);
+    const ty1 = Math.floor((maxY - 1e-4) / TILE_SIZE);
+    for (let tx = tx0; tx <= tx1; tx++) {
+      for (let ty = ty0; ty <= ty1; ty++) {
+        const key = `${tx},${ty}`;
+        let t = this.activeTiles.get(key);
+        const wasWet = !!(t && t.wetTicks > 0);
+        if (!t) {
+          if (this._activeWetCount >= MAX_ACTIVE_WET) continue;
+          t = this._ensureTile(engine, tx, ty);
+        }
+        if (!t) continue;
+        const lx0 = Math.max(0, Math.floor(minX - t.wx));
+        const ly0 = Math.max(0, Math.floor(minY - t.wy));
+        const lx1 = Math.min(TILE_SIZE, Math.ceil(maxX - t.wx));
+        const ly1 = Math.min(TILE_SIZE, Math.ceil(maxY - t.wy));
+        if (lx1 > lx0 && ly1 > ly0) {
+          t.wMinX = Math.min(t.wMinX, lx0);
+          t.wMinY = Math.min(t.wMinY, ly0);
+          t.wMaxX = Math.max(t.wMaxX, lx1);
+          t.wMaxY = Math.max(t.wMaxY, ly1);
+        }
+        if (!wasWet) {
+          t.genDepth = Math.min(8, parentGenDepth + 1);
+          const progressiveCap = Math.max(40, Math.min(parentTicks, 240 - t.genDepth * 16));
+          t.wetTicks = Math.max(t.wetTicks || 0, progressiveCap);
+          this._activeWetCount++;
+        }
+      }
+    }
+    this._retireExcessWetTiles();
   }
 
   _boxHasWetTiles(x0, y0, x1, y1) {
@@ -2298,7 +3025,7 @@ export class GpuSumiSolver {
           const id = `${cx},${cy}`;
           if (!engine.currentStrokeDirtyChunks.has(id)) {
             backupChunkLayer(engine, chunk, id, { layer });
-            engine._markDirty(id, layer);
+            engine._markDirty(id, layer, false, true);
           }
         }
       }
@@ -2505,17 +3232,76 @@ export class GpuSumiSolver {
       }
     }
 
+    if (modeInt !== 3) {
+      this._needsDryOnClose = true;
+    }
     const evap = params?.evaporation ?? 28;
     const tickCap = evap < 2 ? 320 : 480;
     this.simActiveFrames = tickCap;
-    this._markWetTilesInBounds(minX - 48, minY - 48, maxX + 48, maxY + 48, tickCap);
+    this._markWetTilesInBounds(minX - 48, minY - 48, maxX + 48, maxY + 48, tickCap, true);
   }
 
-  _runWetCluster(engine, clusterMinX, clusterMinY, clusterMaxX, clusterMaxY, dt, forceDry, activeParams) {
-    const minX = Math.max(Math.floor(this.wetMinX), clusterMinX);
-    const minY = Math.max(Math.floor(this.wetMinY), clusterMinY);
-    const maxX = Math.min(Math.ceil(this.wetMaxX), clusterMaxX);
-    const maxY = Math.min(Math.ceil(this.wetMaxY), clusterMaxY);
+  _probeWorkBoxFrontier(engine, workX, workY, innerMinX, innerMinY, innerMaxX, innerMaxY, parentTicks, parentGenDepth, allowRetireDry = false, clusterTiles = null) {
+    const gl = this.gl;
+    if (!gl || gl.isContextLost()) return;
+    const u0 = (innerMinX - workX) / WORK_RES;
+    const v0 = (innerMinY - workY) / WORK_RES;
+    const u1 = (innerMaxX - workX) / WORK_RES;
+    const v1 = (innerMaxY - workY) / WORK_RES;
+    if (u1 <= u0 || v1 <= v0) return;
+
+    gl.disable(gl.BLEND);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.bindVertexArray(this.gpuRenderer.vao);
+    gl.viewport(0, 0, 3, 3);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.texProbe.fbo);
+    gl.useProgram(this.progEdgeProbe);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.ppSurf.read().tex);
+    gl.uniform1i(this.locEdgeProbe.u_surf, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.ppPore.read().tex);
+    gl.uniform1i(this.locEdgeProbe.u_pore, 1);
+    gl.uniform4f(this.locEdgeProbe.u_innerUv, u0, v0, u1, v1);
+    gl.uniform2f(this.locEdgeProbe.u_bandUv, 28.0 / WORK_RES, 28.0 / WORK_RES);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    gl.readPixels(0, 0, 3, 3, gl.RGBA, gl.UNSIGNED_BYTE, this._probeBuf);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+    const pb = this._probeBuf;
+    const wAt = (cx, cy) => pb[(cy * 3 + cx) * 4];
+    const centerMax = wAt(1, 1);
+    if (centerMax === 0) {
+      if (allowRetireDry && clusterTiles) {
+        for (let i = 0; i < clusterTiles.length; i++) {
+          clusterTiles[i].wetTicks = 0;
+        }
+      }
+      return;
+    }
+
+    const expW = wAt(0, 1) >= 2 || wAt(0, 0) >= 2 || wAt(0, 2) >= 2;
+    const expE = wAt(2, 1) >= 2 || wAt(2, 0) >= 2 || wAt(2, 2) >= 2;
+    const expS = wAt(1, 0) >= 2 || wAt(0, 0) >= 2 || wAt(2, 0) >= 2;
+    const expN = wAt(1, 2) >= 2 || wAt(0, 2) >= 2 || wAt(2, 2) >= 2;
+
+    if (expW || expE || expS || expN) {
+      const STEP_OUT = 56;
+      const nMinX = expW ? (innerMinX - STEP_OUT) : innerMinX;
+      const nMaxX = expE ? (innerMaxX + STEP_OUT) : innerMaxX;
+      const nMinY = expS ? (innerMinY - STEP_OUT) : innerMinY;
+      const nMaxY = expN ? (innerMaxY + STEP_OUT) : innerMaxY;
+      this._expandWetBounds(engine, nMinX, nMinY, nMaxX, nMaxY, parentTicks, parentGenDepth);
+    }
+  }
+
+  _runWetCluster(engine, clusterMinX, clusterMinY, clusterMaxX, clusterMaxY, dt, forceDry, activeParams, maxTicks = 240, minGen = 0, clusterTiles = null) {
+    const minX = Math.floor(clusterMinX);
+    const minY = Math.floor(clusterMinY);
+    const maxX = Math.ceil(clusterMaxX);
+    const maxY = Math.ceil(clusterMaxY);
     if (maxX <= minX || maxY <= minY) return;
 
     this.dirtyMinX = Math.min(this.dirtyMinX, minX);
@@ -2526,6 +3312,7 @@ export class GpuSumiSolver {
     const apron = 20;
     const spanX = maxX - minX;
     const spanY = maxY - minY;
+    const shouldProbe = !forceDry && (engine.isDrawing || (this._probeTick & 1) === 0);
 
     if (spanX <= WORK_RES - apron * 2 && spanY <= WORK_RES - apron * 2) {
       const boxW = Math.min(WORK_RES, Math.max(48, spanX + apron * 2));
@@ -2537,6 +3324,9 @@ export class GpuSumiSolver {
         this._runPhysicsOnWorkBox(engine, workX, workY, boxW, boxH, dt, forceDry, activeParams);
         this._compositeWorkBox(engine, workX, workY, boxW, boxH, activeParams);
         this._storeTilesAndBlitChunks(engine, tiles, workX, workY, boxW, boxH, apron);
+        if (shouldProbe) {
+          this._probeWorkBoxFrontier(engine, workX, workY, minX, minY, maxX, maxY, maxTicks, minGen, true, clusterTiles);
+        }
       }
       return;
     }
@@ -2571,6 +3361,9 @@ export class GpuSumiSolver {
         this._runPhysicsOnWorkBox(engine, workX, workY, boxW, boxH, dt, forceDry, activeParams);
         this._compositeWorkBox(engine, workX, workY, boxW, boxH, activeParams);
         this._storeTilesAndBlitChunks(engine, tiles, workX, workY, boxW, boxH, apron);
+        if (shouldProbe) {
+          this._probeWorkBoxFrontier(engine, workX, workY, x, y, x + innerW, y + innerH, maxTicks, minGen, false, null);
+        }
       }
     }
   }
@@ -2581,21 +3374,19 @@ export class GpuSumiSolver {
     if (params && Object.keys(params).length > 0) this.lastParams = { ...params };
     const gl = this.gl;
     if (!gl || gl.isContextLost()) return;
-    if (this.wetMaxX <= this.wetMinX || this.wetMaxY <= this.wetMinY) return;
 
-    if (this.simActiveFrames > 220 && (this.simActiveFrames % 4) === 0) {
-      this.wetMinX -= 1;
-      this.wetMinY -= 1;
-      this.wetMaxX += 1;
-      this.wetMaxY += 1;
-    }
+    this._probeTick++;
 
-    // Group active wet tiles into 8-neighbor connected islands so distant wet strokes never force sweeping empty space
+    // Group active wet tiles into 8-neighbor connected islands so distant wet strokes run independently & merge seamlessly
     const wetMap = new Map();
     this.activeTiles.forEach((t, k) => {
       if (t.wetTicks > 0) wetMap.set(k, t);
     });
-    if (wetMap.size === 0) return;
+    this._activeWetCount = wetMap.size;
+    if (wetMap.size === 0) {
+      this.simActiveFrames = Math.min(this.simActiveFrames, 1);
+      return;
+    }
 
     const visited = new Set();
     const clusters = [];
@@ -2604,13 +3395,22 @@ export class GpuSumiSolver {
       const queue = [seed];
       visited.add(seedKey);
       let cMinX = Infinity, cMinY = Infinity, cMaxX = -Infinity, cMaxY = -Infinity;
+      let maxTicks = 0;
+      let minGen = 999;
       let qi = 0;
       while (qi < queue.length) {
         const cur = queue[qi++];
-        if (cur.wx < cMinX) cMinX = cur.wx;
-        if (cur.wy < cMinY) cMinY = cur.wy;
-        if (cur.wx + TILE_SIZE > cMaxX) cMaxX = cur.wx + TILE_SIZE;
-        if (cur.wy + TILE_SIZE > cMaxY) cMaxY = cur.wy + TILE_SIZE;
+        const curMinX = cur.wMaxX > cur.wMinX ? (cur.wx + cur.wMinX) : cur.wx;
+        const curMinY = cur.wMaxY > cur.wMinY ? (cur.wy + cur.wMinY) : cur.wy;
+        const curMaxX = cur.wMaxX > cur.wMinX ? (cur.wx + cur.wMaxX) : (cur.wx + TILE_SIZE);
+        const curMaxY = cur.wMaxY > cur.wMinY ? (cur.wy + cur.wMaxY) : (cur.wy + TILE_SIZE);
+        if (curMinX < cMinX) cMinX = curMinX;
+        if (curMinY < cMinY) cMinY = curMinY;
+        if (curMaxX > cMaxX) cMaxX = curMaxX;
+        if (curMaxY > cMaxY) cMaxY = curMaxY;
+        if (cur.wetTicks > maxTicks) maxTicks = cur.wetTicks;
+        if ((cur.genDepth || 0) < minGen) minGen = cur.genDepth || 0;
+
         for (let dx = -1; dx <= 1; dx++) {
           for (let dy = -1; dy <= 1; dy++) {
             if (dx === 0 && dy === 0) continue;
@@ -2624,17 +3424,24 @@ export class GpuSumiSolver {
           }
         }
       }
-      clusters.push({ minX: cMinX, minY: cMinY, maxX: cMaxX, maxY: cMaxY });
+      clusters.push({ minX: cMinX, minY: cMinY, maxX: cMaxX, maxY: cMaxY, maxTicks, minGen, tiles: queue });
     });
 
     for (let c = 0; c < clusters.length; c++) {
       const cl = clusters[c];
-      this._runWetCluster(engine, cl.minX, cl.minY, cl.maxX, cl.maxY, dt, forceDry, activeParams);
+      this._runWetCluster(engine, cl.minX, cl.minY, cl.maxX, cl.maxY, dt, forceDry, activeParams, cl.maxTicks, cl.minGen, cl.tiles);
     }
 
+    let anyWetLeft = false;
     this.activeTiles.forEach((t) => {
-      if (t.wetTicks > 0) t.wetTicks--;
+      if (t.wetTicks > 0) {
+        t.wetTicks--;
+        if (t.wetTicks > 0) anyWetLeft = true;
+      }
     });
+    if (!anyWetLeft && !engine.isDrawing) {
+      this.simActiveFrames = Math.min(this.simActiveFrames, 1);
+    }
   }
 
   hasCpuDirtyTiles() {
@@ -2759,7 +3566,7 @@ export class GpuSumiSolver {
 
         if (chunk.isEmpty) chunk.isEmpty[layer] = false;
         // Leave gpuDirty[layer] = false during live strokes since gpuTextures[layer] already matches
-        engine._markDirty(id, layer, false);
+        engine._markDirty(id, layer, false, true);
         if (chunk.gpuDirty) chunk.gpuDirty[layer] = false;
       }
     }
@@ -2792,40 +3599,8 @@ export class GpuSumiSolver {
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
   }
 
-  commitToChunks(engine, params = {}, closeSession = false) {
-    if (!this.ready || !this.active || !engine) return;
-    const activeParams = (params && Object.keys(params).length > 0) ? params : (this.lastParams || {});
-    const gl = this.gl;
-    if (!gl || gl.isContextLost()) return;
-
-    this.syncTilesToCanvas2D(engine, activeParams);
-
-    if (closeSession) {
-      this._releaseAllTiles();
-      this.touchedChunks.clear();
-      this.active = false;
-      this.simActiveFrames = 0;
-      this.dirtyMinX = Infinity;
-      this.dirtyMinY = Infinity;
-      this.dirtyMaxX = -Infinity;
-      this.dirtyMaxY = -Infinity;
-      this.wetMinX = Infinity;
-      this.wetMinY = Infinity;
-      this.wetMaxX = -Infinity;
-      this.wetMaxY = -Infinity;
-      if (this.gpuRenderer) {
-        this.gpuRenderer.sumiOverlay = null;
-        this.gpuRenderer.requestRender();
-      }
-    }
-  }
-
-  forceDry(engine, params = {}) {
-    if (!this.ready || !this.active || this.activeTiles.size === 0) return false;
-    const activeParams = (params && Object.keys(params).length > 0) ? params : (this.lastParams || {});
-    if (params && Object.keys(params).length > 0) this.lastParams = { ...params };
-
-    // Step across active tile groups up to WORK_RES so even multi-chunk strokes dry completely
+  _dryAllActiveTilesForArchive(engine, activeParams) {
+    if (!this.ready || !this.active || this.activeTiles.size === 0) return;
     const STEP_SPAN = 640;
     const minX = Math.floor(this.dirtyMinX);
     const minY = Math.floor(this.dirtyMinY);
@@ -2853,14 +3628,57 @@ export class GpuSumiSolver {
         }
       }
     }
+    this._needsDryOnClose = false;
+  }
 
-    this.commitToChunks(engine, activeParams, true);
+  commitToChunks(engine, params = {}, closeSession = false, skipDry = false) {
+    if (!this.ready || !this.active || !engine) return;
+    const activeParams = (params && Object.keys(params).length > 0) ? params : (this.lastParams || {});
+    const gl = this.gl;
+    if (!gl || gl.isContextLost()) return;
+
+    if (closeSession && !skipDry && this._needsDryOnClose && this.activeTiles.size > 0) {
+      this._dryAllActiveTilesForArchive(engine, activeParams);
+    }
+
+    this.syncTilesToCanvas2D(engine, activeParams);
+
+    if (closeSession) {
+      this._archiveActiveTiles(engine, activeParams);
+      this._releaseAllTiles();
+      this.touchedChunks.clear();
+      this.active = false;
+      this.simActiveFrames = 0;
+      this._needsDryOnClose = false;
+      this.dirtyMinX = Infinity;
+      this.dirtyMinY = Infinity;
+      this.dirtyMaxX = -Infinity;
+      this.dirtyMaxY = -Infinity;
+      this.wetMinX = Infinity;
+      this.wetMinY = Infinity;
+      this.wetMaxX = -Infinity;
+      this.wetMaxY = -Infinity;
+      if (this.gpuRenderer) {
+        this.gpuRenderer.sumiOverlay = null;
+        this.gpuRenderer.requestRender();
+      }
+    }
+  }
+
+  forceDry(engine, params = {}) {
+    if (!this.ready || !this.active || this.activeTiles.size === 0) return false;
+    const activeParams = (params && Object.keys(params).length > 0) ? params : (this.lastParams || {});
+    if (params && Object.keys(params).length > 0) this.lastParams = { ...params };
+
+    this._dryAllActiveTilesForArchive(engine, activeParams);
+    this.commitToChunks(engine, activeParams, true, true);
     return true;
   }
 
   cancel(engine = null, restoreDirty = false) {
     this.active = false;
     this.simActiveFrames = 0;
+    this._needsDryOnClose = false;
     if (restoreDirty && engine && this.touchedChunks.size > 0) {
       const layer = this.layer >= 0 ? this.layer : engine.activeLayer;
       this.touchedChunks.forEach(({ chunk }) => {
@@ -2890,10 +3708,19 @@ export class GpuSumiSolver {
     }
   }
 
+  resetProjectState(prevProjId = null) {
+    this.cancel(null, false);
+    this.clearPassiveArchive(prevProjId, null);
+    while (this.tilePool.length > 4) {
+      this._destroyTileGpu(this.tilePool.pop());
+    }
+  }
+
   dispose() {
     const gl = this.gl;
     if (gl && !gl.isContextLost()) {
       this._releaseAllTiles();
+      this.passiveTiles.clear();
       for (let i = 0; i < this.tilePool.length; i++) {
         this._destroyTileGpu(this.tilePool[i]);
       }
@@ -2920,6 +3747,11 @@ export class GpuSumiSolver {
       delT(this.texStamp);
       delT(this.texOutput);
       delT(this.texTileUnpremult);
+      delT(this.texUploadDry);
+      delT(this.texUploadBase);
+      delT(this.texTileBaseTmp);
+      delT(this.texTileDryTmp);
+      delT(this.texProbe);
       if (this.dummyTex) gl.deleteTexture(this.dummyTex);
 
       if (this.mrtFbo) gl.deleteFramebuffer(this.mrtFbo);
@@ -2934,12 +3766,14 @@ export class GpuSumiSolver {
         this.progRewet, this.progBrushApply, this.progVelAdvect,
         this.progDiv, this.progPress, this.progGradSub,
         this.progSurfStep, this.progBaseStep, this.progSurfSeep,
-        this.progPerc, this.progComp
+        this.progPerc, this.progComp, this.progEdgeProbe,
+        this.progPackDry, this.progUnpackDry, this.progReconcile
       ];
       for (const p of progs) if (p) gl.deleteProgram(p);
     }
     this.ready = false;
     this.active = false;
+    this._pipelinesWarmed = false;
     this.gl = null;
   }
 }

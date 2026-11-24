@@ -971,8 +971,8 @@ export function setupUI(app) {
             const seconds = Math.round(4 * Math.pow(300 / 4, v / 100));
             app.autosaveDelay = seconds * 1000;
             if (autosaveVal) autosaveVal.innerText = `${seconds}s`;
-            try { localStorage.setItem('global_autosaveDelaySlider', String(v)); } catch (_) {}
-            app.storage.saveSetting('autosaveDelaySlider', v);
+            app.storage?.saveUiState('global_autosaveDelaySlider', v);
+            app.storage?.saveSetting('autosaveDelaySlider', v);
         };
     }
 
@@ -980,8 +980,8 @@ export function setupUI(app) {
         autosaveEnable.onchange = (e) => {
             const checked = Boolean(e.target.checked);
             app.autosaveEnabled = checked;
-            try { localStorage.setItem('global_autosaveEnabled', String(checked)); } catch (_) {}
-            app.storage.saveSetting('autosaveEnabled', checked);
+            app.storage?.saveUiState('global_autosaveEnabled', checked);
+            app.storage?.saveSetting('autosaveEnabled', checked);
             if (!app.autosaveEnabled) app._clearSaveTimer();
         };
     }
@@ -1007,6 +1007,21 @@ export function setupUI(app) {
       const container = document.createElement('div');
       container.className = 'layer-item';
       if (i === app.engine.activeLayer) container.classList.add('active-layer');
+
+      // Slim vertical line trigger on the LEFT of Paint layers (1..3) for Perceptual Color Correction
+      if (i > 0) {
+        const ccBtn = document.createElement('button');
+        ccBtn.type = 'button';
+        ccBtn.className = 'layer-color-btn';
+        ccBtn.id = `layer-color-btn-${i}`;
+        ccBtn.title = `Color Correction & Curves (Paint ${i})`;
+        ccBtn.setAttribute('aria-label', `Color Correction Paint ${i}`);
+        ccBtn.onclick = (e) => {
+            e.stopPropagation();
+            app.openLayerColorCorrection?.(i);
+        };
+        container.appendChild(ccBtn);
+      }
 
       const btn = document.createElement('button');
       btn.className = 'layer-btn';
@@ -1280,6 +1295,11 @@ export function setupUI(app) {
     app._makeDraggable(document.getElementById('modal-new-project'), document.getElementById('handle-new-project'));
     app._makeDraggable(document.getElementById('modal-export'), document.getElementById('handle-export'));
     app._makeDraggable(document.getElementById('modal-ref-editor'), document.getElementById('handle-ref-editor'));
+    const modalLayerColor = document.getElementById('modal-layer-color');
+    const handleLayerColor = document.getElementById('handle-layer-color');
+    if (modalLayerColor && handleLayerColor) {
+        app._makeDraggable(modalLayerColor, handleLayerColor);
+    }
 
     // Draggable Perf Monitor
     const perfPanel = document.getElementById('panel-perf-monitor');
@@ -1320,10 +1340,11 @@ export function setupUI(app) {
 
     const checkPerfPrewarm = document.getElementById('settings-perf-prewarm-tools');
     if (checkPerfPrewarm) {
-        checkPerfPrewarm.checked = localStorage.getItem('perf_prewarm_tools') === 'true';
+        checkPerfPrewarm.checked = !!app._perfPrewarmTools;
         checkPerfPrewarm.onchange = (e) => {
             const enabled = !!e.target.checked;
-            localStorage.setItem('perf_prewarm_tools', enabled ? 'true' : 'false');
+            app._perfPrewarmTools = enabled;
+            app.storage?.saveUiState('perf_prewarm_tools', enabled, true);
             if (enabled && typeof app.prewarmAllTools === 'function') {
                 app.prewarmAllTools(false);
             }
@@ -1462,8 +1483,7 @@ export function setupUI(app) {
             const size = Math.round(app._mapSliderToSize(sliderVal));
             
             if (app.activeTool) {
-                app.brushSettings[app.activeTool].size = size;
-                app.engine.brush.size = size;
+                app.updateActiveSetting('size', size);
                 
                 // Sync main size inputs
                 const mainSizeInput = document.getElementById('brush-size');
@@ -1475,7 +1495,6 @@ export function setupUI(app) {
                 if (touchSizeValDisplay) touchSizeValDisplay.innerText = size;
                 
                 if (app.engine) app.engine._updateBrushCursor();
-                app._saveBrushSettings();
             }
         };
     }

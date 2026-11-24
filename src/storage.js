@@ -1,18 +1,61 @@
-import { SECTOR_SIZE } from './constants.js';
+const ALL_STORES = [
+  'chunks',
+  'settings',
+  'sectors',
+  'toolSettings',
+  'tips',
+  'palette',
+  'projectThumbs',
+  'uiState'
+];
 
 export class SketchStorage {
   constructor() {
     this.projectId = 'default';
     this.dbName = 'ConceptBruteDB';
-    this.version = 1;
+    this.version = 2;
     this.db = null;
     this.isFallback = false;
     this._initPromise = null;
     this.fallbackStore = {
       chunks: {},
       settings: {},
-      sectors: {}
+      sectors: {},
+      toolSettings: {},
+      tips: {},
+      palette: {},
+      projectThumbs: {},
+      uiState: {}
     };
+
+    // Per-compartment in-memory caches for instant repeat reads
+    this._caches = {
+      settings: new Map(),
+      toolSettings: new Map(),
+      tips: new Map(),
+      palette: new Map(),
+      projectThumbs: new Map(),
+      uiState: new Map()
+    };
+
+    // Coalesced async write queue (batches slider/tool/tip/ui updates into one multi-store IDB tx)
+    this._pendingWrites = new Map();
+    this._flushTimer = null;
+    this._inFlightPromises = new Set();
+
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      const flushOnHide = () => {
+        if (this._pendingWrites.size > 0) {
+          this.flushPendingWrites().catch(() => {});
+        }
+      };
+      window.addEventListener('pagehide', flushOnHide);
+      if (typeof document !== 'undefined') {
+        document.addEventListener('visibilitychange', () => {
+          if (document.hidden) flushOnHide();
+        });
+      }
+    }
   }
 
   setProjectId(id) {
@@ -30,15 +73,19 @@ export class SketchStorage {
     this.fallbackStore = {
       chunks: {},
       settings: {},
-      sectors: {}
+      sectors: {},
+      toolSettings: {},
+      tips: {},
+      palette: {},
+      projectThumbs: {},
+      uiState: {}
     };
-    
-    // Attempt to load settings/metadata keys from localStorage to preserve state
+
     try {
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
         if (!key) continue;
-        
+
         try {
           const raw = localStorage.getItem(key);
           if (raw) {
@@ -69,7 +116,7 @@ export class SketchStorage {
   async init() {
     if (this.db) return this.db;
     if (this._initPromise) return this._initPromise;
-    
+
     this._initPromise = new Promise((resolve) => {
       if (typeof indexedDB === 'undefined') {
         console.warn('IndexedDB unavailable. Activating in-memory fallback.');
@@ -78,7 +125,6 @@ export class SketchStorage {
         return;
       }
 
-      // 20-second safety guard: background tabs are throttled by browsers, so never use a short 1s timeout!
       const timeoutId = setTimeout(() => {
         if (!this.db) {
           console.warn('IndexedDB handshake exceeded 20s guard. Activating in-memory fallback.');
@@ -97,20 +143,17 @@ export class SketchStorage {
         resolve(null);
         return;
       }
-      
+
       request.onupgradeneeded = (event) => {
         const database = event.target.result;
-        if (!database.objectStoreNames.contains('chunks')) {
-          database.createObjectStore('chunks', { keyPath: 'id' });
-        }
-        if (!database.objectStoreNames.contains('settings')) {
-          database.createObjectStore('settings', { keyPath: 'id' });
-        }
-        if (!database.objectStoreNames.contains('sectors')) {
-          database.createObjectStore('sectors', { keyPath: 'id' });
+        for (let i = 0; i < ALL_STORES.length; i++) {
+          const storeName = ALL_STORES[i];
+          if (!database.objectStoreNames.contains(storeName)) {
+            database.createObjectStore(storeName, { keyPath: 'id' });
+          }
         }
       };
-      
+
       request.onsuccess = (event) => {
         clearTimeout(timeoutId);
         this.db = event.target.result;
@@ -131,7 +174,7 @@ export class SketchStorage {
 
         resolve(this.db);
       };
-      
+
       request.onerror = (event) => {
         clearTimeout(timeoutId);
         console.warn('IndexedDB connection failed. Activating in-memory fallback.', event.target?.error);
@@ -148,6 +191,351 @@ export class SketchStorage {
 
     return this._initPromise;
   }
+
+  _trackPromise(p) {
+    this._inFlightPromises.add(p);
+    p.finally(() => this._inFlightPromises.delete(p));
+    return p;
+  }
+
+  _scheduleQueueFlush(delayMs = 90) {
+    if (this._flushTimer) return;
+    this._flushTimer = setTimeout(() => {
+      this._flushTimer = null;
+      this.flushPendingWrites().catch(() => {});
+    }, delayMs);
+  }
+
+  async flushPendingWrites() {
+    if (this._flushTimer) {
+      clearTimeout(this._flushTimer);
+      this._flushTimer = null;
+    }
+
+    if (this._pendingWrites.size > 0) {
+      const entries = Array.from(this._pendingWrites.values());
+      this._pendingWrites.clear();
+
+      await this.ensureReady();
+      if (this.isFallback || !this.db) {
+        for (let i = 0; i < entries.length; i++) {
+          const e = entries[i];
+          const fb = this.fallbackStore[e.storeName] || (this.fallbackStore[e.storeName] = {});
+          if (e.deleteRecord) delete fb[e.key];
+          else fb[e.key] = e.record;
+        }
+      } else {
+        const storeSet = new Set();
+        for (let i = 0; i < entries.length; i++) {
+          storeSet.add(entries[i].storeName);
+        }
+        const txPromise = new Promise((resolve, reject) => {
+          try {
+            const tx = this.db.transaction(Array.from(storeSet), 'readwrite');
+            const storeRefs = {};
+            storeSet.forEach((s) => {
+              storeRefs[s] = tx.objectStore(s);
+            });
+            for (let i = 0; i < entries.length; i++) {
+              const e = entries[i];
+              if (e.deleteRecord) storeRefs[e.storeName].delete(e.key);
+              else storeRefs[e.storeName].put(e.record);
+            }
+            tx.oncomplete = () => resolve();
+            tx.onerror = (ev) => reject(ev.target?.error || new Error('Batch write failed'));
+            tx.onabort = (ev) => reject(ev.target?.error || new Error('Batch write aborted'));
+          } catch (err) {
+            reject(err);
+          }
+        });
+        await this._trackPromise(txPromise);
+      }
+    }
+
+    if (this._inFlightPromises.size > 0) {
+      await Promise.allSettled(Array.from(this._inFlightPromises));
+    }
+  }
+
+  async _putCompartment(storeName, key, record, immediate = false) {
+    const cache = this._caches[storeName];
+    if (cache) cache.set(key, record);
+
+    const queueKey = `${storeName}::${key}`;
+    if (!immediate) {
+      this._pendingWrites.set(queueKey, { storeName, key, record, deleteRecord: false });
+      this._scheduleQueueFlush(90);
+      return;
+    }
+
+    this._pendingWrites.delete(queueKey);
+    await this.ensureReady();
+
+    if (this.isFallback || !this.db) {
+      const fb = this.fallbackStore[storeName] || (this.fallbackStore[storeName] = {});
+      fb[key] = record;
+      return;
+    }
+
+    const txPromise = new Promise((resolve, reject) => {
+      const tx = this.db.transaction([storeName], 'readwrite');
+      tx.objectStore(storeName).put(record);
+      tx.oncomplete = () => resolve();
+      tx.onerror = (ev) => reject(ev.target?.error || new Error(`Save ${storeName} failed`));
+      tx.onabort = (ev) => reject(ev.target?.error || new Error(`Save ${storeName} aborted`));
+    });
+    return this._trackPromise(txPromise);
+  }
+
+  async _deleteCompartment(storeName, key, immediate = false) {
+    const cache = this._caches[storeName];
+    if (cache) cache.set(key, null);
+
+    const queueKey = `${storeName}::${key}`;
+    if (!immediate) {
+      this._pendingWrites.set(queueKey, { storeName, key, record: null, deleteRecord: true });
+      this._scheduleQueueFlush(90);
+      return;
+    }
+
+    this._pendingWrites.delete(queueKey);
+    await this.ensureReady();
+
+    if (this.isFallback || !this.db) {
+      if (this.fallbackStore[storeName]) delete this.fallbackStore[storeName][key];
+      return;
+    }
+
+    const txPromise = new Promise((resolve, reject) => {
+      const tx = this.db.transaction([storeName], 'readwrite');
+      tx.objectStore(storeName).delete(key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = (ev) => reject(ev.target?.error || new Error(`Delete ${storeName} failed`));
+      tx.onabort = (ev) => reject(ev.target?.error || new Error(`Delete ${storeName} aborted`));
+    });
+    return this._trackPromise(txPromise);
+  }
+
+  async _getCompartment(storeName, key) {
+    const cache = this._caches[storeName];
+    if (cache && cache.has(key)) {
+      return cache.get(key);
+    }
+
+    await this.ensureReady();
+    if (this.isFallback || !this.db) {
+      const val = (this.fallbackStore[storeName] && this.fallbackStore[storeName][key]) || null;
+      if (cache) cache.set(key, val);
+      return val;
+    }
+
+    return new Promise((resolve, reject) => {
+      const tx = this.db.transaction([storeName], 'readonly');
+      const req = tx.objectStore(storeName).get(key);
+      req.onsuccess = () => {
+        const res = req.result || null;
+        if (cache) cache.set(key, res);
+        resolve(res);
+      };
+      req.onerror = (ev) => reject(ev.target?.error || new Error(`Load ${storeName} failed`));
+      tx.onabort = (ev) => reject(ev.target?.error || new Error(`Load ${storeName} aborted`));
+    });
+  }
+
+  async _getAllCompartment(storeName, prefix = null) {
+    await this.ensureReady();
+    const cache = this._caches[storeName];
+
+    if (this.isFallback || !this.db) {
+      const src = this.fallbackStore[storeName] || {};
+      const out = [];
+      for (const k in src) {
+        if (!prefix || k.startsWith(prefix)) {
+          if (src[k]) out.push(src[k]);
+        }
+      }
+      return out;
+    }
+
+    return new Promise((resolve, reject) => {
+      const tx = this.db.transaction([storeName], 'readonly');
+      const store = tx.objectStore(storeName);
+      const range = prefix ? IDBKeyRange.bound(prefix, prefix + '\uffff') : null;
+      const req = range ? store.getAll(range) : store.getAll();
+      req.onsuccess = () => {
+        const list = req.result || [];
+        if (cache) {
+          for (let i = 0; i < list.length; i++) {
+            const item = list[i];
+            if (item && item.id) cache.set(item.id, item);
+          }
+        }
+        resolve(list);
+      };
+      req.onerror = (ev) => reject(ev.target?.error || new Error(`LoadAll ${storeName} failed`));
+      tx.onabort = (ev) => reject(ev.target?.error || new Error(`LoadAll ${storeName} aborted`));
+    });
+  }
+
+  // ==================== COMPARTMENT: PER-TOOL SETTINGS ====================
+
+  async saveToolSetting(toolId, value, explicitProjectId = null, immediate = false) {
+    if (!toolId) return;
+    const pid = explicitProjectId || this.projectId;
+    const key = `${pid}:${toolId}`;
+    return this._putCompartment('toolSettings', key, { id: key, pid, toolId, value }, immediate);
+  }
+
+  async loadAllToolSettings(explicitProjectId = null) {
+    const pid = explicitProjectId || this.projectId;
+    const prefix = `${pid}:`;
+    const rows = await this._getAllCompartment('toolSettings', prefix);
+    const map = {};
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      if (r && r.toolId) map[r.toolId] = r.value;
+    }
+    return map;
+  }
+
+  // ==================== COMPARTMENT: PER-SLOT BRUSH TIPS ====================
+
+  async saveTipSlot(slotId, payload, immediate = false) {
+    if (!slotId) return;
+    return this._putCompartment('tips', slotId, { id: slotId, ...payload }, immediate);
+  }
+
+  async loadAllTipSlots() {
+    const rows = await this._getAllCompartment('tips', null);
+    const map = {};
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      if (r && r.id) map[r.id] = r;
+    }
+    return map;
+  }
+
+  // ==================== COMPARTMENT: PALETTE ====================
+
+  async savePaletteCompartment(key, value, immediate = false) {
+    if (!key) return;
+    return this._putCompartment('palette', key, { id: key, value }, immediate);
+  }
+
+  async loadPaletteCompartment(key) {
+    const rec = await this._getCompartment('palette', key);
+    return rec ? rec.value : null;
+  }
+
+  async loadAllPaletteCompartment() {
+    const rows = await this._getAllCompartment('palette', null);
+    const map = {};
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      if (r && r.id) map[r.id] = r.value;
+    }
+    return map;
+  }
+
+  // ==================== COMPARTMENT: PROJECT THUMBNAILS ====================
+
+  async saveProjectThumb(pid, thumbnail, immediate = false) {
+    if (!pid) return;
+    if (!thumbnail) {
+      return this._deleteCompartment('projectThumbs', pid, immediate);
+    }
+    return this._putCompartment('projectThumbs', pid, { id: pid, thumbnail }, immediate);
+  }
+
+  async loadAllProjectThumbs() {
+    const rows = await this._getAllCompartment('projectThumbs', null);
+    const map = {};
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      if (r && r.id && r.thumbnail) map[r.id] = r.thumbnail;
+    }
+    return map;
+  }
+
+  async deleteProjectThumb(pid) {
+    if (!pid) return;
+    return this._deleteCompartment('projectThumbs', pid, true);
+  }
+
+  // ==================== COMPARTMENT: UI STATE ====================
+
+  async saveUiState(key, value, immediate = false) {
+    if (!key) return;
+    return this._putCompartment('uiState', key, { id: key, value }, immediate);
+  }
+
+  async loadUiState(key) {
+    const rec = await this._getCompartment('uiState', key);
+    return rec ? rec.value : null;
+  }
+
+  async deleteUiState(key) {
+    if (!key) return;
+    return this._deleteCompartment('uiState', key, true);
+  }
+
+  async loadUiStateBatch(keys) {
+    if (!keys || keys.length === 0) return {};
+    const cache = this._caches.uiState;
+    const results = {};
+    const missing = [];
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      if (cache.has(k)) {
+        const rec = cache.get(k);
+        results[k] = rec ? rec.value : null;
+      } else {
+        missing.push(k);
+      }
+    }
+    if (missing.length === 0) return results;
+
+    await this.ensureReady();
+    if (this.isFallback || !this.db) {
+      for (let i = 0; i < missing.length; i++) {
+        const k = missing[i];
+        const rec = this.fallbackStore.uiState[k] || null;
+        cache.set(k, rec);
+        results[k] = rec ? rec.value : null;
+      }
+      return results;
+    }
+
+    return new Promise((resolve, reject) => {
+      const tx = this.db.transaction(['uiState'], 'readonly');
+      const store = tx.objectStore('uiState');
+      let loaded = 0;
+      let failed = false;
+      missing.forEach((k) => {
+        const req = store.get(k);
+        req.onsuccess = () => {
+          if (failed) return;
+          const rec = req.result || null;
+          cache.set(k, rec);
+          results[k] = rec ? rec.value : null;
+          loaded++;
+          if (loaded === missing.length) resolve(results);
+        };
+        req.onerror = (ev) => {
+          if (failed) return;
+          failed = true;
+          reject(ev.target?.error || new Error('Batch uiState load failed'));
+        };
+      });
+      tx.onabort = (ev) => {
+        if (failed) return;
+        failed = true;
+        reject(ev.target?.error || new Error('Batch uiState load aborted'));
+      };
+    });
+  }
+
+  // ==================== SECTORS & CHUNKS ====================
 
   _getSectorKey(sx, sy, explicitProjectId = null) {
     const pid = explicitProjectId || this.projectId;
@@ -173,17 +561,17 @@ export class SketchStorage {
       }
       return;
     }
-    
+
     return new Promise((resolve, reject) => {
       const transaction = this.db.transaction(['sectors'], 'readwrite');
       const store = transaction.objectStore('sectors');
-      
+
       if (!sectorData || Object.keys(sectorData.chunks || {}).length === 0) {
         store.delete(key);
       } else {
         store.put({ id: key, ...sectorData });
       }
-      
+
       transaction.oncomplete = () => resolve();
       transaction.onerror = (event) => reject(event.target?.error || new Error('Save sector failed'));
       transaction.onabort = (event) => reject(event.target?.error || new Error('Save sector aborted'));
@@ -197,12 +585,12 @@ export class SketchStorage {
     if (this.isFallback || !this.db) {
       return this.fallbackStore.sectors[key] || null;
     }
-    
+
     return new Promise((resolve, reject) => {
       const transaction = this.db.transaction(['sectors'], 'readonly');
       const store = transaction.objectStore('sectors');
       const request = store.get(key);
-      
+
       request.onsuccess = () => resolve(request.result || null);
       request.onerror = (event) => reject(event.target?.error || new Error('Load sector failed'));
       transaction.onabort = (event) => reject(event.target?.error || new Error('Load sector aborted'));
@@ -258,13 +646,13 @@ export class SketchStorage {
       const prefix = `p_${pid}_s_`;
       return Object.keys(this.fallbackStore.sectors).filter(k => k.startsWith(prefix));
     }
-    
+
     return new Promise((resolve, reject) => {
       const transaction = this.db.transaction(['sectors'], 'readonly');
       const store = transaction.objectStore('sectors');
       const range = IDBKeyRange.bound(`p_${pid}_s_`, `p_${pid}_s_\uffff`);
       const request = store.getAllKeys(range);
-      
+
       request.onsuccess = () => resolve(request.result || []);
       request.onerror = (event) => reject(event.target?.error || new Error('Get keys failed'));
       transaction.onabort = (event) => reject(event.target?.error || new Error('Get keys aborted'));
@@ -278,13 +666,13 @@ export class SketchStorage {
       const prefix = `p_${pid}_c_`;
       return Object.keys(this.fallbackStore.chunks).filter(k => k.startsWith(prefix));
     }
-    
+
     return new Promise((resolve, reject) => {
       const transaction = this.db.transaction(['chunks'], 'readonly');
       const store = transaction.objectStore('chunks');
       const range = IDBKeyRange.bound(`p_${pid}_c_`, `p_${pid}_c_\uffff`);
       const request = store.getAllKeys(range);
-      
+
       request.onsuccess = () => resolve(request.result || []);
       request.onerror = (event) => reject(event.target?.error || new Error('Get legacy keys failed'));
       transaction.onabort = (event) => reject(event.target?.error || new Error('Get legacy keys aborted'));
@@ -296,12 +684,12 @@ export class SketchStorage {
     if (this.isFallback || !this.db) {
       return this.fallbackStore.chunks[id] ? this.fallbackStore.chunks[id].data : null;
     }
-    
+
     return new Promise((resolve, reject) => {
       const transaction = this.db.transaction(['chunks'], 'readonly');
       const store = transaction.objectStore('chunks');
       const request = store.get(id);
-      
+
       request.onsuccess = () => resolve(request.result ? request.result.data : null);
       request.onerror = (event) => reject(event.target?.error || new Error('Load legacy chunk failed'));
       transaction.onabort = (event) => reject(event.target?.error || new Error('Load legacy chunk aborted'));
@@ -314,124 +702,120 @@ export class SketchStorage {
       delete this.fallbackStore.chunks[id];
       return;
     }
-    
+
     return new Promise((resolve, reject) => {
       const transaction = this.db.transaction(['chunks'], 'readwrite');
       const store = transaction.objectStore('chunks');
       store.delete(id);
-      
+
       transaction.oncomplete = () => resolve();
       transaction.onerror = (event) => reject(event.target?.error || new Error('Delete legacy chunk failed'));
       transaction.onabort = (event) => reject(event.target?.error || new Error('Delete legacy chunk aborted'));
     });
   }
 
-  async saveSetting(id, value, explicitProjectId = null) {
-    await this.ensureReady();
-    const key = this._getSettingKey(id, explicitProjectId);
+  // ==================== PROJECT & GLOBAL SETTINGS (CACHED IDB) ====================
 
-    if (this.isFallback || !this.db) {
-      this.fallbackStore.settings[key] = value;
-      try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
-      return;
-    }
-    
-    return new Promise((resolve, reject) => {
-      const transaction = this.db.transaction(['settings'], 'readwrite');
-      const store = transaction.objectStore('settings');
-      store.put({ id: key, value });
-      
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = (event) => reject(event.target?.error || new Error('Save setting failed'));
-      transaction.onabort = (event) => reject(event.target?.error || new Error('Save setting aborted'));
-    });
+  async saveSetting(id, value, explicitProjectId = null, immediate = false) {
+    const key = this._getSettingKey(id, explicitProjectId);
+    // Keep heavyweight keys (historyStack, referenceImages, canvasSurface, timelapse) immediate when saved
+    const isHeavy = immediate || id === 'historyStack' || id === 'redoStack' || id === 'referenceImages' || id === 'canvasSurface' || id.startsWith('timelapse');
+    return this._putCompartment('settings', key, { id: key, value }, isHeavy);
   }
 
   async loadSetting(id, explicitProjectId = null) {
-    await this.ensureReady();
     const key = this._getSettingKey(id, explicitProjectId);
+    const cache = this._caches.settings;
+    if (cache.has(key)) {
+      const rec = cache.get(key);
+      return rec ? rec.value : null;
+    }
 
+    await this.ensureReady();
     if (this.isFallback || !this.db) {
       if (this.fallbackStore.settings[key] !== undefined) {
-        return this.fallbackStore.settings[key];
+        const val = this.fallbackStore.settings[key];
+        cache.set(key, { id: key, value: val });
+        return val;
       }
       try {
         const raw = localStorage.getItem(key);
-        return raw ? JSON.parse(raw) : null;
+        const val = raw ? JSON.parse(raw) : null;
+        if (val !== null) cache.set(key, { id: key, value: val });
+        return val;
       } catch (e) {
         return null;
       }
     }
-    
-    return new Promise((resolve, reject) => {
-      const transaction = this.db.transaction(['settings'], 'readonly');
-      const store = transaction.objectStore('settings');
-      const request = store.get(key);
-      
-      request.onsuccess = () => resolve(request.result ? request.result.value : null);
-      request.onerror = (event) => reject(event.target?.error || new Error('Load setting failed'));
-      transaction.onabort = (event) => reject(event.target?.error || new Error('Load setting aborted'));
-    });
+
+    const rec = await this._getCompartment('settings', key);
+    return rec ? rec.value : null;
   }
 
   async deleteSetting(id, explicitProjectId = null) {
-    await this.ensureReady();
     const key = this._getSettingKey(id, explicitProjectId);
-
     if (this.isFallback || !this.db) {
-      delete this.fallbackStore.settings[key];
       try { localStorage.removeItem(key); } catch (e) {}
-      return;
     }
-
-    return new Promise((resolve, reject) => {
-      const transaction = this.db.transaction(['settings'], 'readwrite');
-      const store = transaction.objectStore('settings');
-      store.delete(key);
-
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = (event) => reject(event.target?.error || new Error('Delete setting failed'));
-      transaction.onabort = (event) => reject(event.target?.error || new Error('Delete setting aborted'));
-    });
+    return this._deleteCompartment('settings', key, true);
   }
 
   async loadSettingsBatch(keys, explicitProjectId = null) {
-    await this.ensureReady();
-    if (this.isFallback || !this.db) {
-      const results = {};
-      keys.forEach(k => {
-        const key = this._getSettingKey(k, explicitProjectId);
-        if (this.fallbackStore.settings[key] !== undefined) {
-          results[k] = this.fallbackStore.settings[key];
-        } else {
-          try {
-            const raw = localStorage.getItem(key);
-            results[k] = raw ? JSON.parse(raw) : null;
-          } catch (e) {
-            results[k] = null;
-          }
-        }
-      });
-      return results;
+    if (!keys || keys.length === 0) return {};
+    const cache = this._caches.settings;
+    const results = {};
+    const missingKeys = [];
+
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      const fullKey = this._getSettingKey(k, explicitProjectId);
+      if (cache.has(fullKey)) {
+        const rec = cache.get(fullKey);
+        results[k] = rec ? rec.value : null;
+      } else {
+        missingKeys.push({ shortKey: k, fullKey });
+      }
     }
 
-    if (keys.length === 0) return {};
+    if (missingKeys.length === 0) return results;
+
+    await this.ensureReady();
+    if (this.isFallback || !this.db) {
+      for (let i = 0; i < missingKeys.length; i++) {
+        const { shortKey, fullKey } = missingKeys[i];
+        if (this.fallbackStore.settings[fullKey] !== undefined) {
+          const val = this.fallbackStore.settings[fullKey];
+          cache.set(fullKey, { id: fullKey, value: val });
+          results[shortKey] = val;
+        } else {
+          try {
+            const raw = localStorage.getItem(fullKey);
+            const val = raw ? JSON.parse(raw) : null;
+            if (val !== null) cache.set(fullKey, { id: fullKey, value: val });
+            results[shortKey] = val;
+          } catch (e) {
+            results[shortKey] = null;
+          }
+        }
+      }
+      return results;
+    }
 
     return new Promise((resolve, reject) => {
       const transaction = this.db.transaction(['settings'], 'readonly');
       const store = transaction.objectStore('settings');
-      const results = {};
       let loadedCount = 0;
       let failed = false;
 
-      keys.forEach((k) => {
-        const key = this._getSettingKey(k, explicitProjectId);
-        const request = store.get(key);
+      missingKeys.forEach(({ shortKey, fullKey }) => {
+        const request = store.get(fullKey);
         request.onsuccess = () => {
           if (failed) return;
-          results[k] = request.result ? request.result.value : null;
+          const rec = request.result || null;
+          cache.set(fullKey, rec);
+          results[shortKey] = rec ? rec.value : null;
           loadedCount++;
-          if (loadedCount === keys.length) {
+          if (loadedCount === missingKeys.length) {
             resolve(results);
           }
         };
@@ -450,63 +834,62 @@ export class SketchStorage {
   }
 
   async saveGlobalSetting(id, value) {
-    try {
-      const serialized = JSON.stringify(value);
-      localStorage.setItem(`global_${id}`, serialized);
-    } catch (e) {}
-
-    await this.ensureReady();
-    if (this.isFallback || !this.db) {
-      this.fallbackStore.settings[id] = value;
-      return;
-    }
-    
-    return new Promise((resolve, reject) => {
-      const transaction = this.db.transaction(['settings'], 'readwrite');
-      const store = transaction.objectStore('settings');
-      store.put({ id, value });
-      
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = (event) => reject(event.target?.error || new Error('Save global setting failed'));
-      transaction.onabort = (event) => reject(event.target?.error || new Error('Save global setting aborted'));
-    });
+    // No synchronous localStorage.setItem / JSON.stringify on main thread!
+    // Persist directly to IDB settings store + in-memory cache.
+    return this._putCompartment('settings', id, { id, value }, true);
   }
 
   async loadGlobalSetting(id) {
+    const cache = this._caches.settings;
+    if (cache.has(id)) {
+      const rec = cache.get(id);
+      return rec ? rec.value : null;
+    }
+
     await this.ensureReady();
     if (this.isFallback || !this.db) {
       if (this.fallbackStore.settings[id] !== undefined) {
-        return this.fallbackStore.settings[id];
+        const val = this.fallbackStore.settings[id];
+        cache.set(id, { id, value: val });
+        return val;
       }
       try {
         const raw = localStorage.getItem(`global_${id}`) || localStorage.getItem(id);
-        return raw ? JSON.parse(raw) : null;
+        const val = raw ? JSON.parse(raw) : null;
+        if (val !== null) cache.set(id, { id, value: val });
+        return val;
       } catch (e) {
         return null;
       }
     }
-    
-    return new Promise((resolve, reject) => {
+
+    return new Promise((resolve) => {
       const transaction = this.db.transaction(['settings'], 'readonly');
       const store = transaction.objectStore('settings');
       const request = store.get(id);
-      
+
       request.onsuccess = () => {
-        let val = request.result ? request.result.value : null;
+        const rec = request.result || null;
+        let val = rec ? rec.value : null;
         if (val === null || val === undefined) {
+          // One-time legacy localStorage migration
           try {
             const raw = localStorage.getItem(`global_${id}`) || localStorage.getItem(id);
             if (raw) {
               val = JSON.parse(raw);
               if (val !== null && val !== undefined) {
                 this.saveGlobalSetting(id, val).catch(() => {});
+                try { localStorage.removeItem(`global_${id}`); } catch (_) {}
               }
             }
           } catch (e) {}
         }
+        if (val !== null && val !== undefined) {
+          cache.set(id, { id, value: val });
+        }
         resolve(val);
       };
-      request.onerror = (event) => {
+      request.onerror = () => {
         try {
           const raw = localStorage.getItem(`global_${id}`) || localStorage.getItem(id);
           resolve(raw ? JSON.parse(raw) : null);
@@ -533,7 +916,7 @@ export class SketchStorage {
       let sectors = 0;
       let chunks = 0;
       const prefix = `p_${pid}_s_`;
-      
+
       for (const key in this.fallbackStore.sectors) {
         if (key.startsWith(prefix)) {
           sectors++;
@@ -546,17 +929,17 @@ export class SketchStorage {
       }
       return { size, sectors, chunks };
     }
-    
+
     return new Promise((resolve, reject) => {
       let size = 0;
       let sectors = 0;
       let chunks = 0;
-      
+
       const transaction = this.db.transaction(['sectors'], 'readonly');
       const store = transaction.objectStore('sectors');
       const range = IDBKeyRange.bound(`p_${pid}_s_`, `p_${pid}_s_\uffff`);
       const request = store.openCursor(range);
-      
+
       request.onsuccess = (event) => {
         const cursor = event.target.result;
         if (cursor) {
@@ -571,16 +954,37 @@ export class SketchStorage {
           resolve({ size, sectors, chunks });
         }
       };
-      
+
       request.onerror = (event) => reject(event.target?.error || new Error('Get storage stats failed'));
       transaction.onabort = (event) => reject(event.target?.error || new Error('Get storage stats aborted'));
     });
   }
 
   async deleteProjectStoredData(targetProjectId) {
+    if (!targetProjectId) return;
+    await this.flushPendingWrites().catch(() => {});
     await this.ensureReady();
+
+    // Evict cached entries belonging to deleted project
+    const settingPrefix = `p_${targetProjectId}_s_`;
+    const toolPrefix = `${targetProjectId}:`;
+    for (const k of this._caches.settings.keys()) {
+      if (k.startsWith(settingPrefix)) this._caches.settings.delete(k);
+    }
+    for (const k of this._caches.toolSettings.keys()) {
+      if (k.startsWith(toolPrefix)) this._caches.toolSettings.delete(k);
+    }
+    this._caches.palette.delete(`p_${targetProjectId}`);
+    this._caches.projectThumbs.delete(targetProjectId);
+    this._caches.uiState.delete(`v_${targetProjectId}`);
+
+    // Clean any legacy localStorage remnants for this project
+    try {
+      localStorage.removeItem(`v_${targetProjectId}_zoom`);
+      localStorage.removeItem(`v_${targetProjectId}_pan`);
+    } catch (_) {}
+
     if (this.isFallback || !this.db) {
-      // 1. Delete matching sectors from fallback model
       const sectorPrefix = `p_${targetProjectId}_s_`;
       for (const k in this.fallbackStore.sectors) {
         if (k.startsWith(sectorPrefix)) {
@@ -588,15 +992,12 @@ export class SketchStorage {
           try { localStorage.removeItem(k); } catch (e) {}
         }
       }
-      // 2. Delete matching settings from fallback model
-      const settingPrefix = `p_${targetProjectId}_s_`;
       for (const k in this.fallbackStore.settings) {
         if (k.startsWith(settingPrefix)) {
           delete this.fallbackStore.settings[k];
           try { localStorage.removeItem(k); } catch (e) {}
         }
       }
-      // 3. Delete matching legacy chunks from fallback model
       const chunkPrefix = `p_${targetProjectId}_c_`;
       for (const k in this.fallbackStore.chunks) {
         if (k.startsWith(chunkPrefix)) {
@@ -604,16 +1005,18 @@ export class SketchStorage {
           try { localStorage.removeItem(k); } catch (e) {}
         }
       }
+      for (const k in this.fallbackStore.toolSettings) {
+        if (k.startsWith(toolPrefix)) delete this.fallbackStore.toolSettings[k];
+      }
+      delete this.fallbackStore.palette[`p_${targetProjectId}`];
+      delete this.fallbackStore.projectThumbs[targetProjectId];
+      delete this.fallbackStore.uiState[`v_${targetProjectId}`];
       return;
     }
 
-    if (!this.db) return;
-
     return new Promise((resolve, reject) => {
-      const transaction = this.db.transaction(['sectors', 'settings', 'chunks'], 'readwrite');
-      const sectorsStore = transaction.objectStore('sectors');
-      const settingsStore = transaction.objectStore('settings');
-      const chunksStore = transaction.objectStore('chunks');
+      const txStores = ['sectors', 'settings', 'chunks', 'toolSettings', 'palette', 'projectThumbs', 'uiState'];
+      const transaction = this.db.transaction(txStores, 'readwrite');
 
       const deletePrefixFromStore = (store, prefix) => {
         const range = IDBKeyRange.bound(prefix, prefix + '\uffff');
@@ -627,9 +1030,13 @@ export class SketchStorage {
         };
       };
 
-      deletePrefixFromStore(sectorsStore, `p_${targetProjectId}_s_`);
-      deletePrefixFromStore(settingsStore, `p_${targetProjectId}_s_`);
-      deletePrefixFromStore(chunksStore, `p_${targetProjectId}_c_`);
+      deletePrefixFromStore(transaction.objectStore('sectors'), `p_${targetProjectId}_s_`);
+      deletePrefixFromStore(transaction.objectStore('settings'), `p_${targetProjectId}_s_`);
+      deletePrefixFromStore(transaction.objectStore('chunks'), `p_${targetProjectId}_c_`);
+      deletePrefixFromStore(transaction.objectStore('toolSettings'), `${targetProjectId}:`);
+      transaction.objectStore('palette').delete(`p_${targetProjectId}`);
+      transaction.objectStore('projectThumbs').delete(targetProjectId);
+      transaction.objectStore('uiState').delete(`v_${targetProjectId}`);
 
       transaction.oncomplete = () => {
         console.log(`[STORAGE] Completed storage purge for project ID: ${targetProjectId}`);
@@ -641,19 +1048,32 @@ export class SketchStorage {
   }
 
   async clearDatabase() {
+    if (this._flushTimer) {
+      clearTimeout(this._flushTimer);
+      this._flushTimer = null;
+    }
+    this._pendingWrites.clear();
+    for (const k in this._caches) {
+      this._caches[k].clear();
+    }
+
     await this.ensureReady();
     if (this.isFallback || !this.db) {
       this.fallbackStore = {
         chunks: {},
         settings: {},
-        sectors: {}
+        sectors: {},
+        toolSettings: {},
+        tips: {},
+        palette: {},
+        projectThumbs: {},
+        uiState: {}
       };
-      // Attempt to clear corresponding localStorage keys
       try {
         const keysToRemove = [];
         for (let i = 0; i < localStorage.length; i++) {
           const key = localStorage.key(i);
-          if (key && (key.startsWith(`p_${this.projectId}_`) || key.startsWith(`brushTips_`))) {
+          if (key && (key.startsWith(`p_${this.projectId}_`) || key.startsWith(`brushTips`))) {
             keysToRemove.push(key);
           }
         }
@@ -663,13 +1083,13 @@ export class SketchStorage {
       } catch (e) {}
       return;
     }
-    
+
     return new Promise((resolve, reject) => {
-      const transaction = this.db.transaction(['chunks', 'settings', 'sectors'], 'readwrite');
-      transaction.objectStore('chunks').clear();
-      transaction.objectStore('settings').clear();
-      transaction.objectStore('sectors').clear();
-      
+      const transaction = this.db.transaction(ALL_STORES, 'readwrite');
+      for (let i = 0; i < ALL_STORES.length; i++) {
+        transaction.objectStore(ALL_STORES[i]).clear();
+      }
+
       transaction.oncomplete = () => resolve();
       transaction.onerror = (event) => reject(event.target?.error || new Error('Clear database failed'));
       transaction.onabort = (event) => reject(event.target?.error || new Error('Clear database aborted'));

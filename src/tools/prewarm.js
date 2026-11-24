@@ -45,6 +45,12 @@ import {
   endSumiPaintStroke,
   cancelSumiStroke
 } from './sumiPaint.js';
+import {
+  warmEraserSolver,
+  startEraserStroke,
+  endEraserStroke,
+  cancelEraserStroke
+} from './eraser.js';
 import { wasmCore } from '../wasm/wasmBridge.js';
 
 const SCRATCH_SIZE = 128;
@@ -122,6 +128,8 @@ function createIsolatedGpuProxy(realGr) {
     set airSolver(v) { realGr.airSolver = v; },
     get sumiSolver() { return realGr.sumiSolver; },
     set sumiSolver(v) { realGr.sumiSolver = v; },
+    get eraserSolver() { return realGr.eraserSolver; },
+    set eraserSolver(v) { realGr.eraserSolver = v; },
     _compileShader(type, src) {
       return realGr._compileShader(type, src);
     },
@@ -286,6 +294,7 @@ function cleanupScratchResources(realEngine, scratchEngine, scratchChunk) {
   try { cancelFluidAfterEffect(scratchEngine); } catch (_) {}
   try { cancelAirParticles(scratchEngine); } catch (_) {}
   try { cancelSumiStroke(scratchEngine); } catch (_) {}
+  try { cancelEraserStroke(scratchEngine); } catch (_) {}
   try { cancelLiquifyStroke(scratchEngine); } catch (_) {}
   try { invalidateLiquifySession(realEngine); } catch (_) {}
   try {
@@ -455,7 +464,10 @@ export async function runPhantomToolsPrewarm(app, { onProgress, shouldAbort } = 
         scratchEngine.currentStrokeDirtyChunks.clear();
         scratchEngine.spacingAccumulator = 0;
         seedScratchPaint(scratchChunk, 1);
+        warmEraserSolver(realEngine);
+        startEraserStroke(scratchEngine);
         _paintOnChunks.call(scratchEngine, p0, p1, 24, 0.85, scratchEngine.brush.color);
+        endEraserStroke(scratchEngine);
       }
     },
     {

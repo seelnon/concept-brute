@@ -93,6 +93,10 @@ uniform float u_surfaceBiomeMix;
 uniform float u_surfaceAllowRotate;
 uniform float u_surfaceScaleSpread;
 
+uniform sampler2D u_ccLut;
+uniform int u_ccActive;
+uniform float u_ccLutSize;
+
 out vec4 outColor;
 
 ${GLSL_SURFACE_BIOME_SAMPLER}
@@ -146,6 +150,23 @@ void main() {
     } else {
         vec2 uv = (u_excludeActive == 2) ? clamp(v_uv, u_uvClamp.xy, u_uvClamp.zw) : v_uv;
         vec4 texColor = texture(u_tex, uv);
+        if (u_ccActive == 1 && texColor.a > 0.001) {
+            vec3 straight = clamp(texColor.rgb / texColor.a, 0.0, 1.0);
+            float lutN = max(2.0, u_ccLutSize);
+            float lutMax = lutN - 1.0;
+            float bScaled = straight.b * lutMax;
+            float b0 = floor(bScaled);
+            float b1 = min(lutMax, b0 + 1.0);
+            float bFrac = bScaled - b0;
+
+            float uInner = (straight.r * lutMax + 0.5) / lutN;
+            float vCoord = (straight.g * lutMax + 0.5) / lutN;
+
+            vec3 c0 = texture(u_ccLut, vec2((b0 + uInner) / lutN, vCoord)).rgb;
+            vec3 c1 = texture(u_ccLut, vec2((b1 + uInner) / lutN, vCoord)).rgb;
+            vec3 mapped = mix(c0, c1, bFrac);
+            texColor.rgb = mapped * texColor.a;
+        }
         outColor = texColor * u_opacity;
     }
 }
@@ -382,6 +403,11 @@ export class GPURenderer {
     this._renderPending = false;
     this._contextLost = false;
     this.selectionTexture = null;
+    this.ccLutTex = null;
+    this.ccPreviewEnabled = false;
+    this.ccPreviewPaused = false;
+    this.ccPreviewLayer = -1;
+    this.ccLutSize = 21;
 
     this.canvas.addEventListener('webglcontextlost', (e) => {
       e.preventDefault();
@@ -406,6 +432,10 @@ export class GPURenderer {
       if (this.sumiSolver) {
         this.sumiSolver.active = false;
         this.sumiSolver.ready = false;
+      }
+      if (this.eraserSolver) {
+        this.eraserSolver.active = false;
+        this.eraserSolver.ready = false;
       }
       this.sumiOverlay = null;
       this.canvas.style.display = 'none';
@@ -436,6 +466,11 @@ export class GPURenderer {
     this.supported = true;
 
     this.selectionTexture = null;
+    this.ccLutTex = null;
+    this.ccPreviewEnabled = false;
+    this.ccPreviewPaused = false;
+    this.ccPreviewLayer = -1;
+    this.ccLutSize = 21;
     this.airSolver = null;
     this.airOverlay = null;
     this.fluidSolver = null;
@@ -540,7 +575,10 @@ export class GPURenderer {
       u_surfaceBgOpacity: gl.getUniformLocation(this.quadProgram, 'u_surfaceBgOpacity'),
       u_surfaceBiomeMix: gl.getUniformLocation(this.quadProgram, 'u_surfaceBiomeMix'),
       u_surfaceAllowRotate: gl.getUniformLocation(this.quadProgram, 'u_surfaceAllowRotate'),
-      u_surfaceScaleSpread: gl.getUniformLocation(this.quadProgram, 'u_surfaceScaleSpread')
+      u_surfaceScaleSpread: gl.getUniformLocation(this.quadProgram, 'u_surfaceScaleSpread'),
+      u_ccLut: gl.getUniformLocation(this.quadProgram, 'u_ccLut'),
+      u_ccActive: gl.getUniformLocation(this.quadProgram, 'u_ccActive'),
+      u_ccLutSize: gl.getUniformLocation(this.quadProgram, 'u_ccLutSize')
     };
 
     // Cache uniform locations for gridProgram
@@ -688,6 +726,34 @@ export class GPURenderer {
     }
   }
 
+  flushProjectResources(prevProjId = null) {
+    if (!this.gl) return;
+    this.engine.chunks.forEach(chunk => this.disposeChunkTextures(chunk));
+    this.engine.referenceImages.forEach(ref => {
+      if (ref.gpuTexture) {
+        this.gl.deleteTexture(ref.gpuTexture);
+        ref.gpuTexture = null;
+      }
+    });
+    if (this.selectionTexture) {
+      this.gl.deleteTexture(this.selectionTexture);
+      this.selectionTexture = null;
+    }
+    this.airOverlay = null;
+    this.fluidOverlay = null;
+    this.smudgeOverlay = null;
+    this.sumiOverlay = null;
+    if (this.airSolver?.resetProjectState) this.airSolver.resetProjectState(prevProjId);
+    if (this.fluidSolver?.resetProjectState) this.fluidSolver.resetProjectState();
+    if (this.smudgeSolver?.resetProjectState) this.smudgeSolver.resetProjectState();
+    if (this.liquifySolver?.resetProjectState) this.liquifySolver.resetProjectState();
+    if (this.sumiSolver?.resetProjectState) this.sumiSolver.resetProjectState(prevProjId);
+    if (this.eraserSolver?.resetProjectState) this.eraserSolver.resetProjectState();
+    if (this.engine && this.engine.surfaceManager) {
+      this.engine.surfaceManager.dispose();
+    }
+  }
+
   disposeAllTextures() {
     if (!this.gl) return;
     this.engine.chunks.forEach(chunk => this.disposeChunkTextures(chunk));
@@ -700,6 +766,10 @@ export class GPURenderer {
     if (this.selectionTexture) {
       this.gl.deleteTexture(this.selectionTexture);
       this.selectionTexture = null;
+    }
+    if (this.ccLutTex) {
+      this.gl.deleteTexture(this.ccLutTex);
+      this.ccLutTex = null;
     }
     if (this.airSolver) {
       this.airSolver.dispose();
@@ -725,9 +795,57 @@ export class GPURenderer {
       this.sumiSolver = null;
     }
     this.sumiOverlay = null;
+    if (this.eraserSolver) {
+      this.eraserSolver.dispose();
+      this.eraserSolver = null;
+    }
     if (this.engine && this.engine.surfaceManager) {
       this.engine.surfaceManager.dispose();
     }
+  }
+
+  setColorCorrectionPreview(layer, rgbaUint8StripLut, lutSize = 21) {
+    if (!this.supported || this._contextLost || !this.gl || this.gl.isContextLost()) return false;
+    const gl = this.gl;
+    const stripW = lutSize * lutSize;
+    const stripH = lutSize;
+    gl.activeTexture(gl.TEXTURE1);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    if (!this.ccLutTex || this.ccLutSize !== lutSize) {
+      if (this.ccLutTex) gl.deleteTexture(this.ccLutTex);
+      this.ccLutTex = gl.createTexture();
+      this.ccLutSize = lutSize;
+      gl.bindTexture(gl.TEXTURE_2D, this.ccLutTex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, stripW, stripH, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgbaUint8StripLut);
+    } else {
+      gl.bindTexture(gl.TEXTURE_2D, this.ccLutTex);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, stripW, stripH, gl.RGBA, gl.UNSIGNED_BYTE, rgbaUint8StripLut);
+    }
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+    gl.activeTexture(gl.TEXTURE0);
+    this.ccPreviewLayer = layer;
+    this.ccPreviewEnabled = true;
+    this.ccPreviewPaused = false;
+    this.requestRender();
+    return true;
+  }
+
+  setColorCorrectionCompare(showOriginal) {
+    this.ccPreviewPaused = !!showOriginal;
+    this.requestRender();
+  }
+
+  clearColorCorrectionPreview() {
+    this.ccPreviewLayer = -1;
+    this.ccPreviewEnabled = false;
+    this.ccPreviewPaused = false;
+    this.requestRender();
   }
 
   requestRender() {
@@ -758,6 +876,7 @@ export class GPURenderer {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.disable(gl.SCISSOR_TEST);
     gl.enable(gl.BLEND);
+    gl.blendEquation(gl.FUNC_ADD);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
     gl.activeTexture(gl.TEXTURE0);
@@ -800,6 +919,9 @@ export class GPURenderer {
     gl.uniform4f(this.quadLocs.u_uvClamp, 0, 0, 1, 1);
     gl.uniform2f(this.quadLocs.u_boardHalfSize, engine.staticWidth * 0.5, engine.staticHeight * 0.5);
     gl.uniform1i(this.quadLocs.u_excludeActive, 0);
+    gl.uniform1i(this.quadLocs.u_ccActive, 0);
+    gl.uniform1i(this.quadLocs.u_ccLut, 1);
+    gl.uniform1f(this.quadLocs.u_ccLutSize, this.ccLutSize || 21);
 
     // Compute visible world bounds early (for frustum culling + infinite tiled surface quad)
     const c0 = engine._screenToWorld(0, 0);
@@ -1012,6 +1134,14 @@ export class GPURenderer {
         gl.uniform1i(this.quadLocs.u_excludeActive, 0);
       }
 
+      const useCC = !!(this.ccPreviewEnabled && !this.ccPreviewPaused && this.ccLutTex && layer === this.ccPreviewLayer);
+      if (useCC) {
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, this.ccLutTex);
+        gl.uniform1i(this.quadLocs.u_ccActive, 1);
+        gl.activeTexture(gl.TEXTURE0);
+      }
+
       for (let i = 0; i < visibleChunks.length; i++) {
         const { chunk, wx, wy, cw, ch } = visibleChunks[i];
         if (!chunk.gpuTextures) {
@@ -1037,6 +1167,10 @@ export class GPURenderer {
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, chunk.gpuTextures[layer]);
         gl.drawArrays(gl.TRIANGLES, 0, 6);
+      }
+
+      if (useCC) {
+        gl.uniform1i(this.quadLocs.u_ccActive, 0);
       }
 
       if (activeOverlay) {

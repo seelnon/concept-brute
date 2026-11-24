@@ -1510,7 +1510,7 @@
     </div>
 
     <!-- REFERENCE IMAGE UTILITIES MODAL -->
-    <div id="modal-ref-editor" class="ui-panel hidden" style="width: 85vw; max-width: 900px; height: 86vh; max-height: 640px; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 10005; box-shadow: 12px 12px 0 0 #000; overflow: hidden; display: flex; flex-direction: column;">
+    <div id="modal-ref-editor" class="ui-panel hidden" style="width: 88vw; max-width: 960px; height: 86vh; max-height: 670px; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 10005; box-shadow: 12px 12px 0 0 #000; overflow: hidden; display: flex; flex-direction: column;">
         <div id="handle-ref-editor" class="panel-handle" style="display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: black; color: white;">
             <span class="panel-title" style="font-weight: 950; letter-spacing: 1px; font-size: 11px;">EDIT REFERENCE IMAGE</span>
             <button id="btn-close-ref-editor" class="mini-btn" style="background: white; border: 1px solid black; font-weight: 950; font-size: 10px; padding: 2px 6px; cursor: pointer;">X</button>
@@ -1527,7 +1527,7 @@
             </div>
 
             <!-- Right half: Sub-controls and tabs -->
-            <div id="ref-editor-controls-col" style="width: 320px; border-left: 2px solid black; background: white; display: flex; flex-direction: column; overflow-y: auto; padding: 12px; box-sizing: border-box;">
+            <div id="ref-editor-controls-col" style="width: 356px; border-left: 2px solid black; background: white; display: flex; flex-direction: column; overflow-y: auto; padding: 12px; box-sizing: border-box;">
                 
                 <!-- Tabs Selection -->
                 <div class="ref-editor-tabs" style="display: flex; border: 2px solid black; margin-bottom: 12px; background: black; gap: 1px;">
@@ -1598,65 +1598,96 @@
 
                 <!-- 3. COLOR VIEW -->
                 <div id="tab-content-color" class="ref-tab-view hidden">
-                    <div style="font-size: 9px; font-weight: 900; text-transform: uppercase; margin-bottom: 6px;">Color Tone & Adjust</div>
-                    <div style="font-size: 8px; line-height: 1.3; opacity: 0.7; margin-bottom: 8px;">
-                        Channels levels & tone lookup. Shift colors on R, G, B, or RGB Master.
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                        <div style="font-size: 9px; font-weight: 900; text-transform: uppercase;">Color Tone &amp; Adjust</div>
                     </div>
-                    <div class="settings-group" style="margin-bottom: 10px;">
-                        <label class="settings-label">ACTIVE CHANNEL</label>
-                        <select id="color-channel-select" class="full-width" style="border: 2px solid #000; font-family: inherit; font-size: 10px; padding: 4px; background: white;">
-                            <option value="all">ALL (RGB MASTER)</option>
-                            <option value="r">RED CHANNEL</option>
-                            <option value="g">GREEN CHANNEL</option>
-                            <option value="b">BLUE CHANNEL</option>
-                        </select>
+                    <!-- Color Mode Toggle Switch: Classic RGB Levels <-> Perceptual Painterly Curves -->
+                    <button id="btn-ref-col-mode-toggle" type="button" class="cc-mode-switch" title="Switch between RGB Levels and Painterly Color Curves">
+                        <span id="ref-col-mode-lbl-levels" class="cc-mode-switch-half is-active">LEVELS (RGB)</span>
+                        <span id="ref-col-mode-lbl-painterly" class="cc-mode-switch-half">CURVES / PAINTERLY</span>
+                    </button>
+
+                    <!-- MODE A: LEVELS -->
+                    <div id="ref-color-levels-pane">
+                        <div style="font-size: 8px; line-height: 1.3; opacity: 0.7; margin-bottom: 8px;">
+                            Channels levels &amp; tone lookup. Shift colors on R, G, B, or RGB Master.
+                        </div>
+                        <div class="settings-group" style="margin-bottom: 10px;">
+                            <label class="settings-label">ACTIVE CHANNEL</label>
+                            <select id="color-channel-select" class="full-width" style="border: 2px solid #000; font-family: inherit; font-size: 10px; padding: 4px; background: white;">
+                                <option value="all">ALL (RGB MASTER)</option>
+                                <option value="r">RED CHANNEL</option>
+                                <option value="g">GREEN CHANNEL</option>
+                                <option value="b">BLUE CHANNEL</option>
+                            </select>
+                        </div>
+
+                        <div class="settings-row" style="margin: 0 0 12px 0; display: flex; justify-content: space-between; align-items: center;">
+                            <label class="settings-label">BLACK & WHITE MODE</label>
+                            <div class="checkbox-wrapper">
+                               <input type="checkbox" id="color-bw-mode" class="settings-input-check">
+                               <span class="checkbox-custom"></span>
+                            </div>
+                        </div>
+                        
+                        <!-- Mini Channel Sliders -->
+                        <div class="settings-group">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <label class="settings-label" style="font-size: 8px;">INPUT BLACK</label>
+                                <span id="val-col-black" style="font-size: 8px; font-weight: 900;">0</span>
+                            </div>
+                            <input type="range" id="slider-col-black" min="0" max="255" value="0" class="minimal-range" style="width:100%;">
+                        </div>
+                        <div class="settings-group" style="margin-top: 8px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <label class="settings-label" style="font-size: 8px;">GAMMA (MIDTONES)</label>
+                                <span id="val-col-gamma" style="font-size: 8px; font-weight: 900;">1.00</span>
+                            </div>
+                            <input type="range" id="slider-col-gamma" min="5" max="500" value="100" class="minimal-range" style="width:100%;">
+                        </div>
+                        <div class="settings-group" style="margin-top: 8px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <label class="settings-label" style="font-size: 8px;">INPUT WHITE</label>
+                                <span id="val-col-white" style="font-size: 8px; font-weight: 900;">255</span>
+                            </div>
+                            <input type="range" id="slider-col-white" min="0" max="255" value="255" class="minimal-range" style="width:100%;">
+                        </div>
+                        <div class="settings-group" style="margin-top: 8px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <label class="settings-label" style="font-size: 8px;">OUTPUT BLACK</label>
+                                <span id="val-col-outblack" style="font-size: 8px; font-weight: 900;">0</span>
+                            </div>
+                            <input type="range" id="slider-col-outblack" min="0" max="255" value="0" class="minimal-range" style="width:100%;">
+                        </div>
+                        <div class="settings-group" style="margin-top: 8px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <label class="settings-label" style="font-size: 8px;">OUTPUT WHITE</label>
+                                <span id="val-col-outwhite" style="font-size: 8px; font-weight: 900;">255</span>
+                            </div>
+                            <input type="range" id="slider-col-outwhite" min="0" max="255" value="255" class="minimal-range" style="width:100%;">
+                        </div>
+                        <button id="btn-color-reset" class="brutal-btn full-width" style="margin-top: 10px; padding: 4px; font-size: 9px;">RESET CHANNEL</button>
                     </div>
 
-                    <div class="settings-row" style="margin: 0 0 12px 0; display: flex; justify-content: space-between; align-items: center;">
-                        <label class="settings-label">BLACK & WHITE MODE</label>
-                        <div class="checkbox-wrapper">
-                           <input type="checkbox" id="color-bw-mode" class="settings-input-check">
-                           <span class="checkbox-custom"></span>
+                    <!-- MODE B: PERCEPTUAL CURVES / SLIDERS TOGGLE (ON RIGHT WHILE IMAGE IS ON LEFT) -->
+                    <div id="ref-color-curves-pane" class="hidden" style="display: flex; flex-direction: column; gap: 7px;">
+                        <button id="btn-ref-cc-view-toggle" type="button" class="brutal-btn cc-view-toggle-btn">SLIDERS ▸</button>
+                        <div id="ref-cc-curves-subpane" style="display: flex; flex-direction: column; gap: 7px;">
+                            <div id="ref-cc-space-tabs" class="cc-space-tabs"></div>
+                            <div id="ref-cc-channel-pills" class="cc-channel-pills"></div>
+                            <canvas id="ref-cc-curve-canvas" class="cc-curve-canvas" width="320" height="196" style="height: 196px;"></canvas>
+                            <div id="ref-cc-curve-readout" class="cc-readout" style="color: #444;">CLICK ADD · DRAG MOVE · DBL-CLICK/RIGHT DEL</div>
+                            <div style="display: flex; gap: 4px;">
+                                <button id="btn-ref-cc-midpoint" type="button" class="brutal-btn" style="flex: 1; padding: 4px; font-size: 8px;">+ MIDPOINT</button>
+                                <button id="btn-ref-cc-reset-curve" type="button" class="brutal-btn" style="flex: 1; padding: 4px; font-size: 8px;">RESET CURVE</button>
+                            </div>
+                            <div id="ref-cc-presets" class="cc-preset-grid"></div>
                         </div>
-                    </div>
-                    
-                    <!-- Mini Channel Sliders -->
-                    <div class="settings-group">
-                        <div style="display: flex; justify-content: space-between; align-items: center;">
-                            <label class="settings-label" style="font-size: 8px;">INPUT BLACK</label>
-                            <span id="val-col-black" style="font-size: 8px; font-weight: 900;">0</span>
+                        <div id="ref-cc-sliders-subpane" class="hidden" style="display: flex; flex-direction: column; gap: 4px;">
+                            <div id="ref-cc-sliders"></div>
                         </div>
-                        <input type="range" id="slider-col-black" min="0" max="255" value="0" class="minimal-range" style="width:100%;">
+                        <button id="btn-ref-cc-reset-all" type="button" class="brutal-btn full-width" style="padding: 4px; font-size: 8px;">RESET ALL PAINTERLY</button>
                     </div>
-                    <div class="settings-group" style="margin-top: 8px;">
-                        <div style="display: flex; justify-content: space-between; align-items: center;">
-                            <label class="settings-label" style="font-size: 8px;">GAMMA (MIDTONES)</label>
-                            <span id="val-col-gamma" style="font-size: 8px; font-weight: 900;">1.00</span>
-                        </div>
-                        <input type="range" id="slider-col-gamma" min="5" max="500" value="100" class="minimal-range" style="width:100%;">
-                    </div>
-                    <div class="settings-group" style="margin-top: 8px;">
-                        <div style="display: flex; justify-content: space-between; align-items: center;">
-                            <label class="settings-label" style="font-size: 8px;">INPUT WHITE</label>
-                            <span id="val-col-white" style="font-size: 8px; font-weight: 900;">255</span>
-                        </div>
-                        <input type="range" id="slider-col-white" min="0" max="255" value="255" class="minimal-range" style="width:100%;">
-                    </div>
-                    <div class="settings-group" style="margin-top: 8px;">
-                        <div style="display: flex; justify-content: space-between; align-items: center;">
-                            <label class="settings-label" style="font-size: 8px;">OUTPUT BLACK</label>
-                            <span id="val-col-outblack" style="font-size: 8px; font-weight: 900;">0</span>
-                        </div>
-                        <input type="range" id="slider-col-outblack" min="0" max="255" value="0" class="minimal-range" style="width:100%;">
-                    </div>
-                    <div class="settings-group" style="margin-top: 8px;">
-                        <div style="display: flex; justify-content: space-between; align-items: center;">
-                            <label class="settings-label" style="font-size: 8px;">OUTPUT WHITE</label>
-                            <span id="val-col-outwhite" style="font-size: 8px; font-weight: 900;">255</span>
-                        </div>
-                        <input type="range" id="slider-col-outwhite" min="0" max="255" value="255" class="minimal-range" style="width:100%;">
-                    </div>
-                    <button id="btn-color-reset" class="brutal-btn full-width" style="margin-top: 10px; padding: 4px; font-size: 9px;">RESET CHANNEL</button>
                 </div>
 
                 <!-- Bottom Spacer and Actions -->
@@ -1893,6 +1924,50 @@
                     </div>
 
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- LAYER COLOR CORRECTION MODAL (COMPACT SINGLE-COLUMN: CURVES <-> SLIDERS) -->
+    <div id="modal-layer-color" class="ui-panel hidden" style="width: 344px; max-width: 92vw; height: auto; max-height: 85vh; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 10007; box-shadow: 10px 10px 0 0 #000; overflow: hidden; display: flex; flex-direction: column;">
+        <div id="handle-layer-color" class="panel-handle" style="display: flex; justify-content: space-between; align-items: center; padding: 5px 8px; background: black; color: white;">
+            <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+                <span id="layer-color-title" class="panel-title" style="font-weight: 950; letter-spacing: 0.7px; font-size: 10px; white-space: nowrap;">COLOR · PAINT 2</span>
+                <span id="layer-color-empty-notice" class="hidden" style="font-size: 7.5px; font-weight: 900; background: #facc15; color: #000; padding: 1px 4px; border: 1px solid #fff;">EMPTY</span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 4px; flex-shrink: 0;">
+                <button id="btn-layer-color-compare" type="button" class="mini-btn" style="background: #222; color: #fff; border: 1px solid #666; font-weight: 900; font-size: 8px; padding: 2px 5px; cursor: pointer;" title="Hold to view original layer before adjustments">HOLD</button>
+                <button id="btn-close-layer-color" type="button" class="mini-btn" style="background: white; color: black; border: 1px solid black; font-weight: 950; font-size: 9.5px; padding: 2px 6px; cursor: pointer;">X</button>
+            </div>
+        </div>
+        <div class="panel-content" style="display: flex; flex-direction: column; gap: 7px; padding: 9px; background: #161616; color: #fff; min-height: 0; overflow: hidden; box-sizing: border-box;">
+
+            <!-- TOP VIEW TOGGLE: CURVES <-> SLIDERS -->
+            <button id="btn-layer-cc-view-toggle" type="button" class="cc-view-toggle-btn">SLIDERS ▸</button>
+
+            <!-- VIEW A: PERCEPTUAL CURVES -->
+            <div id="layer-cc-curves-pane" style="display: flex; flex-direction: column; gap: 6px; min-height: 0; overflow-y: auto;">
+                <div id="layer-cc-space-tabs" class="cc-space-tabs"></div>
+                <div id="layer-cc-channel-pills" class="cc-channel-pills"></div>
+                <canvas id="layer-cc-curve-canvas" class="cc-curve-canvas" width="320" height="205" style="height: 205px; flex-shrink: 0;"></canvas>
+                <div id="layer-cc-curve-readout" class="cc-readout" style="color: #bbb;">CLICK ADD · DRAG MOVE · DBL-CLICK/RIGHT DEL</div>
+                <div style="display: flex; gap: 5px;">
+                    <button id="btn-layer-cc-midpoint" type="button" class="brutal-btn" style="flex: 1; padding: 4px; font-size: 8px; background: #262626; color: #fff; box-shadow: none;">+ MID</button>
+                    <button id="btn-layer-cc-reset-curve" type="button" class="brutal-btn" style="flex: 1; padding: 4px; font-size: 8px; background: #262626; color: #fff; box-shadow: none;">RESET CURVE</button>
+                </div>
+                <div id="layer-cc-presets" class="cc-preset-grid"></div>
+            </div>
+
+            <!-- VIEW B: PERCEPTUAL & HDR SLIDERS -->
+            <div id="layer-cc-sliders-pane" class="hidden" style="background: #0d0d0d; color: #f5f5f5; border: 2px solid #000; padding: 8px; overflow-y: auto; min-height: 0; max-height: 390px;">
+                <div id="layer-cc-sliders"></div>
+            </div>
+
+            <!-- COMPACT BOTTOM ACTIONS -->
+            <div style="display: flex; gap: 5px; border-top: 2px solid #000; padding-top: 7px; margin-top: 1px;">
+                <button id="btn-layer-cc-reset-all" type="button" class="brutal-btn" style="padding: 6px 8px; font-size: 8.5px; background: #262626; color: #fff; box-shadow: none;">RESET</button>
+                <button id="btn-layer-color-cancel" type="button" class="brutal-btn cc-action-dark-btn" style="flex: 1; padding: 6px 6px; font-size: 8.5px;">CANCEL</button>
+                <button id="btn-layer-color-apply" type="button" class="brutal-btn cc-action-dark-btn" style="flex: 1.4; padding: 6px 6px; font-size: 8.5px; font-weight: 900;">BAKE &amp; APPLY</button>
             </div>
         </div>
     </div>

@@ -2001,3 +2001,36 @@ export function clearAirParticles(engine = null) {
     engine.activeAirBrush = null;
   }
 }
+
+export function flushAirCaches(engine = null, prevProjId = null) {
+  clearAirParticles(engine);
+  if (prevProjId) {
+    clearAirWetCacheForProject(engine, prevProjId);
+  } else {
+    _paperWetTiles.clear();
+  }
+  if (_tileReadCanvas) { _tileReadCanvas.width = 0; _tileReadCanvas.height = 0; _tileReadCanvas = null; _tileReadCtx = null; }
+  if (_outCanvas) { _outCanvas.width = 0; _outCanvas.height = 0; _outCanvas = null; _outCtx = null; _outImageData = null; }
+  _scratchW = 0;
+  _scratchH = 0;
+  _patchPixels = new Uint8ClampedArray(0);
+  _patchWater = new Float32Array(0);
+  _patchVx = new Float32Array(0);
+  _patchVy = new Float32Array(0);
+  _patchDist = new Float32Array(0);
+  _patchCover = new Float32Array(0);
+  _outBufRGBA = new Uint8ClampedArray(0);
+  _outBufWater = new Float32Array(0);
+  _outBufVx = new Float32Array(0);
+  _outBufVy = new Float32Array(0);
+  _outBufDist = new Float32Array(0);
+  _outBufCover = new Float32Array(0);
+  _nsCap = 0;
+  _nsU = new Float32Array(0); _nsV = new Float32Array(0);
+  _nsU0 = new Float32Array(0); _nsV0 = new Float32Array(0);
+  _nsDiv = new Float32Array(0); _nsP = new Float32Array(0); _nsOmega = new Float32Array(0);
+  _nsW = new Float32Array(0); _nsW0 = new Float32Array(0);
+  _nsPR = new Float32Array(0); _nsPG = new Float32Array(0); _nsPB = new Float32Array(0); _nsA = new Float32Array(0);
+  _nsPR0 = new Float32Array(0); _nsPG0 = new Float32Array(0); _nsPB0 = new Float32Array(0); _nsA0 = new Float32Array(0);
+  _nsDist = new Float32Array(0); _nsCov = new Float32Array(0); _nsNewCov = new Float32Array(0);
+}

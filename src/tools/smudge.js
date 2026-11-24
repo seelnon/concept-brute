@@ -895,3 +895,23 @@ export function cancelSmudgeStroke(engine) {
   engine._useBruteSmudge = undefined;
 }
 
+export function flushSmudgeCaches(engine = null) {
+  cancelSmudgeStroke(engine);
+  if (engine) {
+    if (engine.smudgeCanvas) {
+      engine.smudgeCanvas.width = 0;
+      engine.smudgeCanvas.height = 0;
+      engine.smudgeCanvas = null;
+      engine.smudgeCtx = null;
+    }
+    engine.smudgeBuf = null;
+  }
+  if (_tileReadCanvas) { _tileReadCanvas.width = 0; _tileReadCanvas.height = 0; _tileReadCanvas = null; _tileReadCtx = null; }
+  if (_outCanvas) { _outCanvas.width = 0; _outCanvas.height = 0; _outCanvas = null; _outCtx = null; _outImageData = null; }
+  _scratchW = 0;
+  _scratchH = 0;
+  _patchOrig = new Uint8ClampedArray(0);
+  _patchSim = new Float32Array(0);
+  _patchCov = new Float32Array(0);
+}
+

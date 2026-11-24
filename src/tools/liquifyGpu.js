@@ -1837,6 +1837,24 @@ export class GpuLiquifySolver {
     }
   }
 
+  resetProjectState() {
+    this._discardPendingCommits();
+    this.cancel(null);
+    this._edgeImgDataMap.clear();
+    const gl = this.gl;
+    if (gl && !gl.isContextLost()) {
+      for (const res of [128, 256]) {
+        const pool = this.dispPools[res];
+        if (pool) {
+          while (pool.length > 4) this._delTexFbo(pool.pop());
+        }
+      }
+      while (this.origPool.length > 1) {
+        this._delTexFbo(this.origPool.pop());
+      }
+    }
+  }
+
   dispose() {
     this._discardPendingCommits();
     const gl = this.gl;
