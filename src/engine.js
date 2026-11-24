@@ -1168,21 +1168,22 @@ export class Engine {
     });
        
     window.addEventListener('keydown', (e) => {
+        const active = document.activeElement;
         if (
-            document.activeElement && 
-            (document.activeElement.tagName === 'INPUT' || 
-             document.activeElement.tagName === 'TEXTAREA' || 
-             document.activeElement.tagName === 'SELECT' || 
-             document.activeElement.isContentEditable)
+            active &&
+            (active.tagName === 'TEXTAREA' ||
+             active.tagName === 'SELECT' ||
+             active.isContentEditable ||
+             (active.tagName === 'INPUT' && !['range', 'checkbox', 'radio', 'button', 'color', 'file'].includes(active.type)))
         ) {
             return;
         }
         const key = e.key.toLowerCase();
-        
-        if (key === 'alt') {
+
+        if (key === 'alt' || key === ' ' || e.code === 'Space') {
             e.preventDefault();
         }
-        
+
         if (key === 'r') {
             if (e.repeat) return;
             const now = performance.now();
@@ -1206,12 +1207,13 @@ export class Engine {
         }
     });
     window.addEventListener('keyup', (e) => {
+        const active = document.activeElement;
         if (
-            document.activeElement && 
-            (document.activeElement.tagName === 'INPUT' || 
-             document.activeElement.tagName === 'TEXTAREA' || 
-             document.activeElement.tagName === 'SELECT' || 
-             document.activeElement.isContentEditable)
+            active &&
+            (active.tagName === 'TEXTAREA' ||
+             active.tagName === 'SELECT' ||
+             active.isContentEditable ||
+             (active.tagName === 'INPUT' && !['range', 'checkbox', 'radio', 'button', 'color', 'file'].includes(active.type)))
         ) {
             return;
         }
@@ -2798,7 +2800,9 @@ export class Engine {
         } else {
             br = '50%';
             bgColor = 'transparent';
-            border = this.brush.type === TOOLS.SUMI ? '1.5px dashed #111111' : '1.5px dashed #333333';
+            border = this.brush.type === TOOLS.SUMI
+                ? (sumiSettings.mode === 'eraser' ? '1.5px dashed #d74450' : (sumiSettings.mode === 'water' ? '1.5px dashed #2676d2' : '1.5px dashed #111111'))
+                : '1.5px dashed #333333';
         }
     } else if (this.brush.type === TOOLS.BRUSH || this.brush.type === TOOLS.FLUID) {
         if (this.brush.tip) {
@@ -4538,8 +4542,8 @@ export class Engine {
     return fitZoom.call(this);
   }
 
-  saveViewport() {
-    return saveViewport.call(this);
+  saveViewport(projectId = null, immediate = false) {
+    return saveViewport.call(this, projectId, immediate);
   }
 
   loadViewport(projectId = null) {

@@ -12,6 +12,14 @@ export class TipManager {
     this.editorCanvas = document.getElementById('tip-editor-canvas');
     this.editorCtx = this.editorCanvas.getContext('2d');
     this.isEraser = false;
+    this.shouldDeferSave = null;
+    this._saveTimer = null;
+    this._saveIdleId = null;
+    this._storageDirty = false;
+    this._lastSavedMainJson = null;
+    this._lastSavedGenJson = null;
+    this._lastSavedBankIdx = null;
+    this._lastSavedGenIdx = null;
     
     this.ready = this.init();
   }
@@ -57,6 +65,8 @@ export class TipManager {
     t.fluidHeightShield = saved.fluidHeightShield ?? 65;
     t.sumiUseHeightmap = saved.sumiUseHeightmap ?? false;
     t.sumiHeightSource = saved.sumiHeightSource || 'surface';
+    t.sumiMaxWater = saved.sumiMaxWater ?? 100;
+    t.sumiPressureGate = saved.sumiPressureGate ?? 20;
   }
 
   async init() {
@@ -99,6 +109,7 @@ export class TipManager {
                             c.width = 128; c.height = 128;
                             c.getContext('2d').drawImage(img, 0, 0);
                             this.tips[idx].canvas = c;
+                            this.tips[idx]._cachedSrc = tipData.src || null;
                             this._applyDefaultAdvancedSettings(this.tips[idx], tipData);
                         } catch (err) {
                             console.warn(`Failed loading saved main tip ${idx}:`, err);
@@ -137,6 +148,7 @@ export class TipManager {
                             c.width = 128; c.height = 128;
                             c.getContext('2d').drawImage(img, 0, 0);
                             this.generatedTips[idx].canvas = c;
+                            this.generatedTips[idx]._cachedSrc = savedGen[idx].src || null;
                             this._applyDefaultAdvancedSettings(this.generatedTips[idx], savedGen[idx]);
                         } catch (err) {
                             console.warn(`Failed loading saved gen tip ${idx}:`, err);
@@ -207,9 +219,10 @@ export class TipManager {
 
     combined._tipVersion = ((this.generatedTips[i].canvas && this.generatedTips[i].canvas._tipVersion) || 0) + 1;
     this.generatedTips[i].canvas = combined;
+    this.generatedTips[i]._cachedSrc = null;
     this._applyDefaultAdvancedSettings(this.generatedTips[i]);
 
-    if (save) this._saveToStorage();
+    if (save) this._scheduleSaveToStorage();
   }
 
   async _createDefaultTips() {
@@ -250,7 +263,7 @@ export class TipManager {
             canvas = this._createShape(type);
         }
 
-        const t = { canvas };
+        const t = { canvas, _cachedSrc: null };
         this._applyDefaultAdvancedSettings(t);
         this.tips.push(t);
         const backup = document.createElement('canvas');
@@ -430,7 +443,7 @@ export class TipManager {
                     this.editorCtx.restore();
                     this._updateActiveTip();
                 }
-                this._saveToStorage();
+                this._scheduleSaveToStorage();
             };
         }
     }
@@ -446,12 +459,15 @@ export class TipManager {
     this.selectedTipCanvas = c;
     if (this.activeBankIndex >= 0 && this.tips[this.activeBankIndex]) {
         this.tips[this.activeBankIndex].canvas = c;
+        this.tips[this.activeBankIndex]._cachedSrc = null;
     } else if (this.activeGeneratedIndex >= 0 && this.generatedTips[this.activeGeneratedIndex]) {
         this.generatedTips[this.activeGeneratedIndex].canvas = c;
+        this.generatedTips[this.activeGeneratedIndex]._cachedSrc = null;
     } else if (this.tips[0]) {
         this.activeBankIndex = 0;
         this.activeGeneratedIndex = -1;
         this.tips[0].canvas = c;
+        this.tips[0]._cachedSrc = null;
     }
     
     this.editorCtx.save();
@@ -462,7 +478,7 @@ export class TipManager {
     
     this._renderPalette(true);
     this._updateActiveTip();
-    this._saveToStorage();
+    this._scheduleSaveToStorage();
   }
 
   _getEditorPoint(e) {
@@ -603,13 +619,15 @@ export class TipManager {
     
     if (this.activeBankIndex >= 0 && this.tips[this.activeBankIndex]) {
         this.tips[this.activeBankIndex].canvas = c;
+        this.tips[this.activeBankIndex]._cachedSrc = null;
     } else if (this.activeGeneratedIndex >= 0 && this.generatedTips[this.activeGeneratedIndex]) {
         this.generatedTips[this.activeGeneratedIndex].canvas = c;
+        this.generatedTips[this.activeGeneratedIndex]._cachedSrc = null;
     }
     
     this._renderPalette(true);
     this._updateActiveTip();
-    this._saveToStorage();
+    this._scheduleSaveToStorage();
   }
 
   _renderPalette(forceRedraw = false) {
@@ -654,7 +672,7 @@ export class TipManager {
             this.editorCtx.restore();
             this._renderPalette(false);
             this._updateActiveTip();
-            this._saveToStorage();
+            this._scheduleSaveToStorage(400);
           };
           mainGrid.appendChild(slot);
         });
@@ -702,7 +720,7 @@ export class TipManager {
                 
                 this._renderPalette(false);
                 this._updateActiveTip();
-                this._saveToStorage();
+                this._scheduleSaveToStorage(400);
             };
             genGrid.appendChild(slot);
         });
@@ -722,7 +740,7 @@ export class TipManager {
         if (height !== undefined) target.paintHeight = height;
         if (oiliness !== undefined) target.oiliness = oiliness;
         if (airbrush !== undefined) target.airbrush = airbrush;
-        this._saveToStorage();
+        this._scheduleSaveToStorage();
     }
   }
 
@@ -739,7 +757,7 @@ export class TipManager {
     const target = this.getActiveTip();
     if (target) {
         target[key] = val;
-        this._saveToStorage();
+        this._scheduleSaveToStorage();
     }
   }
 
@@ -774,11 +792,67 @@ export class TipManager {
     }
   }
 
+  _scheduleSaveToStorage(delayMs = 950) {
+      if (!this.storage) return;
+      this._storageDirty = true;
+      if (this._saveTimer) {
+          clearTimeout(this._saveTimer);
+          this._saveTimer = null;
+      }
+      if (this._saveIdleId && typeof cancelIdleCallback === 'function') {
+          cancelIdleCallback(this._saveIdleId);
+          this._saveIdleId = null;
+      }
+      const attemptFlush = () => {
+          this._saveTimer = null;
+          if (this.shouldDeferSave && this.shouldDeferSave()) {
+              this._saveTimer = setTimeout(attemptFlush, 600);
+              return;
+          }
+          const runSave = () => {
+              this._saveIdleId = null;
+              if (this.shouldDeferSave && this.shouldDeferSave()) {
+                  this._saveTimer = setTimeout(attemptFlush, 600);
+                  return;
+              }
+              this._saveToStorage();
+          };
+          if (typeof requestIdleCallback === 'function') {
+              this._saveIdleId = requestIdleCallback(runSave, { timeout: 1500 });
+          } else {
+              runSave();
+          }
+      };
+      this._saveTimer = setTimeout(attemptFlush, delayMs);
+  }
+
+  flushPendingSave() {
+      if (!this._storageDirty) return;
+      this._saveToStorage();
+  }
+
+  _getTipSrc(t) {
+      if (!t || !t.canvas) return null;
+      if (!t._cachedSrc) {
+          t._cachedSrc = t.canvas.toDataURL();
+      }
+      return t._cachedSrc;
+  }
+
   _saveToStorage() {
+      if (this._saveTimer) {
+          clearTimeout(this._saveTimer);
+          this._saveTimer = null;
+      }
+      if (this._saveIdleId && typeof cancelIdleCallback === 'function') {
+          cancelIdleCallback(this._saveIdleId);
+          this._saveIdleId = null;
+      }
+      this._storageDirty = false;
       if (!this.storage) return;
       
       const mainData = this.tips.map(t => ({ 
-          src: t.canvas.toDataURL(), 
+          src: this._getTipSrc(t), 
           paintHeight: t.paintHeight || 0,
           oiliness: t.oiliness ?? 0.5,
           airbrush: t.airbrush || 0,
@@ -814,12 +888,18 @@ export class TipManager {
           speedWater: t.speedWater ?? 0,
           fluidHeightShield: t.fluidHeightShield ?? 65,
           sumiUseHeightmap: t.sumiUseHeightmap ?? false,
-          sumiHeightSource: t.sumiHeightSource || 'surface'
+          sumiHeightSource: t.sumiHeightSource || 'surface',
+          sumiMaxWater: t.sumiMaxWater ?? 100,
+          sumiPressureGate: t.sumiPressureGate ?? 20
       }));
-      localStorage.setItem('brushTips', JSON.stringify(mainData));
+      const mainJson = JSON.stringify(mainData);
+      if (mainJson !== this._lastSavedMainJson) {
+          this._lastSavedMainJson = mainJson;
+          try { localStorage.setItem('brushTips', mainJson); } catch (_) {}
+      }
 
       const genData = this.generatedTips.map(t => ({
-          src: t.canvas ? t.canvas.toDataURL() : null,
+          src: this._getTipSrc(t),
           paintHeight: t.paintHeight || 0,
           oiliness: t.oiliness ?? 0.5,
           airbrush: t.airbrush || 0,
@@ -855,12 +935,24 @@ export class TipManager {
           speedWater: t.speedWater ?? 0,
           fluidHeightShield: t.fluidHeightShield ?? 65,
           sumiUseHeightmap: t.sumiUseHeightmap ?? false,
-          sumiHeightSource: t.sumiHeightSource || 'surface'
+          sumiHeightSource: t.sumiHeightSource || 'surface',
+          sumiMaxWater: t.sumiMaxWater ?? 100,
+          sumiPressureGate: t.sumiPressureGate ?? 20
       }));
-      localStorage.setItem('brushTips_generated', JSON.stringify(genData));
+      const genJson = JSON.stringify(genData);
+      if (genJson !== this._lastSavedGenJson) {
+          this._lastSavedGenJson = genJson;
+          try { localStorage.setItem('brushTips_generated', genJson); } catch (_) {}
+      }
 
-      localStorage.setItem('activeTipBankIndex', this.activeBankIndex);
-      localStorage.setItem('activeTipGenIndex', this.activeGeneratedIndex);
+      if (this._lastSavedBankIdx !== this.activeBankIndex) {
+          this._lastSavedBankIdx = this.activeBankIndex;
+          try { localStorage.setItem('activeTipBankIndex', this.activeBankIndex); } catch (_) {}
+      }
+      if (this._lastSavedGenIdx !== this.activeGeneratedIndex) {
+          this._lastSavedGenIdx = this.activeGeneratedIndex;
+          try { localStorage.setItem('activeTipGenIndex', this.activeGeneratedIndex); } catch (_) {}
+      }
   }
 }
 

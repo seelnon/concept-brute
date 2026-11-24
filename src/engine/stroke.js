@@ -212,8 +212,14 @@ export function _startStroke(e) {
           ? 0.0
           : (this.brush.pressureSizeInfluence !== undefined ? this.brush.pressureSizeInfluence : (this.brush.pressureInfluence ?? 1.0));
       const opacInf = this.brush.pressureOpacityInfluence !== undefined ? this.brush.pressureOpacityInfluence : (this.brush.pressureInfluence ?? 1.0);
-      initSize *= ((1 - sizeInf) + pressure * sizeInf);
-      initOpacity *= ((1 - opacInf) + pressure * opacInf);
+      const sizeFactor = sizeInf <= 1.0
+          ? ((1 - sizeInf) + pressure * sizeInf)
+          : Math.pow(pressure, sizeInf);
+      const opacFactor = opacInf <= 1.0
+          ? ((1 - opacInf) + pressure * opacInf)
+          : Math.pow(pressure, opacInf);
+      initSize *= Math.max(0.02, sizeFactor);
+      initOpacity *= Math.max(0.02, opacFactor);
   }
   if (!Number.isFinite(initSize) || initSize < 0.1) initSize = Math.max(0.1, this.brush.size);
   initOpacity = Math.max(0.005, Math.min(1.0, initOpacity));
@@ -558,7 +564,7 @@ export function _moveStroke(e) {
   const usePenPressure = (e.pointerType === 'pen' && this.brush.pressureEnabled !== false);
   let pressure = 1.0;
   if (usePenPressure) {
-      pressure = (e.pressure !== undefined && e.pressure !== 0 && e.pressure !== 0.5) ? e.pressure : (this.lastPressure || 0.2);
+      pressure = (e.pressure !== undefined && e.pressure > 0) ? e.pressure : (this.lastPressure || 0.25);
       if (!Number.isFinite(pressure) || pressure <= 0) pressure = this.lastPressure || 0.5;
       pressure = Math.max(0.01, Math.min(1.0, pressure));
   }
@@ -611,7 +617,10 @@ export function _moveStroke(e) {
   
   if (!isLiquify && this.brush.pressureEnabled && e.pointerType === 'pen') {
       const inf = this.brush.pressureSizeInfluence !== undefined ? this.brush.pressureSizeInfluence : (this.brush.pressureInfluence ?? 1.0);
-      dynamicSize *= ((1 - inf) + this.lastPressure * inf);
+      const sizeFactor = inf <= 1.0
+          ? ((1 - inf) + this.lastPressure * inf)
+          : Math.pow(this.lastPressure, inf);
+      dynamicSize *= Math.max(0.02, sizeFactor);
   }
   // Final clamp to prevent crashed chunks
   dynamicSize = Math.max(0.1, Math.min(1500, dynamicSize));
@@ -628,7 +637,10 @@ export function _moveStroke(e) {
   
   if (this.brush.pressureEnabled && e.pointerType === 'pen') {
       const inf = this.brush.pressureOpacityInfluence !== undefined ? this.brush.pressureOpacityInfluence : (this.brush.pressureInfluence ?? 1.0);
-      opacMod *= ((1 - inf) + this.lastPressure * inf);
+      const opacFactor = inf <= 1.0
+          ? ((1 - inf) + this.lastPressure * inf)
+          : Math.pow(this.lastPressure, inf);
+      opacMod *= Math.max(0.02, opacFactor);
   }
   opacMod = Math.max(0.005, Math.min(1.0, opacMod));
   if (!Number.isFinite(opacMod)) opacMod = 1.0;

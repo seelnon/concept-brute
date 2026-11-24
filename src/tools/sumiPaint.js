@@ -11,10 +11,13 @@ import { GpuSumiSolver } from './sumiPaintGpu.js';
  */
 
 export const sumiSettings = {
-  mode: 'draw',          // 'draw' | 'water' | 'blow' | 'dry'
+  mode: 'draw',          // 'draw' | 'water' | 'blow' | 'dry' | 'eraser'
   ink: 78,               // 0..100
   inkAffection: 35,      // 0..100 (independent water affection for 'water' subtool)
-  water: 65,             // 0..100
+  water: 65,             // 0..100 ('draw' subtool water charge)
+  waterWash: 75,         // 0..100 ('water' subtool water charge)
+  eraserInk: 85,         // 0..100 ('eraser' subtool erase strength)
+  eraserWater: 25,       // 0..100 ('eraser' subtool water charge)
   bleed: 58,             // 0..100
   bristles: 28,          // 8..48
   stiffness: 60,         // 10..100
@@ -25,6 +28,7 @@ export const sumiSettings = {
   evaporation: 28,       // 0..100
   capillarity: 62,       // 0..100
   backrun: 68,           // 0..100
+  turbulence: 0,         // 0..100 (water curl turbulence)
   sootSnag: 55,          // 0..100
   depleteEnabled: true,
   splitEnabled: true,
@@ -33,9 +37,70 @@ export const sumiSettings = {
   followStroke: false,
   tipAngle: 0,           // -180..180 deg
   pressureFlow: 35,      // 0..100
+  pressureGate: 20,      // 0..100 (radial bristle contact taper under light pressure)
+  maxWater: 100,         // 15..200 (max water puddle cap on paper)
   useHeightmap: false,
   heightSource: 'surface' // 'surface' | 'layer'
 };
+
+function computeSpeedWaterProfile(baseWaterPct, speedWaterSlider, vFactor) {
+  const sw = Math.max(-100, Math.min(100, speedWaterSlider || 0));
+  const spd = Math.max(0, Math.min(1, vFactor || 0));
+  if (Math.abs(sw) < 0.01 || spd < 0.001) {
+    return {
+      effWaterPct: Math.max(0, Math.min(100, baseWaterPct)),
+      waterMult: 1.0,
+      addWaterNorm: 0.0,
+      dryAmt: 0.0
+    };
+  }
+  if (sw < 0) {
+    const negStrength = (-sw) / 100.0;
+    const dryAmt = Math.max(0, Math.min(1.0, Math.pow(spd, 0.72) * negStrength * 1.65));
+    const remain = 1.0 - dryAmt;
+    return {
+      effWaterPct: Math.max(0, baseWaterPct * remain),
+      waterMult: remain,
+      addWaterNorm: 0.0,
+      dryAmt
+    };
+  }
+  const posStrength = sw / 100.0;
+  const addWaterNorm = Math.pow(spd, 0.85) * posStrength * 1.50;
+  const effWaterPct = Math.max(0, Math.min(165, baseWaterPct + addWaterNorm * 100.0));
+  return {
+    effWaterPct,
+    waterMult: 1.0,
+    addWaterNorm,
+    dryAmt: 0.0
+  };
+}
+
+function getEffectiveSumiParams(s = sumiSettings, effWaterOverride = null, effInkOverride = null) {
+  const m = s.mode || 'draw';
+  let inkVal = effInkOverride !== null ? effInkOverride : (s.ink ?? 78);
+  let waterVal = s.water ?? 65;
+  if (m === 'water') {
+    waterVal = s.waterWash ?? s.water ?? 75;
+  } else if (m === 'eraser') {
+    inkVal = effInkOverride !== null ? effInkOverride : (s.eraserInk ?? 85);
+    waterVal = s.eraserWater ?? 25;
+  }
+  const effWater = effWaterOverride !== null
+    ? Math.max(0, Math.min(165, effWaterOverride))
+    : Math.max(0, Math.min(100, waterVal));
+  return { ...s, ink: Math.max(0, Math.min(150, inkVal)), water: effWater };
+}
+
+function getPressureInkMod(engine, pressure, e) {
+  if (!engine || !engine.brush || engine.brush.pressureEnabled === false) return 1.0;
+  if (e && e.pointerType && e.pointerType !== 'pen') return 1.0;
+  if ((!e || !e.pointerType) && (pressure === undefined || pressure >= 0.999)) return 1.0;
+  const inf = engine.brush.pressureOpacityInfluence ?? 0.0;
+  if (Math.abs(inf) < 0.001) return 1.0;
+  const p = Math.max(0.01, Math.min(1.0, pressure ?? 1.0));
+  return Math.max(0.03, Math.min(1.5, (1.0 - inf) + p * inf));
+}
 
 export function syncSumiSettingsFromTip(tipSettings) {
   if (!tipSettings) return;
@@ -43,6 +108,9 @@ export function syncSumiSettingsFromTip(tipSettings) {
   sumiSettings.ink = tipSettings.sumiInk ?? 78;
   sumiSettings.inkAffection = tipSettings.sumiInkAffection ?? 35;
   sumiSettings.water = tipSettings.sumiWater ?? 65;
+  sumiSettings.waterWash = tipSettings.sumiWaterWash ?? tipSettings.sumiWater ?? 75;
+  sumiSettings.eraserInk = tipSettings.sumiEraserInk ?? 85;
+  sumiSettings.eraserWater = tipSettings.sumiEraserWater ?? 25;
   sumiSettings.bleed = tipSettings.sumiBleed ?? 58;
   sumiSettings.bristles = tipSettings.sumiBristles ?? 28;
   sumiSettings.stiffness = tipSettings.sumiStiffness ?? 60;
@@ -53,6 +121,7 @@ export function syncSumiSettingsFromTip(tipSettings) {
   sumiSettings.evaporation = tipSettings.sumiEvaporation ?? 28;
   sumiSettings.capillarity = tipSettings.sumiCapillarity ?? 62;
   sumiSettings.backrun = tipSettings.sumiBackrun ?? 68;
+  sumiSettings.turbulence = tipSettings.sumiTurbulence ?? 0;
   sumiSettings.sootSnag = tipSettings.sumiSootSnag ?? 55;
   sumiSettings.depleteEnabled = tipSettings.sumiDeplete !== undefined ? !!tipSettings.sumiDeplete : true;
   sumiSettings.splitEnabled = tipSettings.sumiSplitEnabled !== undefined ? !!tipSettings.sumiSplitEnabled : true;
@@ -61,6 +130,8 @@ export function syncSumiSettingsFromTip(tipSettings) {
   sumiSettings.followStroke = !!tipSettings.sumiFollowStroke;
   sumiSettings.tipAngle = tipSettings.sumiTipAngle ?? 0;
   sumiSettings.pressureFlow = tipSettings.sumiPressureFlow ?? 35;
+  sumiSettings.pressureGate = tipSettings.sumiPressureGate ?? 20;
+  sumiSettings.maxWater = tipSettings.sumiMaxWater ?? 100;
   sumiSettings.useHeightmap = tipSettings.sumiUseHeightmap !== undefined ? !!tipSettings.sumiUseHeightmap : false;
   sumiSettings.heightSource = tipSettings.sumiHeightSource || 'surface';
 }
@@ -321,7 +392,11 @@ class AlphaBristleBrush {
     modeInt,
     stepWeight = 1.0,
     bridgeCapsule = false,
-    waterScale = 1.0
+    waterMult = 1.0,
+    addWaterNorm = 0.0,
+    dryAmt = 0.0,
+    inkScale = 1.0,
+    snapDir = false
   }) {
     const dx = toX - fromX;
     const dy = toY - fromY;
@@ -332,11 +407,16 @@ class AlphaBristleBrush {
     if (stepDist > 0.15) {
       const ndx = dx / stepDist;
       const ndy = dy / stepDist;
-      this.lastDirX = this.lastDirX * 0.65 + ndx * 0.35;
-      this.lastDirY = this.lastDirY * 0.65 + ndy * 0.35;
-      const n = Math.hypot(this.lastDirX, this.lastDirY) || 1;
-      this.lastDirX /= n;
-      this.lastDirY /= n;
+      if (snapDir) {
+        this.lastDirX = ndx;
+        this.lastDirY = ndy;
+      } else {
+        this.lastDirX = this.lastDirX * 0.65 + ndx * 0.35;
+        this.lastDirY = this.lastDirY * 0.65 + ndy * 0.35;
+        const n = Math.hypot(this.lastDirX, this.lastDirY) || 1;
+        this.lastDirX /= n;
+        this.lastDirY /= n;
+      }
       dirX = this.lastDirX;
       dirY = this.lastDirY;
     }
@@ -353,12 +433,19 @@ class AlphaBristleBrush {
     const contactRadiusPx = Math.max(2.0, (sizePx || 40) * 0.5);
 
     const splitThresh = Math.max(0.0, Math.min(1.0, sumiSettings.splitDry / 100));
-    const dryness = Math.max(0, 1.0 - this.avgWaterRes * 1.15);
+    const baseDryness = Math.max(0, 1.0 - this.avgWaterRes * 1.15);
+    const dryness = Math.min(
+      1.0,
+      Math.max(0, baseDryness * (1.0 - Math.min(0.85, addWaterNorm * 0.75)) + dryAmt * 0.92)
+    );
     const speedFactor = Math.min(1.0, speed / 22.0);
+    const effSplitThresh = Math.max(splitThresh, dryAmt * 0.88);
     const rawSplit = sumiSettings.splitEnabled
-      ? Math.max(0, (dryness * 0.78 + speedFactor * 0.42) * splitThresh * 1.45 - 0.10)
+      ? Math.max(0, (dryness * 0.78 + speedFactor * 0.42) * effSplitThresh * 1.45 - 0.10 + dryAmt * 0.32)
       : 0;
-    this.splitAmount = this.splitAmount * 0.70 + Math.min(1.0, rawSplit) * 0.30;
+    this.splitAmount = dryAmt > 0.25
+      ? (this.splitAmount * 0.45 + Math.min(1.0, rawSplit) * 0.55)
+      : (this.splitAmount * 0.70 + Math.min(1.0, rawSplit) * 0.30);
 
     // Rotation angle for custom brush tip (follow stroke or fixed tipAngle)
     let rotAngle = (sumiSettings.tipAngle || 0) * Math.PI / 180;
@@ -371,6 +458,8 @@ class AlphaBristleBrush {
     const sizeRatio = Math.max(0.45, Math.min(2.4, (sizePx || 40) / 40));
     const spanPx = Math.max(90, (sumiSettings.depleteSpan || 550) * sizeRatio);
     const travelNorm = Math.min(0.28, stepDist / spanPx);
+    const gateInf = Math.max(0, Math.min(1, (sumiSettings.pressureGate ?? 20) / 100));
+    const splayP = (1.0 - gateInf) * 0.85 + gateInf * pClamped;
     const pFlowInf = Math.max(0, Math.min(1, sumiSettings.pressureFlow / 100));
     const flowGain = (1.0 - pFlowInf) + pClamped * pFlowInf;
 
@@ -393,7 +482,7 @@ class AlphaBristleBrush {
       const rx = b.baseX * cosA - b.baseY * sinA;
       const ry = b.baseX * sinA + b.baseY * cosA;
 
-      const splay = 1.0 + pClamped * (1.0 - stiffness * 0.55) * 0.25;
+      const splay = 1.0 + splayP * (1.0 - stiffness * 0.55) * 0.25;
       let offX = rx * splay + this.spineBendX * b.radialDist * 0.35;
       let offY = ry * splay + this.spineBendY * b.radialDist * 0.35;
 
@@ -413,23 +502,32 @@ class AlphaBristleBrush {
       const x0 = bridgeCapsule ? (fromX + prevOffX * contactRadiusPx) : x1;
       const y0 = bridgeCapsule ? (fromY + prevOffY * contactRadiusPx) : y1;
 
-      const rPx = Math.max(1.1, contactRadiusPx * b.radiusScale * (0.76 + pClamped * 0.32) * (1.0 - this.splitAmount * 0.34));
+      const rPMod = (1.0 - gateInf) + gateInf * (0.76 + pClamped * 0.32);
+      const rPx = Math.max(1.1, contactRadiusPx * b.radiusScale * rPMod * (1.0 - this.splitAmount * 0.34));
       b.curR = rPx / Math.max(contactRadiusPx, 1.0);
 
-      const pressureGate = Math.max(0.0, Math.min(1.0, (pClamped * 1.15 - b.radialDist * 0.38) * 1.40)) * b.alphaWeight;
+      const rawGate = Math.max(0.0, Math.min(1.0, (pClamped * 1.32 - b.radialDist * 0.40) * 1.45));
+      const pressureGate = ((1.0 - gateInf) + gateInf * rawGate) * b.alphaWeight;
 
       let inkW = 0;
       let waterW = 0;
       let contactW = pressureGate * flowGain * stepWeight;
       if (modeInt === 0) {
-        inkW = (sumiSettings.ink / 100) * b.inkLoad * pressureGate * flowGain * stepWeight * densityNorm;
-        waterW = (sumiSettings.water / 100) * b.waterLoad * pressureGate * flowGain * stepWeight * densityNorm * waterScale;
+        const wCharge = (sumiSettings.water / 100) * 1.25 * b.waterLoad * waterMult + addWaterNorm * (0.55 + 0.65 * b.waterLoad);
+        inkW = (sumiSettings.ink / 100) * inkScale * b.inkLoad * pressureGate * flowGain * stepWeight * densityNorm;
+        waterW = wCharge * pressureGate * flowGain * stepWeight * densityNorm;
       } else if (modeInt === 1) {
-        waterW = (sumiSettings.water / 100) * 1.15 * pressureGate * flowGain * stepWeight * densityNorm * waterScale;
+        const wWash = ((sumiSettings.waterWash ?? sumiSettings.water ?? 75) / 100) * 1.85 * waterMult + addWaterNorm * 1.35;
+        waterW = wWash * pressureGate * flowGain * stepWeight * densityNorm;
       } else if (modeInt === 2) {
         const blowScale = Math.max(0.35, stepWeight);
         waterW = pressureGate * blowScale;
         contactW = pressureGate * blowScale;
+      } else if (modeInt === 4) {
+        const eInk = ((sumiSettings.eraserInk ?? 85) / 100) * inkScale;
+        const eWat = ((sumiSettings.eraserWater ?? 25) / 100) * b.waterLoad * waterMult + addWaterNorm * 0.85;
+        inkW = eInk * b.inkLoad * pressureGate * flowGain * stepWeight * densityNorm;
+        waterW = eWat * pressureGate * flowGain * stepWeight * densityNorm;
       } else {
         const blotScale = Math.min(1.0, Math.max(0.45, stepWeight));
         waterW = pressureGate * blotScale;
@@ -445,7 +543,7 @@ class AlphaBristleBrush {
 
       b.weight = pressureGate;
 
-      if (modeInt === 0 && sumiSettings.depleteEnabled && stepDist > 0.1) {
+      if ((modeInt === 0 || modeInt === 4) && sumiSettings.depleteEnabled && stepDist > 0.1) {
         const drainScale = 0.55 + b.radialDist * 0.85;
         b.waterLoad = Math.max(0.05, b.waterLoad - travelNorm * drainScale * 1.12);
         b.inkLoad = Math.max(0.08, b.inkLoad - travelNorm * drainScale * 0.86);
@@ -476,6 +574,9 @@ class AlphaBristleBrush {
 const _brush = new AlphaBristleBrush();
 let _simRafId = 0;
 let _lastStrokeWorld = null;
+let _lastRawPt = null;
+let _lastMidPt = null;
+let _isFirstMove = false;
 let _lastStrokeTime = 0;
 let _lastPreviewTime = 0;
 
@@ -495,6 +596,7 @@ function getModeInt(mode) {
   if (mode === 'water') return 1;
   if (mode === 'blow') return 2;
   if (mode === 'dry') return 3;
+  if (mode === 'eraser') return 4;
   return 0;
 }
 
@@ -508,6 +610,9 @@ export function renderSumiBristlePreview() {
       stateEl.innerText = 'BLOW PLUME';
     } else if (sumiSettings.mode === 'dry') {
       stateEl.innerText = 'HEAT BLOT';
+    } else if (sumiSettings.mode === 'eraser') {
+      const pct = Math.round(_brush.avgInkRes * 100);
+      stateEl.innerText = pct < 26 ? `ERASE SPLIT ${pct}%` : 'INK ERASER';
     } else {
       const pct = Math.round(_brush.avgInkRes * 100);
       stateEl.innerText = pct < 26 ? `DRY SPLIT ${pct}%` : `LOAD ${pct}%`;
@@ -547,6 +652,8 @@ export function renderSumiBristlePreview() {
       ctx.fillStyle = `rgba(95, 110, 125, ${(0.35 + 0.45 * b.weight).toFixed(2)})`;
     } else if (sumiSettings.mode === 'dry') {
       ctx.fillStyle = `rgba(180, 95, 35, ${(0.40 + 0.45 * b.weight).toFixed(2)})`;
+    } else if (sumiSettings.mode === 'eraser') {
+      ctx.fillStyle = `rgba(215, 68, 80, ${(0.35 + 0.55 * b.inkLoad * b.weight).toFixed(2)})`;
     } else {
       const v = Math.round(190 * (1.0 - b.inkLoad * 0.92));
       ctx.fillStyle = `rgba(${v}, ${v}, ${v + 4}, ${(0.42 + 0.56 * b.weight).toFixed(2)})`;
@@ -564,12 +671,14 @@ export function updateSumiSubtoolUI(mode) {
     draw: 'btn-sumi-mode-draw',
     water: 'btn-sumi-mode-water',
     blow: 'btn-sumi-mode-blow',
-    dry: 'btn-sumi-mode-dry'
+    dry: 'btn-sumi-mode-dry',
+    eraser: 'btn-sumi-mode-eraser'
   };
   Object.entries(map).forEach(([k, id]) => {
     const el = document.getElementById(id);
     if (el) el.classList.toggle('active-btn', k === m);
   });
+
   const inkLbl = document.getElementById('label-sumi-ink');
   const inkSlider = document.getElementById('slider-sumi-ink');
   const inkValEl = document.getElementById('val-sumi-ink');
@@ -578,12 +687,32 @@ export function updateSumiSubtoolUI(mode) {
     const v = Math.round(sumiSettings.inkAffection ?? 35);
     if (inkSlider) inkSlider.value = v;
     if (inkValEl) inkValEl.innerText = `${v}%`;
+  } else if (m === 'eraser') {
+    if (inkLbl) inkLbl.innerText = 'ERASE STRENGTH';
+    const v = Math.round(sumiSettings.eraserInk ?? 85);
+    if (inkSlider) inkSlider.value = v;
+    if (inkValEl) inkValEl.innerText = `${v}%`;
   } else {
     if (inkLbl) inkLbl.innerText = 'INK CONCENTRATION';
     const v = Math.round(sumiSettings.ink ?? 78);
     if (inkSlider) inkSlider.value = v;
     if (inkValEl) inkValEl.innerText = `${v}%`;
   }
+
+  const watLbl = document.getElementById('label-sumi-water');
+  const watSlider = document.getElementById('slider-sumi-water');
+  const watValEl = document.getElementById('val-sumi-water');
+  if (watLbl) watLbl.innerText = 'WATER CHARGE';
+  let wVal = sumiSettings.water ?? 65;
+  if (m === 'water') {
+    wVal = sumiSettings.waterWash ?? 75;
+  } else if (m === 'eraser') {
+    wVal = sumiSettings.eraserWater ?? 25;
+  }
+  const wRounded = Math.round(wVal);
+  if (watSlider) watSlider.value = wRounded;
+  if (watValEl) watValEl.innerText = `${wRounded}%`;
+
   renderSumiBristlePreview();
 }
 
@@ -616,20 +745,24 @@ function stopLiveSimLoop() {
 
 function ensureLiveSimLoop(engine) {
   if (_simRafId) return;
+  let idleTick = 0;
   const stepTick = () => {
     _simRafId = 0;
     const gr = engine?.gpuRenderer;
     const solver = gr?.sumiSolver;
     if (!solver || !solver.active || !solver.ready || gr._contextLost) return;
 
-    if (!engine.isDrawing) {
-      if (solver.simActiveFrames > 0) {
-        solver.stepSimulation(engine, 0.016, false);
-        solver.simActiveFrames--;
-      } else {
-        solver.syncTilesToCanvas2D(engine);
-        return;
+    // Water propagates continuously in real time — throttle gently during late idle settling
+    if (solver.simActiveFrames > 0) {
+      const isIdleDecay = !engine.isDrawing && solver.simActiveFrames < 260;
+      idleTick = (idleTick + 1) & 1;
+      if (!isIdleDecay || idleTick === 0) {
+        solver.stepSimulation(engine, isIdleDecay ? 0.024 : 0.016, false);
       }
+      solver.simActiveFrames--;
+    } else if (!engine.isDrawing) {
+      solver.syncTilesToCanvas2D(engine);
+      return;
     }
 
     if (solver.active && (engine.isDrawing || solver.simActiveFrames > 0)) {
@@ -714,30 +847,49 @@ export function startSumiPaintStroke(engine, worldPos, e = null) {
   }
   _brush.beginStroke(1, 0);
 
-  solver.beginStrokeSession(engine, worldPos, { ...sumiSettings });
+  const startPres = worldPos.pressure ?? 1.0;
+  const startInkMod = getPressureInkMod(engine, startPres, e);
+  const modeInt = getModeInt(sumiSettings.mode);
+  const baseInkPct = modeInt === 4 ? (sumiSettings.eraserInk ?? 85) : (sumiSettings.ink ?? 78);
+  const effParams = getEffectiveSumiParams(sumiSettings, null, baseInkPct * startInkMod);
+  solver.beginStrokeSession(engine, worldPos, effParams);
 
   const baseSize = engine.brush.size || worldPos.size || 40;
-  const effectiveSize = worldPos.size ? (baseSize * 0.40 + worldPos.size * 0.60) : baseSize;
-  _lastStrokeWorld = { x: worldPos.x, y: worldPos.y, size: effectiveSize };
-  _lastStrokeTime = performance.now();
-
-  const modeInt = getModeInt(sumiSettings.mode);
+  const effectiveSize = Math.max(1.5, worldPos.size || baseSize);
   const tiltX = (e && Number.isFinite(e.tiltX)) ? e.tiltX / 90 : 0;
   const tiltY = (e && Number.isFinite(e.tiltY)) ? e.tiltY / 90 : 0;
+
+  _lastStrokeWorld = { x: worldPos.x, y: worldPos.y, size: effectiveSize };
+  _lastRawPt = {
+    x: worldPos.x,
+    y: worldPos.y,
+    size: effectiveSize,
+    pressure: startPres,
+    inkMod: startInkMod,
+    color: worldPos.color || engine.brush.color,
+    vFactor: 0,
+    tiltX,
+    tiltY
+  };
+  _lastMidPt = null;
+  _isFirstMove = true;
+  _lastStrokeTime = performance.now();
+
   const segments = _brush.buildSegments({
     fromX: worldPos.x,
     fromY: worldPos.y,
     toX: worldPos.x,
     toY: worldPos.y,
     sizePx: effectiveSize,
-    pressure: worldPos.pressure ?? 1.0,
+    pressure: startPres,
     tiltX,
     tiltY,
     velX: 0,
     velY: 0,
     modeInt,
     stepWeight: 1.0,
-    bridgeCapsule: false
+    bridgeCapsule: false,
+    inkScale: startInkMod
   });
 
   const pigmentK = hexToPigmentK(worldPos.color || engine.brush.color);
@@ -746,9 +898,9 @@ export function startSumiPaintStroke(engine, worldPos, e = null) {
     segments,
     modeInt,
     { x: 0, y: 0 },
-    worldPos.pressure ?? 1.0,
+    startPres,
     pigmentK,
-    { ...sumiSettings }
+    effParams
   );
   renderSumiBristlePreview();
   if (modeInt !== 3) {
@@ -756,80 +908,190 @@ export function startSumiPaintStroke(engine, worldPos, e = null) {
   }
 }
 
+function _emitQuadraticCurveBatch(engine, solver, pStart, pCtrl, pEnd, modeInt, velMag, dt, sw, color) {
+  const arcEst =
+    Math.hypot(pCtrl.x - pStart.x, pCtrl.y - pStart.y) +
+    Math.hypot(pEnd.x - pCtrl.x, pEnd.y - pCtrl.y);
+  if (arcEst < 0.2) return;
+
+  const avgSize = (pStart.size + pEnd.size) * 0.5;
+  const refStep = Math.max(2.0, avgSize * 0.20);
+  const maxSubStep = Math.max(1.1, Math.min(refStep, avgSize * 0.042));
+  const steps = Math.max(1, Math.min(128, Math.ceil(arcEst / maxSubStep)));
+
+  const baseInkPct = modeInt === 4 ? (sumiSettings.eraserInk ?? 85) : (sumiSettings.ink ?? 78);
+  const baseWaterPct = modeInt === 1
+    ? (sumiSettings.waterWash ?? sumiSettings.water ?? 75)
+    : (modeInt === 4 ? (sumiSettings.eraserWater ?? 25) : (sumiSettings.water ?? 65));
+  const pigmentK = hexToPigmentK(color || engine.brush.color);
+
+  const tuftsPerStep = Math.max(8, _brush.tufts.length);
+  const maxStepsPerDispatch = Math.max(8, Math.floor(3800 / tuftsPerStep));
+
+  let batchSegs = [];
+  let batchSteps = 0;
+  let batchWaterSum = 0;
+  let batchInkSum = 0;
+  let lastVelX = 0;
+  let lastVelY = 0;
+  let prevX = pStart.x;
+  let prevY = pStart.y;
+
+  const flushBatch = () => {
+    if (batchSegs.length === 0) return;
+    const avgEffW = batchWaterSum / Math.max(1, batchSteps);
+    const avgEffInk = batchInkSum / Math.max(1, batchSteps);
+    const stepParams = getEffectiveSumiParams(sumiSettings, avgEffW, avgEffInk);
+    solver.stampAndStep(
+      engine,
+      batchSegs,
+      modeInt,
+      { x: Math.max(-18, Math.min(18, lastVelX)), y: Math.max(-18, Math.min(18, lastVelY)) },
+      pEnd.pressure ?? 1.0,
+      pigmentK,
+      stepParams
+    );
+    batchSegs = [];
+    batchSteps = 0;
+    batchWaterSum = 0;
+    batchInkSum = 0;
+  };
+
+  for (let s = 0; s < steps; s++) {
+    const t1 = (s + 1) / steps;
+    const omt = 1 - t1;
+    const nx = omt * omt * pStart.x + 2 * omt * t1 * pCtrl.x + t1 * t1 * pEnd.x;
+    const ny = omt * omt * pStart.y + 2 * omt * t1 * pCtrl.y + t1 * t1 * pEnd.y;
+    const subDist = Math.hypot(nx - prevX, ny - prevY);
+
+    // Quadratic Bezier tangent at midpoint parameter tMid
+    const tMid = (s + 0.5) / steps;
+    const tanX = 2 * (1 - tMid) * (pCtrl.x - pStart.x) + 2 * tMid * (pEnd.x - pCtrl.x);
+    const tanY = 2 * (1 - tMid) * (pCtrl.y - pStart.y) + 2 * tMid * (pEnd.y - pCtrl.y);
+    const tanLen = Math.hypot(tanX, tanY) || 1;
+    const subVelX = (tanX / tanLen) * velMag;
+    const subVelY = (tanY / tanLen) * velMag;
+    lastVelX = subVelX;
+    lastVelY = subVelY;
+
+    const stepSize = pStart.size + (pEnd.size - pStart.size) * t1;
+    const stepPres = pStart.pressure + (pEnd.pressure - pStart.pressure) * t1;
+    const stepInkMod = (pStart.inkMod ?? 1.0) + ((pEnd.inkMod ?? 1.0) - (pStart.inkMod ?? 1.0)) * t1;
+    const stepTiltX = (pStart.tiltX || 0) + ((pEnd.tiltX || 0) - (pStart.tiltX || 0)) * t1;
+    const stepTiltY = (pStart.tiltY || 0) + ((pEnd.tiltY || 0) - (pStart.tiltY || 0)) * t1;
+    const stepVFactor = (pStart.vFactor || 0) + ((pEnd.vFactor || 0) - (pStart.vFactor || 0)) * t1;
+
+    const swProf = computeSpeedWaterProfile(baseWaterPct, sw, stepVFactor);
+    batchWaterSum += swProf.effWaterPct;
+    batchInkSum += baseInkPct * stepInkMod;
+    batchSteps++;
+
+    const stepWeight = Math.min(1.5, subDist / Math.max(2.0, stepSize * 0.20));
+    const bridgeCapsule = subDist > Math.max(1.6, stepSize * 0.055);
+
+    const segs = _brush.buildSegments({
+      fromX: prevX,
+      fromY: prevY,
+      toX: nx,
+      toY: ny,
+      sizePx: stepSize,
+      pressure: stepPres,
+      tiltX: stepTiltX,
+      tiltY: stepTiltY,
+      velX: subVelX,
+      velY: subVelY,
+      modeInt,
+      stepWeight,
+      bridgeCapsule,
+      waterMult: swProf.waterMult,
+      addWaterNorm: swProf.addWaterNorm,
+      dryAmt: swProf.dryAmt,
+      inkScale: stepInkMod,
+      snapDir: _isFirstMove
+    });
+    _isFirstMove = false;
+    for (let k = 0; k < segs.length; k++) batchSegs.push(segs[k]);
+
+    prevX = nx;
+    prevY = ny;
+
+    if (batchSteps >= maxStepsPerDispatch) {
+      flushBatch();
+    }
+  }
+  flushBatch();
+}
+
 export function paintSumiMove(engine, worldTo, dynamicSize, _opacMod, color, pressure, e = null, vFactor = 0) {
-  if (!engine || !_lastStrokeWorld) return;
+  if (!engine || !_lastRawPt) return;
   const solver = engine.gpuRenderer?.sumiSolver;
   if (!solver || !solver.ready || !solver.active) return;
 
-  const dx = worldTo.x - _lastStrokeWorld.x;
-  const dy = worldTo.y - _lastStrokeWorld.y;
+  const dx = worldTo.x - _lastRawPt.x;
+  const dy = worldTo.y - _lastRawPt.y;
   const dist = Math.hypot(dx, dy);
   if (dist < 0.6) return;
 
   const now = performance.now();
   const dt = Math.max(0.004, Math.min(0.05, (now - _lastStrokeTime) / 1000));
-  const velX = (dx / dt) * 0.04;
-  const velY = (dy / dt) * 0.04;
+  const velMag = (dist / dt) * 0.04;
   const tiltX = (e && Number.isFinite(e.tiltX)) ? e.tiltX / 90 : 0;
   const tiltY = (e && Number.isFinite(e.tiltY)) ? e.tiltY / 90 : 0;
   const modeInt = getModeInt(sumiSettings.mode);
-  const pigmentK = hexToPigmentK(color || engine.brush.color);
-
   const sw = engine?.brush?.speedWater ?? 0;
-  const waterScale = Math.max(0.10, 1.0 + vFactor * (sw / 100.0) * 0.85);
-  const effWater = Math.max(0, Math.min(100, sumiSettings.water * waterScale));
-  const stepParams = { ...sumiSettings, water: effWater };
 
   const baseSize = engine.brush.size || dynamicSize || 40;
-  const effectiveSize = dynamicSize ? (baseSize * 0.40 + dynamicSize * 0.60) : baseSize;
+  const effectiveSize = Math.max(1.5, dynamicSize || baseSize);
+  const curPres = pressure ?? 1.0;
+  const curInkMod = getPressureInkMod(engine, curPres, e);
 
-  // Fine sub-stepping keeps bristles overlapped into continuous ribbons across all brush sizes,
-  // and bridges fast swipes with capsule segments so large strokes never break into dots
-  const refStep = Math.max(2.0, effectiveSize * 0.20);
-  const maxSubStep = Math.max(1.2, Math.min(refStep, effectiveSize * 0.045));
-  const steps = Math.max(1, Math.min(96, Math.ceil(dist / maxSubStep)));
-  const subDist = dist / steps;
-  const stepWeight = Math.min(1.5, subDist / refStep);
-  const bridgeCapsule = subDist > Math.max(1.8, effectiveSize * 0.06);
-  const allSegs = [];
+  const pNew = {
+    x: worldTo.x,
+    y: worldTo.y,
+    size: effectiveSize,
+    pressure: curPres,
+    inkMod: curInkMod,
+    color: color || engine.brush.color,
+    vFactor,
+    tiltX,
+    tiltY
+  };
 
-  for (let s = 0; s < steps; s++) {
-    const t0 = s / steps;
-    const t1 = (s + 1) / steps;
-    const sx0 = _lastStrokeWorld.x + dx * t0;
-    const sy0 = _lastStrokeWorld.y + dy * t0;
-    const sx1 = _lastStrokeWorld.x + dx * t1;
-    const sy1 = _lastStrokeWorld.y + dy * t1;
-
-    const segs = _brush.buildSegments({
-      fromX: sx0,
-      fromY: sy0,
-      toX: sx1,
-      toY: sy1,
-      sizePx: effectiveSize,
-      pressure: pressure ?? 1.0,
-      tiltX,
-      tiltY,
-      velX,
-      velY,
-      modeInt,
-      stepWeight,
-      bridgeCapsule,
-      waterScale
-    });
-    for (let k = 0; k < segs.length; k++) allSegs.push(segs[k]);
+  if (!_lastMidPt) {
+    const mid1 = {
+      x: (_lastRawPt.x + pNew.x) * 0.5,
+      y: (_lastRawPt.y + pNew.y) * 0.5,
+      size: (_lastRawPt.size + pNew.size) * 0.5,
+      pressure: (_lastRawPt.pressure + pNew.pressure) * 0.5,
+      inkMod: ((_lastRawPt.inkMod ?? 1.0) + pNew.inkMod) * 0.5,
+      color: pNew.color,
+      vFactor: (_lastRawPt.vFactor + pNew.vFactor) * 0.5,
+      tiltX: (_lastRawPt.tiltX + pNew.tiltX) * 0.5,
+      tiltY: (_lastRawPt.tiltY + pNew.tiltY) * 0.5
+    };
+    const ctrl0 = {
+      x: (_lastRawPt.x + mid1.x) * 0.5,
+      y: (_lastRawPt.y + mid1.y) * 0.5
+    };
+    _emitQuadraticCurveBatch(engine, solver, _lastRawPt, ctrl0, mid1, modeInt, velMag, dt, sw, pNew.color);
+    _lastMidPt = mid1;
+  } else {
+    const mid2 = {
+      x: (_lastRawPt.x + pNew.x) * 0.5,
+      y: (_lastRawPt.y + pNew.y) * 0.5,
+      size: (_lastRawPt.size + pNew.size) * 0.5,
+      pressure: (_lastRawPt.pressure + pNew.pressure) * 0.5,
+      inkMod: ((_lastRawPt.inkMod ?? 1.0) + pNew.inkMod) * 0.5,
+      color: pNew.color,
+      vFactor: (_lastRawPt.vFactor + pNew.vFactor) * 0.5,
+      tiltX: (_lastRawPt.tiltX + pNew.tiltX) * 0.5,
+      tiltY: (_lastRawPt.tiltY + pNew.tiltY) * 0.5
+    };
+    _emitQuadraticCurveBatch(engine, solver, _lastMidPt, _lastRawPt, mid2, modeInt, velMag, dt, sw, pNew.color);
+    _lastMidPt = mid2;
   }
 
-  solver.stampAndStep(
-    engine,
-    allSegs,
-    modeInt,
-    { x: Math.max(-18, Math.min(18, velX)), y: Math.max(-18, Math.min(18, velY)) },
-    pressure ?? 1.0,
-    pigmentK,
-    stepParams
-  );
-
+  _lastRawPt = pNew;
   _lastStrokeWorld = { x: worldTo.x, y: worldTo.y, size: effectiveSize };
   _lastStrokeTime = now;
 
@@ -843,16 +1105,46 @@ export function paintSumiMove(engine, worldTo, dynamicSize, _opacMod, color, pre
 }
 
 export function endSumiPaintStroke(engine) {
+  const solver = engine?.gpuRenderer?.sumiSolver;
+  if (solver && solver.active && solver.ready && _lastMidPt && _lastRawPt) {
+    const remDist = Math.hypot(_lastRawPt.x - _lastMidPt.x, _lastRawPt.y - _lastMidPt.y);
+    if (remDist > 0.35) {
+      const modeInt = getModeInt(sumiSettings.mode);
+      const sw = engine?.brush?.speedWater ?? 0;
+      const dt = Math.max(0.004, Math.min(0.05, (performance.now() - _lastStrokeTime) / 1000));
+      const velMag = (remDist / dt) * 0.04;
+      const ctrlEnd = {
+        x: (_lastMidPt.x + _lastRawPt.x) * 0.5,
+        y: (_lastMidPt.y + _lastRawPt.y) * 0.5
+      };
+      _emitQuadraticCurveBatch(
+        engine,
+        solver,
+        _lastMidPt,
+        ctrlEnd,
+        _lastRawPt,
+        modeInt,
+        velMag,
+        dt,
+        sw,
+        _lastRawPt.color || engine.brush.color
+      );
+    }
+  }
   _lastStrokeWorld = null;
+  _lastRawPt = null;
+  _lastMidPt = null;
+  _isFirstMove = false;
+
   if (!engine) return;
-  const solver = engine.gpuRenderer?.sumiSolver;
   if (solver && solver.active) {
     // Sync current tiles to Canvas2D for Undo & Selection while keeping live ink/pore layers active
     solver.syncTilesToCanvas2D(engine);
     if (sumiSettings.mode === 'dry') {
       solver.simActiveFrames = 0;
     } else {
-      solver.simActiveFrames = 540;
+      const evapPct = sumiSettings.evaporation ?? 28;
+      solver.simActiveFrames = evapPct < 2 ? 320 : 480;
       ensureLiveSimLoop(engine);
     }
   }
@@ -862,6 +1154,9 @@ export function endSumiPaintStroke(engine) {
 export function cancelSumiStroke(engine) {
   stopLiveSimLoop();
   _lastStrokeWorld = null;
+  _lastRawPt = null;
+  _lastMidPt = null;
+  _isFirstMove = false;
   const solver = engine?.gpuRenderer?.sumiSolver;
   if (solver) {
     solver.cancel(engine, true);

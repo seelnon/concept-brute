@@ -183,6 +183,13 @@
               <input type="range" id="speed-water" min="-100" max="100" value="0" class="brutal-range s-range">
             </div>
           </div>
+          <div id="max-water-container" class="slider-container" style="display: none;">
+            <div class="slider-header">
+                <label class="slider-label" title="Max Water Amount on Paper">MAX WATER</label>
+                <span id="max-water-val" class="slider-value">100%</span>
+            </div>
+            <input type="range" id="sumi-max-water" min="15" max="200" step="5" value="100" class="brutal-range">
+          </div>
         </div>
 
         
@@ -1022,7 +1029,7 @@
                         </div>
                      </div>
                      <div style="display: flex; justify-content: space-between; align-items: center;">
-                        <label class="settings-label">AFFECTED OPACITY</label>
+                        <label id="lbl-pressure-opacity" class="settings-label">AFFECTED OPACITY</label>
                         <span id="pressure-opacity-val" style="font-size: 9px; font-weight: 900;">1.0</span>
                      </div>
                      <input type="range" id="settings-pressure-opacity-influence" min="0" max="2" step="0.1" value="1.0" class="brutal-range" style="width: 100%;">
@@ -1033,11 +1040,18 @@
                      </div>
                      <input type="range" id="settings-pressure-size-influence" min="0" max="2" step="0.1" value="1.0" class="brutal-range" style="width: 100%;">
                   </div>
-                  <div class="settings-group">
+                  <div class="settings-group" id="group-brush-spacing">
                      <div style="display: flex; justify-content: space-between; align-items: center;">
                          <label class="settings-label">BRUSH SPACING</label>
                      </div>
                      <input type="range" id="settings-brush-spacing" min="0.01" max="0.5" step="0.01" value="0.05" class="brutal-range" style="width: 100%;">
+                  </div>
+                  <div class="settings-group" id="group-sumi-pressure-gate" style="display: none;">
+                     <div style="display: flex; justify-content: space-between; align-items: center;">
+                         <label class="settings-label" title="Controls how pen pressure gates outer bristle contact and water/ink release (0% = full bristle contact at all pressures)">BRISTLE TAPER</label>
+                         <span id="sumi-pressure-gate-val" style="font-size: 9px; font-weight: 900;">20%</span>
+                     </div>
+                     <input type="range" id="adv-sumi-pressure-gate" min="0" max="100" step="1" value="20" class="brutal-range" style="width: 100%;">
                   </div>
                </div>
              </div>
@@ -1250,9 +1264,9 @@
                 </div>
               </div>
 
-              <!-- SUMI-E BRUSH & PAPER PHYSICS CATEGORY -->
-              <div class="settings-category" id="cat-sumi" style="display: none;">
-                <div class="category-header">SUMI-E BRUSH &amp; PAPER PHYSICS</div>
+              <!-- SUMI-E BRUSH CATEGORY -->
+              <div class="settings-category" id="cat-sumi-brush" style="display: none;">
+                <div class="category-header">SUMI-E BRUSH</div>
                 <div class="category-content">
                    <div class="settings-group">
                       <div class="settings-row" style="margin-bottom: 5px;">
@@ -1284,6 +1298,34 @@
                       </div>
                       <input type="range" id="adv-sumi-stiffness" min="10" max="100" step="1" value="60" class="brutal-range" style="width: 100%;">
                    </div>
+                   <div class="settings-group">
+                      <div class="settings-row" style="margin-bottom: 6px;">
+                         <label class="settings-label">FOLLOW STROKE ANGLE</label>
+                         <div class="checkbox-wrapper">
+                            <input type="checkbox" id="adv-sumi-follow-stroke" class="settings-input-check">
+                            <span class="checkbox-custom"></span>
+                         </div>
+                      </div>
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">TIP ANGLE OFFSET</label>
+                          <span id="adv-sumi-tip-angle-val" style="font-size: 9px; font-weight: 900;">0°</span>
+                      </div>
+                      <input type="range" id="adv-sumi-tip-angle" min="-180" max="180" step="5" value="0" class="brutal-range" style="width: 100%;">
+                   </div>
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label">PRESSURE FLOW</label>
+                          <span id="adv-sumi-pressure-flow-val" style="font-size: 9px; font-weight: 900;">35%</span>
+                      </div>
+                      <input type="range" id="adv-sumi-pressure-flow" min="0" max="100" step="1" value="35" class="brutal-range" style="width: 100%;">
+                   </div>
+                </div>
+              </div>
+
+              <!-- SUMI-E PAPER PHYSICS CATEGORY -->
+              <div class="settings-category" id="cat-sumi-paper" style="display: none;">
+                <div class="category-header">SUMI-E PAPER PHYSICS</div>
+                <div class="category-content">
                    <div class="settings-group">
                       <div style="display: flex; justify-content: space-between; align-items: center;">
                           <label class="settings-label">HIDE GLUE VISCOSITY</label>
@@ -1321,31 +1363,17 @@
                    </div>
                    <div class="settings-group">
                       <div style="display: flex; justify-content: space-between; align-items: center;">
+                          <label class="settings-label" title="Non-linear subtle water curl swirls (0-100%)">WATER TURBULENCE</label>
+                          <span id="adv-sumi-turbulence-val" style="font-size: 9px; font-weight: 900;">0%</span>
+                      </div>
+                      <input type="range" id="adv-sumi-turbulence" min="0" max="100" step="1" value="0" class="brutal-range" style="width: 100%;">
+                   </div>
+                   <div class="settings-group">
+                      <div style="display: flex; justify-content: space-between; align-items: center;">
                           <label class="settings-label">SOOT SNAG (TOOTH)</label>
                           <span id="adv-sumi-soot-snag-val" style="font-size: 9px; font-weight: 900;">55%</span>
                       </div>
                       <input type="range" id="adv-sumi-soot-snag" min="0" max="100" step="1" value="55" class="brutal-range" style="width: 100%;">
-                   </div>
-                   <div class="settings-group">
-                      <div class="settings-row" style="margin-bottom: 6px;">
-                         <label class="settings-label">FOLLOW STROKE ANGLE</label>
-                         <div class="checkbox-wrapper">
-                            <input type="checkbox" id="adv-sumi-follow-stroke" class="settings-input-check">
-                            <span class="checkbox-custom"></span>
-                         </div>
-                      </div>
-                      <div style="display: flex; justify-content: space-between; align-items: center;">
-                          <label class="settings-label">TIP ANGLE OFFSET</label>
-                          <span id="adv-sumi-tip-angle-val" style="font-size: 9px; font-weight: 900;">0°</span>
-                      </div>
-                      <input type="range" id="adv-sumi-tip-angle" min="-180" max="180" step="5" value="0" class="brutal-range" style="width: 100%;">
-                   </div>
-                   <div class="settings-group">
-                      <div style="display: flex; justify-content: space-between; align-items: center;">
-                          <label class="settings-label">PRESSURE FLOW</label>
-                          <span id="adv-sumi-pressure-flow-val" style="font-size: 9px; font-weight: 900;">35%</span>
-                      </div>
-                      <input type="range" id="adv-sumi-pressure-flow" min="0" max="100" step="1" value="35" class="brutal-range" style="width: 100%;">
                    </div>
                    <div class="settings-group">
                       <div class="settings-row" style="margin-bottom: 6px;">
@@ -2077,18 +2105,29 @@
     </div>
 
     <!-- SUMI-E INK FLOATING PANEL -->
-    <div id="panel-sumi" class="ui-panel hidden" style="width: 196px; left: 20px; top: 120px; z-index: 10002;">
+    <div id="panel-sumi" class="ui-panel hidden" style="width: 216px; left: 20px; top: 120px; z-index: 10002;">
       <div id="handle-sumi" class="panel-handle" style="cursor: move; display: flex; justify-content: space-between; align-items: center; background: black; color: white; padding: 4px 8px;">
         <span class="panel-title" style="font-size: 10px; font-weight: 900;">SUMI-E INK</span>
         <button id="btn-sumi-collapse" class="panel-toggle" style="background: none; border: none; color: white; cursor: pointer; font-weight: bold;">_</button>
       </div>
       <div id="sumi-content" class="panel-content" style="padding: 8px; display: flex; flex-direction: column; gap: 6px;">
         <!-- SUBTOOL MODES -->
-        <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 3px;">
-          <button id="btn-sumi-mode-draw" class="brutal-btn active-btn" style="font-size: 8px; height: 20px; padding: 0;">DRAW</button>
-          <button id="btn-sumi-mode-water" class="brutal-btn" style="font-size: 8px; height: 20px; padding: 0;">WATER</button>
-          <button id="btn-sumi-mode-blow" class="brutal-btn" style="font-size: 8px; height: 20px; padding: 0;">BLOW</button>
-          <button id="btn-sumi-mode-dry" class="brutal-btn" style="font-size: 8px; height: 20px; padding: 0;">DRY</button>
+        <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px;">
+          <button id="btn-sumi-mode-draw" class="brutal-btn active-btn" title="DRAW INK (Shift+1)" style="width: 100%; aspect-ratio: 1 / 1; height: auto; padding: 0;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square" stroke-linejoin="miter"><path d="M18 3l3 3-9.5 9.5-3.5.5.5-3.5L18 3z"/><path d="M7.5 16.5c-2 .5-3.5 2-4 4 2-.5 3.5-1.5 4.5-3.5"/></svg>
+          </button>
+          <button id="btn-sumi-mode-water" class="brutal-btn" title="WATER WASH (Shift+2)" style="width: 100%; aspect-ratio: 1 / 1; height: auto; padding: 0;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5s6.5 6.8 6.5 11.8a6.5 6.5 0 0 1-13 0c0-5 6.5-11.8 6.5-11.8z"/><path d="M9.5 14.8a2.5 2.5 0 0 0 2.5 2.5"/></svg>
+          </button>
+          <button id="btn-sumi-mode-blow" class="brutal-btn" title="BLOW FLUID (Shift+3)" style="width: 100%; aspect-ratio: 1 / 1; height: auto; padding: 0;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h11a2.5 2.5 0 1 0-2.5-2.5"/><path d="M3 12h15.5a2.5 2.5 0 1 1-2.5 2.5"/><path d="M3 16h8a2 2 0 1 1-2 2"/></svg>
+          </button>
+          <button id="btn-sumi-mode-dry" class="brutal-btn" title="HEAT DRY / BLOT (Shift+4)" style="width: 100%; aspect-ratio: 1 / 1; height: auto; padding: 0;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M18.7 5.3l-1.8 1.8M7.1 16.9l-1.8 1.8"/></svg>
+          </button>
+          <button id="btn-sumi-mode-eraser" class="brutal-btn" title="INK ERASER (Shift+5)" style="width: 100%; aspect-ratio: 1 / 1; height: auto; padding: 0;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square" stroke-linejoin="miter"><path d="m7 20-4-4 9.5-9.5a2 2 0 0 1 2.8 0l4.2 4.2a2 2 0 0 1 0 2.8L12.5 20H7z"/><path d="M21 20H7"/><path d="m8.5 11.5 5 5"/></svg>
+          </button>
         </div>
 
         <!-- LIVE BRISTLE TUFT CROSS-SECTION + DIP/DRY CONTROLS -->
@@ -2116,7 +2155,7 @@
         <!-- WATER CHARGE -->
         <div class="slider-container">
           <div class="slider-header">
-            <label class="slider-label" style="font-size: 8px;">WATER CHARGE</label>
+            <label id="label-sumi-water" class="slider-label" style="font-size: 8px;">WATER CHARGE</label>
             <span id="val-sumi-water" class="slider-value" style="font-size: 8px; font-weight: bold;">65%</span>
           </div>
           <input type="range" id="slider-sumi-water" min="0" max="100" value="65" class="brutal-range">

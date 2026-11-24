@@ -145,11 +145,48 @@ export function fitZoom() {
   this.setZoom(1);
 }
 
-export function saveViewport(projectId = null) {
+export function saveViewport(projectId = null, immediate = false) {
   const pid = projectId || this.currentProjectId;
-  const prefix = pid ? `v_${pid}_` : 'v_';
-  localStorage.setItem(prefix + 'zoom', this.zoom);
-  localStorage.setItem(prefix + 'pan', JSON.stringify(this.pan));
+  const writeNow = (targetPid) => {
+    this._viewportDirty = false;
+    if (this._saveViewportTimer) {
+      clearTimeout(this._saveViewportTimer);
+      this._saveViewportTimer = null;
+    }
+    if (this._saveViewportIdleId && typeof cancelIdleCallback === 'function') {
+      cancelIdleCallback(this._saveViewportIdleId);
+      this._saveViewportIdleId = null;
+    }
+    const prefix = targetPid ? `v_${targetPid}_` : 'v_';
+    try {
+      localStorage.setItem(prefix + 'zoom', this.zoom);
+      localStorage.setItem(prefix + 'pan', JSON.stringify(this.pan));
+    } catch (_) {}
+  };
+  if (immediate || projectId !== null) {
+    writeNow(pid);
+    return;
+  }
+  this._viewportDirty = true;
+  if (this._saveViewportTimer) {
+    clearTimeout(this._saveViewportTimer);
+  }
+  if (this._saveViewportIdleId && typeof cancelIdleCallback === 'function') {
+    cancelIdleCallback(this._saveViewportIdleId);
+    this._saveViewportIdleId = null;
+  }
+  this._saveViewportTimer = setTimeout(() => {
+    this._saveViewportTimer = null;
+    if (this.isDrawing || this.isPanning || this.isZooming) {
+      this._saveViewportTimer = setTimeout(() => this.saveViewport(null, true), 500);
+      return;
+    }
+    if (typeof requestIdleCallback === 'function') {
+      this._saveViewportIdleId = requestIdleCallback(() => writeNow(this.currentProjectId), { timeout: 1200 });
+    } else {
+      writeNow(this.currentProjectId);
+    }
+  }, 450);
 }
 
 export function loadViewport(projectId = null) {

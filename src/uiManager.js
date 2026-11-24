@@ -25,17 +25,25 @@ export function setupUI(app) {
         }
     });
 
-    // Ensure buttons don't steal keyboard focus and swallow hotkeys
+    // Ensure buttons, sliders, checkboxes, and scrollable menus don't steal spacebar/hotkeys
     window.addEventListener('keydown', (e) => {
-        if (document.activeElement && (
-            document.activeElement.tagName === 'BUTTON' || 
-            document.activeElement.type === 'range' ||
-            document.activeElement.closest('.brutal-btn, .mini-btn, .tool-btn')
+        const active = document.activeElement;
+        const isTextEntry = active && (
+            active.tagName === 'TEXTAREA' ||
+            active.tagName === 'SELECT' ||
+            active.isContentEditable ||
+            (active.tagName === 'INPUT' && !['range', 'checkbox', 'radio', 'button', 'color', 'file'].includes(active.type))
+        );
+        if (!isTextEntry && (e.code === 'Space' || e.key === ' ' || e.keyCode === 32)) {
+            e.preventDefault();
+        }
+        if (active && !isTextEntry && (
+            active.tagName === 'BUTTON' ||
+            active.type === 'range' ||
+            active.type === 'checkbox' ||
+            active.closest('.brutal-btn, .mini-btn, .tool-btn')
         )) {
-            if (e.code === 'Space' || e.key === ' ' || e.keyCode === 32) {
-                e.preventDefault();
-            }
-            document.activeElement.blur();
+            active.blur();
             window.focus();
         }
     }, { capture: true });
@@ -461,7 +469,12 @@ export function setupUI(app) {
     let gridSaveTimeout = null;
     const queueGridSettingsSave = () => {
         if (gridSaveTimeout) clearTimeout(gridSaveTimeout);
-        gridSaveTimeout = setTimeout(async () => {
+        const runGridSave = async () => {
+            gridSaveTimeout = null;
+            if (app._shouldDeferSettingsSave?.() || app.engine?.isDrawing) {
+                gridSaveTimeout = setTimeout(scheduleGridIdle, 600);
+                return;
+            }
             await app.storage.saveSetting('canvasBg', app.engine.canvasBg);
             await app.storage.saveSetting('gridColor', app.engine.gridColor);
             await app.storage.saveSetting('gridPattern', app.engine.gridPattern);
@@ -482,7 +495,19 @@ export function setupUI(app) {
                 project.settings.showGrid = app.engine.showGrid;
                 await app.storage.saveGlobalSetting('projects_list', app.projects);
             }
-        }, 300);
+        };
+        const scheduleGridIdle = () => {
+            if (app._shouldDeferSettingsSave?.() || app.engine?.isDrawing) {
+                gridSaveTimeout = setTimeout(scheduleGridIdle, 600);
+                return;
+            }
+            if (typeof requestIdleCallback === 'function') {
+                requestIdleCallback(() => { runGridSave(); }, { timeout: 1500 });
+            } else {
+                runGridSave();
+            }
+        };
+        gridSaveTimeout = setTimeout(scheduleGridIdle, 850);
     };
 
     // Original Settings inputs
@@ -542,12 +567,29 @@ export function setupUI(app) {
     let surfaceSaveTimeout = null;
     const queueSurfaceSettingsSave = () => {
         if (surfaceSaveTimeout) clearTimeout(surfaceSaveTimeout);
-        surfaceSaveTimeout = setTimeout(async () => {
+        const runSurfaceSave = async () => {
+            surfaceSaveTimeout = null;
             if (!app.engine?.surfaceManager) return;
+            if (app._shouldDeferSettingsSave?.() || app.engine?.isDrawing) {
+                surfaceSaveTimeout = setTimeout(scheduleSurfaceIdle, 600);
+                return;
+            }
             const serialized = app.engine.surfaceManager.serialize();
             await app.storage.saveSetting('canvasSurface', serialized);
             await updateProjectSetting('canvasSurface', serialized);
-        }, 250);
+        };
+        const scheduleSurfaceIdle = () => {
+            if (app._shouldDeferSettingsSave?.() || app.engine?.isDrawing) {
+                surfaceSaveTimeout = setTimeout(scheduleSurfaceIdle, 600);
+                return;
+            }
+            if (typeof requestIdleCallback === 'function') {
+                requestIdleCallback(() => { runSurfaceSave(); }, { timeout: 1500 });
+            } else {
+                runSurfaceSave();
+            }
+        };
+        surfaceSaveTimeout = setTimeout(scheduleSurfaceIdle, 900);
     };
 
     let surfacePreviewMode = 'albedo'; // 'albedo' | 'height' | 'pores'
@@ -1736,15 +1778,29 @@ export function setupUI(app) {
             const val = parseFloat(e.target.value);
             const valEl = document.getElementById('val-sumi-ink');
             if (valEl) valEl.innerText = `${Math.round(val)}%`;
-            const targetKey = sumiSettings.mode === 'water' ? 'sumiInkAffection' : 'sumiInk';
+            let targetKey = 'sumiInk';
+            if (sumiSettings.mode === 'water') targetKey = 'sumiInkAffection';
+            else if (sumiSettings.mode === 'eraser') targetKey = 'sumiEraserInk';
             app.updateActiveSetting(targetKey, val);
             syncSumiLive(false);
         };
     }
-    bindSumiSlider('slider-sumi-water', 'val-sumi-water', 'sumiWater', '%', false);
+    const sliderSumiWater = document.getElementById('slider-sumi-water');
+    if (sliderSumiWater) {
+        sliderSumiWater.oninput = (e) => {
+            const val = parseFloat(e.target.value);
+            const valEl = document.getElementById('val-sumi-water');
+            if (valEl) valEl.innerText = `${Math.round(val)}%`;
+            let targetKey = 'sumiWater';
+            if (sumiSettings.mode === 'water') targetKey = 'sumiWaterWash';
+            else if (sumiSettings.mode === 'eraser') targetKey = 'sumiEraserWater';
+            app.updateActiveSetting(targetKey, val);
+            syncSumiLive(false);
+        };
+    }
     bindSumiSlider('slider-sumi-bleed', 'val-sumi-bleed', 'sumiBleed', '%', false);
 
-    ['draw', 'water', 'blow', 'dry'].forEach(mode => {
+    ['draw', 'water', 'blow', 'dry', 'eraser'].forEach(mode => {
         const btn = document.getElementById(`btn-sumi-mode-${mode}`);
         if (btn) {
             btn.onclick = () => {
@@ -1796,9 +1852,12 @@ export function setupUI(app) {
     bindSumiSlider('adv-sumi-evaporation', 'adv-sumi-evaporation-val', 'sumiEvaporation', '%', false);
     bindSumiSlider('adv-sumi-capillarity', 'adv-sumi-capillarity-val', 'sumiCapillarity', '%', false);
     bindSumiSlider('adv-sumi-backrun', 'adv-sumi-backrun-val', 'sumiBackrun', '%', false);
+    bindSumiSlider('adv-sumi-turbulence', 'adv-sumi-turbulence-val', 'sumiTurbulence', '%', false);
     bindSumiSlider('adv-sumi-soot-snag', 'adv-sumi-soot-snag-val', 'sumiSootSnag', '%', false);
     bindSumiSlider('adv-sumi-tip-angle', 'adv-sumi-tip-angle-val', 'sumiTipAngle', '°', false);
     bindSumiSlider('adv-sumi-pressure-flow', 'adv-sumi-pressure-flow-val', 'sumiPressureFlow', '%', false);
+    bindSumiSlider('adv-sumi-pressure-gate', 'sumi-pressure-gate-val', 'sumiPressureGate', '%', false);
+    bindSumiSlider('sumi-max-water', 'max-water-val', 'sumiMaxWater', '%', false);
 
     const syncSumiHeightUi = (useH, src) => {
         const chkPanel = document.getElementById('chk-sumi-use-heightmap');
