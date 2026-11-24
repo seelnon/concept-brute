@@ -1121,12 +1121,16 @@ export function _endStroke(e = null) {
 
   // Store the dirty chunks as a history state
   if (this.currentStrokeDirtyChunks.size > 0) {
-      this._pushHistory({
+      const historyAction = {
           type: 'stroke',
           chunks: this.currentStrokeDirtyChunks,
           zoom: this.zoom,
           pan: { ...this.pan }
-      });
+      };
+      if (this.brush.type === TOOLS.SUMI && this.gpuRenderer?.sumiSolver?.attachHistoryAction) {
+          this.gpuRenderer.sumiSolver.attachHistoryAction(this, historyAction);
+      }
+      this._pushHistory(historyAction);
   }
   
   if (this.brush.type === TOOLS.REF_MOVE) {

@@ -138,20 +138,18 @@ export function captureLayerSnapshot(engine, chunk, layer, options = {}) {
 
 export function backupChunkLayer(engine, chunk, id, options = {}) {
     if (!engine || !chunk) return null;
-    if (!engine.currentStrokeDirtyChunks) {
-        engine.currentStrokeDirtyChunks = new Map();
-    }
-    if (!engine.currentStrokeDirtyChunks.has(id)) {
+    const targetMap = options.targetMap || engine.currentStrokeDirtyChunks || (engine.currentStrokeDirtyChunks = new Map());
+    if (!targetMap.has(id)) {
         const layer = options.layer !== undefined ? options.layer : engine.activeLayer;
         const entry = captureLayerSnapshot(engine, chunk, layer, options);
-        engine.currentStrokeDirtyChunks.set(id, entry);
+        targetMap.set(id, entry);
         if (options.markDirty !== false) {
             const dirtyIsEmpty = options.dirtyIsEmpty !== undefined ? options.dirtyIsEmpty : false;
-            engine._markDirty(id, layer, dirtyIsEmpty);
+            engine._markDirty(id, layer, dirtyIsEmpty, !!options.fromSumi);
         }
         return entry;
     }
-    return engine.currentStrokeDirtyChunks.get(id);
+    return targetMap.get(id);
 }
 
 export function restoreBackupToLayer(engine, chunk, id, data) {

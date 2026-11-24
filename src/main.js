@@ -2474,9 +2474,6 @@ class App {
     } else if (isAir) {
         const airTipLbl = el('air-active-tip-label');
         if (airTipLbl) airTipLbl.innerText = tipBadge;
-    } else if (isSumi) {
-        const sumiTipLbl = el('sumi-active-tip-label');
-        if (sumiTipLbl) sumiTipLbl.innerText = tipBadge;
     }
   }
 

@@ -3,6 +3,7 @@ import {
   restoreBackupToLayer,
   releaseBackupCanvas
 } from './backupPool.js';
+import { stopSumiSimLoop } from '../tools/sumiPaint.js';
 
 export function _disposeAction(action) {
   if (!action) return;
@@ -15,6 +16,10 @@ export function _disposeAction(action) {
           }
       });
       action.chunks.clear();
+  }
+  if (action.sumiPassive) {
+      action.sumiPassive.clear();
+      action.sumiPassive = null;
   }
   if (action.selection && action.selection.canvas) {
       if (this && this.floatingSelection && (action.selection === this.floatingSelection || action.selection.canvas === this.floatingSelection.canvas)) {
@@ -66,9 +71,22 @@ export function undo() {
   }
 
   if (this.history.length === 0) return;
-  if (this.flushPendingGpuCommits) this.flushPendingGpuCommits();
+
+  const peekAction = this.history[this.history.length - 1];
+  const isSumiAction = !!(peekAction && peekAction.isSumiStroke);
+  const sumiSolver = this.gpuRenderer?.sumiSolver;
+
+  if (isSumiAction) {
+      stopSumiSimLoop();
+      if (this.flushPendingGpuCommits) this.flushPendingGpuCommits({ keepSumiSession: true });
+      if (sumiSolver && sumiSolver.active && sumiSolver.hasCpuDirtyTiles()) {
+          sumiSolver.syncTilesToCanvas2D(this, sumiSolver.lastParams || {}, peekAction.chunks || null);
+      }
+  } else {
+      if (this.flushPendingGpuCommits) this.flushPendingGpuCommits();
+  }
   if (this.invalidateLiquifySession) this.invalidateLiquifySession();
-  
+
   const action = this.history.pop();
   if (action && action.type === 'stroke' && this.app && this.app.recorder) {
       this.app.recorder.onUndoCommitted();
@@ -89,6 +107,18 @@ export function undo() {
           selection: this.floatingSelection ? { ...this.floatingSelection } : null
       };
 
+      if (action.isSumiStroke && sumiSolver) {
+          redoAction.isSumiStroke = true;
+          redoAction.sumiLayer = action.sumiLayer;
+          redoAction.sumiProjId = action.sumiProjId;
+          redoAction.sumiPassive = sumiSolver.capturePassiveAfterForAction
+              ? sumiSolver.capturePassiveAfterForAction(this, action)
+              : null;
+          if (sumiSolver.active) {
+              sumiSolver.cancel(this, false);
+          }
+      }
+
       // Restore chunks
       if (action.chunks) {
           action.chunks.forEach((data, id) => {
@@ -99,6 +129,10 @@ export function undo() {
                   restoreBackupToLayer(this, chunk, id, data);
               }
           });
+      }
+
+      if (action.isSumiStroke && action.sumiPassive && sumiSolver?.restorePassiveSnapshot) {
+          sumiSolver.restorePassiveSnapshot(this, action.sumiPassive, action.sumiLayer);
       }
 
       // Restore Selection/Transform state
@@ -112,7 +146,7 @@ export function undo() {
       }
 
       // Dispose action containing selection only after restoring it to this.floatingSelection
-      if (action.chunks) {
+      if (action.chunks || action.sumiPassive) {
           this._disposeAction(action);
       }
   }
@@ -139,9 +173,23 @@ export function redo() {
   }
 
   if (this.redoStack.length === 0) return;
-  if (this.flushPendingGpuCommits) this.flushPendingGpuCommits();
+
+  const peekAction = this.redoStack[this.redoStack.length - 1];
+  const isSumiAction = !!(peekAction && peekAction.isSumiStroke);
+  const sumiSolver = this.gpuRenderer?.sumiSolver;
+
+  if (isSumiAction) {
+      stopSumiSimLoop();
+      if (this.flushPendingGpuCommits) this.flushPendingGpuCommits({ keepSumiSession: true });
+      if (sumiSolver && sumiSolver.active) {
+          // Commit any unrelated live Sumi work before restoring a future Sumi snapshot
+          sumiSolver.commitToChunks(this, sumiSolver.lastParams || {}, true);
+      }
+  } else {
+      if (this.flushPendingGpuCommits) this.flushPendingGpuCommits();
+  }
   if (this.invalidateLiquifySession) this.invalidateLiquifySession();
-  
+
   const action = this.redoStack.pop();
   if (action && action.type === 'stroke' && this.app && this.app.recorder) {
       this.app.recorder.onRedoCommitted();
@@ -162,6 +210,15 @@ export function redo() {
           selection: this.floatingSelection ? { ...this.floatingSelection } : null
       };
 
+      if (action.isSumiStroke && sumiSolver) {
+          undoAction.isSumiStroke = true;
+          undoAction.sumiLayer = action.sumiLayer;
+          undoAction.sumiProjId = action.sumiProjId;
+          undoAction.sumiPassive = sumiSolver.capturePassiveAfterForAction
+              ? sumiSolver.capturePassiveAfterForAction(this, action)
+              : null;
+      }
+
       if (action.chunks) {
           action.chunks.forEach((data, id) => {
               const chunk = this.chunks.get(id);
@@ -171,6 +228,10 @@ export function redo() {
                   restoreBackupToLayer(this, chunk, id, data);
               }
           });
+      }
+
+      if (action.isSumiStroke && action.sumiPassive && sumiSolver?.restorePassiveSnapshot) {
+          sumiSolver.restorePassiveSnapshot(this, action.sumiPassive, action.sumiLayer);
       }
 
       if (action.type === 'selection') {

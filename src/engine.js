@@ -4535,7 +4535,19 @@ export class Engine {
       this.chunks.forEach((chunk, id) => {
           snap.set(id, captureLayerSnapshot(this, chunk, index));
       });
-      this._pushHistory({ type: 'stroke', chunks: snap, zoom: this.zoom, pan: { ...this.pan } });
+      const sumiSolver = this.gpuRenderer?.sumiSolver;
+      const sumiProjId = this.currentProjectId || 'default';
+      const sumiPassive = sumiSolver?.captureLayerPassiveSnapshot
+          ? sumiSolver.captureLayerPassiveSnapshot(this, sumiProjId, index)
+          : null;
+      const hasSumi = !!(sumiPassive && sumiPassive.size > 0);
+      this._pushHistory({
+          type: 'stroke',
+          chunks: snap,
+          zoom: this.zoom,
+          pan: { ...this.pan },
+          ...(hasSumi ? { isSumiStroke: true, sumiLayer: index, sumiProjId, sumiPassive } : {})
+      });
 
       this.chunks.forEach((chunk, id) => {
           chunk.ctxs[index].clearRect(0, 0, chunk.width, chunk.height);

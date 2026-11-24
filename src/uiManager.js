@@ -1,7 +1,7 @@
 import { TOOLS, LAYERS_COUNT } from './constants.js';
 import { syncFluidSettingsFromTip } from './tools/fluidPaint.js';
 import { syncAirSettingsFromTip } from './tools/airPaint.js';
-import { sumiSettings, syncSumiSettingsFromTip, updateSumiSubtoolUI, syncSumiTip, reDipSumi, forceDrySumi } from './tools/sumiPaint.js';
+import { sumiSettings, syncSumiSettingsFromTip, updateSumiSubtoolUI, syncSumiTip, reDipSumi, forceDrySumi, stopSumiSimulation, clearSumiPores } from './tools/sumiPaint.js';
 import { SURFACE_PRESETS } from './engine/canvasSurfaceGpu.js';
 
 export function setupUI(app) {
@@ -1860,6 +1860,22 @@ export function setupUI(app) {
         };
     }
 
+    const btnSumiStop = document.getElementById('btn-sumi-stop');
+    if (btnSumiStop) {
+        btnSumiStop.onclick = () => {
+            if (app.engine) stopSumiSimulation(app.engine);
+            app._status('SUMI SIMULATION STOPPED (FULL DRY)');
+        };
+    }
+
+    const btnSumiClearPores = document.getElementById('btn-sumi-clear-pores');
+    if (btnSumiClearPores) {
+        btnSumiClearPores.onclick = () => {
+            if (app.engine) clearSumiPores(app.engine);
+            app._status('SUMI FIBER / ALBEDO / PORES CLEARED');
+        };
+    }
+
     // Advanced Sumi-e Physics Controls
     bindSumiCheck('adv-sumi-deplete', 'sumiDeplete');
     bindSumiCheck('adv-sumi-split-enabled', 'sumiSplitEnabled');
@@ -1988,8 +2004,6 @@ export function setupUI(app) {
     wireResetTipBtn('btn-fluid-reset-tip');
     wireSaveTipBtn('btn-air-save-tip', 'SAVE TIP');
     wireResetTipBtn('btn-air-reset-tip');
-    wireSaveTipBtn('btn-sumi-save-tip', 'SAVE TIP');
-    wireResetTipBtn('btn-sumi-reset-tip');
     wireSaveTipBtn('btn-adv-save-tip', 'SAVE TO TIP');
     wireResetTipBtn('btn-adv-reset-tip');
 

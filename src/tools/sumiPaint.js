@@ -99,7 +99,10 @@ function getPressureInkMod(engine, pressure, e) {
   const inf = engine.brush.pressureOpacityInfluence ?? 0.0;
   if (Math.abs(inf) < 0.001) return 1.0;
   const p = Math.max(0.01, Math.min(1.0, pressure ?? 1.0));
-  return Math.max(0.03, Math.min(1.5, (1.0 - inf) + p * inf));
+  const mod = inf <= 1.0
+    ? ((1.0 - inf) + p * inf)
+    : Math.pow(p, inf);
+  return Math.max(0.02, Math.min(1.5, mod));
 }
 
 export function syncSumiSettingsFromTip(tipSettings) {
@@ -384,6 +387,7 @@ class AlphaBristleBrush {
     toX,
     toY,
     sizePx,
+    reservoirSizePx = null,
     pressure,
     tiltX,
     tiltY,
@@ -455,7 +459,8 @@ class AlphaBristleBrush {
     const cosA = Math.cos(rotAngle);
     const sinA = Math.sin(rotAngle);
 
-    const sizeRatio = Math.max(0.45, Math.min(2.4, (sizePx || 40) / 40));
+    const resSizePx = reservoirSizePx || sizePx || 40;
+    const sizeRatio = Math.max(0.45, Math.min(2.4, resSizePx / 40));
     const spanPx = Math.max(90, (sumiSettings.depleteSpan || 550) * sizeRatio);
     const travelNorm = Math.min(0.28, stepDist / spanPx);
     const gateInf = Math.max(0, Math.min(1, (sumiSettings.pressureGate ?? 20) / 100));
@@ -545,8 +550,10 @@ class AlphaBristleBrush {
 
       if ((modeInt === 0 || modeInt === 4) && sumiSettings.depleteEnabled && stepDist > 0.1) {
         const drainScale = 0.55 + b.radialDist * 0.85;
+        const touchFrac = b.alphaWeight > 0.001 ? Math.max(0.0, Math.min(1.0, pressureGate / b.alphaWeight)) : 1.0;
+        const inkSpendFactor = Math.max(0.015, Math.min(1.5, inkScale * flowGain * touchFrac));
         b.waterLoad = Math.max(0.05, b.waterLoad - travelNorm * drainScale * 1.12);
-        b.inkLoad = Math.max(0.08, b.inkLoad - travelNorm * drainScale * 0.86);
+        b.inkLoad = Math.max(0.08, b.inkLoad - travelNorm * drainScale * 0.86 * inkSpendFactor);
       }
 
       inkSum += b.inkLoad;
@@ -746,6 +753,10 @@ function stopLiveSimLoop() {
   }
 }
 
+export function stopSumiSimLoop() {
+  stopLiveSimLoop();
+}
+
 function ensureLiveSimLoop(engine) {
   if (_simRafId) return;
   let idleTick = 0;
@@ -770,6 +781,8 @@ function ensureLiveSimLoop(engine) {
 
     if (solver.active && (engine.isDrawing || solver.simActiveFrames > 0)) {
       _simRafId = requestAnimationFrame(stepTick);
+    } else if (solver.active && !engine.isDrawing && solver.hasCpuDirtyTiles()) {
+      solver.syncTilesToCanvas2D(engine);
     }
   };
   _simRafId = requestAnimationFrame(stepTick);
@@ -835,6 +848,40 @@ export function forceDrySumi(engine) {
   return false;
 }
 
+export function stopSumiSimulation(engine) {
+  stopLiveSimLoop();
+  _lastStrokeWorld = null;
+  _lastRawPt = null;
+  _lastMidPt = null;
+  _isFirstMove = false;
+  const solver = engine?.gpuRenderer?.sumiSolver;
+  if (solver && typeof solver.stopAndFullDry === 'function') {
+    solver.stopAndFullDry(engine);
+  } else if (solver && solver.active) {
+    solver.forceDry(engine);
+  }
+  if (engine?.gpuRenderer) engine.gpuRenderer.requestRender();
+  renderSumiBristlePreview();
+  return true;
+}
+
+export function clearSumiPores(engine) {
+  stopLiveSimLoop();
+  _lastStrokeWorld = null;
+  _lastRawPt = null;
+  _lastMidPt = null;
+  _isFirstMove = false;
+  const solver = engine?.gpuRenderer?.sumiSolver;
+  if (solver && typeof solver.clearPoreAndFiberLayers === 'function') {
+    solver.clearPoreAndFiberLayers(engine);
+  } else if (solver && typeof solver.clearPassiveArchive === 'function') {
+    solver.clearPassiveArchive(null, null);
+  }
+  if (engine?.gpuRenderer) engine.gpuRenderer.requestRender();
+  renderSumiBristlePreview();
+  return true;
+}
+
 export function startSumiPaintStroke(engine, worldPos, e = null) {
   if (!engine) return;
   if (engine.brush) {
@@ -884,6 +931,7 @@ export function startSumiPaintStroke(engine, worldPos, e = null) {
     toX: worldPos.x,
     toY: worldPos.y,
     sizePx: effectiveSize,
+    reservoirSizePx: baseSize,
     pressure: startPres,
     tiltX,
     tiltY,
@@ -998,6 +1046,7 @@ function _emitQuadraticCurveBatch(engine, solver, pStart, pCtrl, pEnd, modeInt, 
       toX: nx,
       toY: ny,
       sizePx: stepSize,
+      reservoirSizePx: engine.brush.size || stepSize,
       pressure: stepPres,
       tiltX: stepTiltX,
       tiltY: stepTiltY,
