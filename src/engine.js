@@ -280,11 +280,37 @@ export class Engine {
   }
 
   hasPendingGpuCommits() {
-      return liquify.hasPendingLiquifyCommits(this);
+      const sumi = this.gpuRenderer?.sumiSolver;
+      return !!(liquify.hasPendingLiquifyCommits(this) || (sumi && sumi.hasPendingSyncs && sumi.hasPendingSyncs()));
   }
 
   flushPendingGpuCommits(options = {}) {
       liquify.flushLiquifyGpuCommits(this);
+      const sumi = this.gpuRenderer?.sumiSolver;
+      const keepSameSumi = !!(
+          options.keepSumiSession &&
+          sumi &&
+          sumi.active &&
+          sumi.layer === this.activeLayer &&
+          sumi.projectId === (this.currentProjectId || 'default')
+      );
+      if (sumi) {
+          if (keepSameSumi) {
+              if (options.syncSumiForReadback) {
+                  if (sumi.flushPendingChunkBackups) sumi.flushPendingChunkBackups();
+                  if (sumi.syncTilesToCanvas2D && sumi.hasCpuDirtyTiles && sumi.hasCpuDirtyTiles()) {
+                      sumi.syncTilesToCanvas2D(this, undefined, null, false);
+                  }
+                  if (sumi.flushPendingSyncs) sumi.flushPendingSyncs(this);
+              } else if (sumi.pumpAsyncWork) {
+                  sumi.pumpAsyncWork(this);
+              }
+          } else {
+              if (sumi.flushPendingChunkBackups) sumi.flushPendingChunkBackups();
+              if (sumi.flushPendingSyncs) sumi.flushPendingSyncs(this);
+              if (sumi.flushPendingPacks) sumi.flushPendingPacks();
+          }
+      }
       if (!options.keepSumiSession) {
           flushSumiToChunks(this, true);
       }
@@ -1169,7 +1195,6 @@ export class Engine {
 
     window.addEventListener('blur', handleReset);
     window.addEventListener('focus', () => {
-        this._containerRect = null;
         if (!this.isDrawing) {
             this.activePointers.clear();
             this._pointerTimes.clear();
@@ -1180,7 +1205,9 @@ export class Engine {
             this.isPanning = false;
             this.isZooming = false;
             this.isMouseDown = false;
-            this._updateCursor();
+        }
+        if (this.gpuRenderer && !this.gpuRenderer._contextLost) {
+            this.gpuRenderer.requestRender();
         }
     });
 
@@ -2169,6 +2196,11 @@ export class Engine {
       sCtx.drawImage(maskCanvas, 0, 0);
       sCtx.restore();
 
+      const sumiSolver = this.gpuRenderer && this.gpuRenderer.sumiSolver;
+      const sumiRes = (sumiSolver && typeof sumiSolver.extractSelectionPores === 'function')
+          ? sumiSolver.extractSelectionPores(this, this.activeLayer, fMinX, fMinY, width, height, maskCanvas, clearSource)
+          : null;
+
       // Clear the source areas if requested
       if (clearSource) {
           for (let cx = startCX; cx <= endCX; cx++) {
@@ -2199,6 +2231,9 @@ export class Engine {
                   this._markDirty(id, this.activeLayer);
               }
           }
+          if (sumiRes && sumiRes.touchedKeys && sumiSolver && typeof sumiSolver.refreshPassiveChunkRevs === 'function') {
+              sumiSolver.refreshPassiveChunkRevs(this, sumiRes.layer, sumiRes.projId, sumiRes.touchedKeys);
+          }
       }
 
       return {
@@ -2207,7 +2242,11 @@ export class Engine {
           y: fMinY,
           width: width,
           height: height,
-          affectedChunks: affectedChunks
+          affectedChunks: affectedChunks,
+          sumiPoreData: sumiRes ? sumiRes.sumiPoreData : null,
+          sumiPassive: sumiRes ? sumiRes.affectedPassive : null,
+          sumiLayer: sumiRes ? sumiRes.layer : this.activeLayer,
+          sumiProjId: sumiRes ? sumiRes.projId : (this.currentProjectId || 'default')
       };
   }
 
@@ -2218,6 +2257,9 @@ export class Engine {
           clip.width = data.width;
           clip.height = data.height;
           clip.getContext('2d').drawImage(data.canvas, 0, 0);
+          if (data.sumiPoreData) {
+              clip._sumiPoreData = { ...data.sumiPoreData };
+          }
           this.clipboard = clip;
           this._status('COPIED');
           return true;
@@ -2232,6 +2274,14 @@ export class Engine {
           clip.width = this.floatingSelection.canvas.width;
           clip.height = this.floatingSelection.canvas.height;
           clip.getContext('2d').drawImage(this.floatingSelection.canvas, 0, 0);
+          if (this.floatingSelection.sumiPoreData) {
+              const sumiSolver = this.gpuRenderer && this.gpuRenderer.sumiSolver;
+              if (this.floatingSelection.pins && this.floatingSelection.pins.length > 0 && sumiSolver && typeof sumiSolver.bakeSelectionPores === 'function') {
+                  clip._sumiPoreData = sumiSolver.bakeSelectionPores(this, this.floatingSelection);
+              } else {
+                  clip._sumiPoreData = { ...this.floatingSelection.sumiPoreData };
+              }
+          }
           this.clipboard = clip;
           this.floatingSelection = null;
           this.refresh();
@@ -2243,11 +2293,20 @@ export class Engine {
       const data = this._getSelectionData(true);
       if (data) {
           this.invalidateLiquifySession();
+          if (data.sumiPoreData) {
+              data.canvas._sumiPoreData = { ...data.sumiPoreData };
+          }
           this.clipboard = data.canvas;
-          this._pushHistory({ 
-              type: 'stroke', 
-              chunks: data.affectedChunks 
-          });
+          const act = {
+              type: 'stroke',
+              chunks: data.affectedChunks
+          };
+          if (data.sumiPassive && data.sumiPassive.size > 0) {
+              act.sumiPassive = data.sumiPassive;
+              act.sumiLayer = data.sumiLayer;
+              act.sumiProjId = data.sumiProjId;
+          }
+          this._pushHistory(act);
           this.activeSelectionPath = null;
           this.refresh();
           this._status('CUT');
@@ -2284,7 +2343,8 @@ export class Engine {
           scale: 1,
           rotation: 0,
           mirrorX: false,
-          mirrorY: false
+          mirrorY: false,
+          sumiPoreData: clip._sumiPoreData ? { ...clip._sumiPoreData } : null
       };
 
       this._pushHistory({
@@ -2322,15 +2382,22 @@ export class Engine {
           scale: 1,
           rotation: 0,
           mirrorX: false,
-          mirrorY: false
+          mirrorY: false,
+          sumiPoreData: data.sumiPoreData ? { ...data.sumiPoreData } : null
       };
 
-      this._pushHistory({ 
-          type: 'transform', 
-          chunks: data.affectedChunks, 
+      const act = {
+          type: 'transform',
+          chunks: data.affectedChunks,
           path: this.activeSelectionPath,
           selection: { ...this.floatingSelection }
-      });
+      };
+      if (data.sumiPassive && data.sumiPassive.size > 0) {
+          act.sumiPassive = data.sumiPassive;
+          act.sumiLayer = data.sumiLayer;
+          act.sumiProjId = data.sumiProjId;
+      }
+      this._pushHistory(act);
 
       this.activeSelectionPath = null;
       this._updateSelectionPreview();
@@ -2344,10 +2411,16 @@ export class Engine {
       const data = this._getSelectionData(true);
       if (data) {
           this.invalidateLiquifySession();
-          this._pushHistory({ 
-              type: 'stroke', 
-              chunks: data.affectedChunks 
-          });
+          const act = {
+              type: 'stroke',
+              chunks: data.affectedChunks
+          };
+          if (data.sumiPassive && data.sumiPassive.size > 0) {
+              act.sumiPassive = data.sumiPassive;
+              act.sumiLayer = data.sumiLayer;
+              act.sumiProjId = data.sumiProjId;
+          }
+          this._pushHistory(act);
       }
 
       this.clearSelection();
@@ -2361,7 +2434,10 @@ export class Engine {
   }
 
   pickColor(x, y) {
-    this.flushPendingGpuCommits();
+    this.flushPendingGpuCommits({
+        keepSumiSession: this.brush.type === TOOLS.SUMI,
+        syncSumiForReadback: true
+    });
     const m = this._getMousePos({ clientX: x, clientY: y, altKey: true });
     const wx = m.wx;
     const wy = m.wy;
@@ -4458,7 +4534,7 @@ export class Engine {
         action.chunks.forEach((data, id) => {
             const chunk = this.chunks.get(id);
             if (chunk) {
-                const redoBackup = captureLayerSnapshot(this, chunk, data.layer);
+                const redoBackup = captureLayerSnapshot(this, chunk, data.layer, { regionFrom: data });
                 redoAction.chunks.set(id, redoBackup);
                 restoreBackupToLayer(this, chunk, id, data);
             }
@@ -4504,7 +4580,7 @@ export class Engine {
         action.chunks.forEach((data, id) => {
             const chunk = this.chunks.get(id);
             if (chunk) {
-                const undoBackup = captureLayerSnapshot(this, chunk, data.layer);
+                const undoBackup = captureLayerSnapshot(this, chunk, data.layer, { regionFrom: data });
                 undoAction.chunks.set(id, undoBackup);
                 restoreBackupToLayer(this, chunk, id, data);
             }

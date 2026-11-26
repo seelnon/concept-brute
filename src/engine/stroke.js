@@ -19,6 +19,7 @@ import { hitTestTransformGizmo, updateGizmoHoverUI } from '../tools/selection.js
 import {
   backupChunkLayer,
   restoreBackupToLayer,
+  resolveBackupEntry,
   acquireBackupCanvas,
   releaseBackupCanvas
 } from './backupPool.js';
@@ -52,8 +53,11 @@ export function _startStroke(e) {
       return;
   }
 
+  let _initFlushMs = 0;
   if (this.flushPendingGpuCommits) {
+      const tF0 = performance.now();
       this.flushPendingGpuCommits({ keepSumiSession: this.brush.type === TOOLS.SUMI });
+      _initFlushMs = performance.now() - tF0;
   }
   if (this.brush.type !== TOOLS.LIQUIFY && this.invalidateLiquifySession) {
       this.invalidateLiquifySession();
@@ -189,13 +193,18 @@ export function _startStroke(e) {
   }
 
   if (this.onDrawStart) this.onDrawStart();
+  const siStart = performance.now();
+  const si = this.perfMonitor ? this.perfMonitor.strokeInitStats : null;
   if (this.perfMonitor) this.perfMonitor.markStrokeStart(this.brush.type);
   this.isDrawing = true;
-  this._strokeStartTime = performance.now();
+  this._strokeStartTime = siStart;
   this._fluidBristles = null;
   this.activeFluidBrush = null;
   cancelFluidAfterEffect(this);
+
+  const tMouse0 = si ? performance.now() : 0;
   const m = this._getMousePos(e);
+  const tMouse1 = si ? performance.now() : 0;
   this.lastPos = { x: m.x, y: m.y };
   this.lastWorldPos = { x: m.wx, y: m.wy };
   this.lastTime = e.timeStamp || performance.now();
@@ -231,6 +240,7 @@ export function _startStroke(e) {
   }
   if (!Number.isFinite(initSize) || initSize < 0.1) initSize = Math.max(0.1, this.brush.size);
   initOpacity = Math.max(0.005, Math.min(1.0, initOpacity));
+  const tPresEnd = si ? performance.now() : 0;
 
   const worldPos = {
       x: m.wx,
@@ -261,6 +271,13 @@ export function _startStroke(e) {
   // Clear dirty chunks tracking for this stroke
   this.currentStrokeDirtyChunks = new Map();
   if (this.perfMonitor) this.perfMonitor.markPhase('stroke_init', { tool: this.brush.type });
+
+  let _tipCacheMs = 0;
+  let _backupMs = 0;
+  let _chunksBackedUp = 0;
+  let _backupBytes = 0;
+  const tToolStart0 = si ? performance.now() : 0;
+
   if (this.brush.type === TOOLS.SMUDGE) {
       startSmudgeStroke(this, worldPos);
   } else if (this.brush.type === TOOLS.FLUID) {
@@ -291,7 +308,13 @@ export function _startStroke(e) {
                   const startChunk = this._getChunk(sCX, sCY);
                   if (startChunk) {
                       const id = `${sCX},${sCY}`;
-                      backupChunkLayer(this, startChunk, id, { layer: this.activeLayer });
+                      const tB0 = si ? performance.now() : 0;
+                      const ent = backupChunkLayer(this, startChunk, id, { layer: this.activeLayer });
+                      if (si) {
+                          _backupMs += performance.now() - tB0;
+                          _chunksBackedUp++;
+                          if (ent && ent.canvas) _backupBytes += ent.canvas.width * ent.canvas.height * 4;
+                      }
                   }
               }
           }
@@ -306,7 +329,9 @@ export function _startStroke(e) {
           const tipVer = this.brush.tip._tipVersion || 0;
           const cacheKey = `${airbrush}_${cacheSize}_${sharpen}_${tipVer}`;
           if (!this._tipColorCache || this._tipColorCache.key !== cacheKey || this._tipColorCache.color !== this.brush.color || this._tipColorCache.srcTip !== this.brush.tip) {
+              const tC0 = si ? performance.now() : 0;
               this._updateTipCache(cacheSize, airbrush, this.brush.color);
+              if (si) _tipCacheMs += performance.now() - tC0;
           }
       }
       // Pre-backup initial chunk under cursor during pointerdown if it overlaps static bounds (0 lag during drag!)
@@ -323,17 +348,47 @@ export function _startStroke(e) {
           const startChunk = this._getChunk(sCX, sCY);
           if (startChunk) {
               const id = `${sCX},${sCY}`;
-              backupChunkLayer(this, startChunk, id, { layer: this.activeLayer });
+              const tB0 = si ? performance.now() : 0;
+              const ent = backupChunkLayer(this, startChunk, id, { layer: this.activeLayer });
+              if (si) {
+                  _backupMs += performance.now() - tB0;
+                  _chunksBackedUp++;
+                  if (ent && ent.canvas) _backupBytes += ent.canvas.width * ent.canvas.height * 4;
+              }
           }
       }
   }
+  const tToolStart1 = si ? performance.now() : 0;
+
+  const tRedo0 = si ? performance.now() : 0;
   this._clearStack(this.redoStack);
+  if (si) {
+      const nowEnd = performance.now();
+      si.tool = this.brush.type;
+      si.pointerType = e?.pointerType || '';
+      si.isStatic = !!this.isStatic;
+      si.canvasDim = this.isStatic ? `${this.staticWidth}x${this.staticHeight}` : `chunks:${this.chunks.size}`;
+      si.flushGpuMs += _initFlushMs;
+      si.mousePosMs += (tMouse1 - tMouse0);
+      si.pressureMs += (tPresEnd - tMouse1);
+      si.tipCacheMs += _tipCacheMs;
+      si.backupMs += _backupMs;
+      si.toolStartMs += Math.max(0, (tToolStart1 - tToolStart0) - _tipCacheMs - _backupMs);
+      si.redoClearMs += (nowEnd - tRedo0);
+      si.chunksBackedUp += _chunksBackedUp;
+      si.backupBytes += _backupBytes;
+      si.totalMs += (nowEnd - siStart) + _initFlushMs;
+      if (this.perfMonitor) {
+          this.perfMonitor.recordWork(si.totalMs, 'stroke_init');
+      }
+  }
 }
 
 export function _moveStroke(e) {
   if ((this.isDrawing || this.isPanning || this.isZooming) && this._activeStrokePointerId != null && e && e.pointerId !== undefined && e.pointerId !== this._activeStrokePointerId) {
       return;
   }
+  const _pmMove0 = (this.perfMonitor && this.perfMonitor.enabled) ? performance.now() : 0;
   if (this.isDrawing && this.onDrawMove) this.onDrawMove();
 
   if (this.isPanning || (this.keys['r'] && this.isMouseDown)) {
@@ -692,6 +747,7 @@ export function _moveStroke(e) {
   };
 
   if (this.brush.type === TOOLS.WIREFRAME) {
+      if (this.perfMonitor) this.perfMonitor.markPhase('wireframe_step', { tool: this.brush.type, strokePointsCount: this.strokePoints.length + 1 });
       if ((this.brush.jitterHue || 0) > 0) {
           worldPos.color = this._shiftColor(worldPos.color, (Math.random() - 0.5) * (this.brush.jitterHue || 0) * 360, 0);
       }
@@ -700,6 +756,7 @@ export function _moveStroke(e) {
       }
       paintWireframeMove(this, worldPos);
   } else if (this.brush.type === TOOLS.FLUID) {
+      if (this.perfMonitor) this.perfMonitor.markPhase('fluid_step', { tool: this.brush.type });
       const lastP = this.strokePoints[this.strokePoints.length - 1];
       const dist = Math.hypot(worldTo.x - lastP.x, worldTo.y - lastP.y);
       const spacingRatio = this.brush.spacing !== undefined ? this.brush.spacing : 0.05;
@@ -709,6 +766,7 @@ export function _moveStroke(e) {
           this.strokePoints.push(worldPos);
       }
   } else if (this.brush.type === TOOLS.AIR) {
+      if (this.perfMonitor) this.perfMonitor.markPhase('air_step', { tool: this.brush.type });
       const lastP = this.strokePoints[this.strokePoints.length - 1];
       const dist = Math.hypot(worldTo.x - lastP.x, worldTo.y - lastP.y);
       const spacingRatio = this.brush.spacing !== undefined ? this.brush.spacing : 0.05;
@@ -743,6 +801,7 @@ export function _moveStroke(e) {
           paintAirIncrementally(this, this.strokePoints.length - 1);
       }
   } else if (this.brush.type === TOOLS.LIQUIFY) {
+      if (this.perfMonitor) this.perfMonitor.markPhase('liquify_step', { tool: this.brush.type });
       const lastP = this.strokePoints[this.strokePoints.length - 1];
       const dist = Math.hypot(worldTo.x - lastP.x, worldTo.y - lastP.y);
       
@@ -753,6 +812,7 @@ export function _moveStroke(e) {
           this.strokePoints.push(worldPos);
       }
   } else if (this.brush.type === TOOLS.SUMI) {
+      if (this.perfMonitor) this.perfMonitor.markPhase('sumi_stamp', { tool: this.brush.type, strokePointsCount: this.strokePoints.length + 1 });
       paintSumiMove(this, worldTo, dynamicSize, opacMod, color, this.lastPressure || pressure, e, vFactor);
       this.strokePoints.push(worldPos);
   } else {
@@ -788,9 +848,13 @@ export function _moveStroke(e) {
   this.lastPos = currentPos;
   this.lastWorldPos = worldTo;
   this.lastTime = currentTime;
+  if (_pmMove0 && this.perfMonitor) {
+      this.perfMonitor.recordWork(performance.now() - _pmMove0, this.perfMonitor.currentPhase || 'stroke_move');
+  }
 }
 
 export function _endStroke(e = null) {
+  const _pmEnd0 = (this.perfMonitor && this.perfMonitor.enabled) ? performance.now() : 0;
   // Finish last part of smoothed curve first
   if (this.isDrawing && this.brush.type !== TOOLS.LASSO && this.strokePoints.length > 1 && this.brush.type !== TOOLS.WIREFRAME && this.brush.type !== TOOLS.LIQUIFY && this.brush.type !== TOOLS.FLUID && this.brush.type !== TOOLS.AIR && this.brush.type !== TOOLS.SUMI) {
       const p_last = this.strokePoints[this.strokePoints.length - 1];
@@ -854,6 +918,7 @@ export function _endStroke(e = null) {
       clearAirParticles(this);
   }
   if (this.brush.type === TOOLS.SUMI) {
+      if (this.perfMonitor) this.perfMonitor.markPhase('sumi_end', { tool: this.brush.type });
       endSumiPaintStroke(this);
   }
   if (this.brush.type === TOOLS.ERASER) {
@@ -861,7 +926,9 @@ export function _endStroke(e = null) {
   }
 
   // Bake per-stroke buffer
-  if (this.perfMonitor) this.perfMonitor.markPhase('stroke_end_bake', { tool: this.brush.type, chunks: this.currentStrokeDirtyChunks ? this.currentStrokeDirtyChunks.size : 0 });
+  if (this.perfMonitor && this.brush.type !== TOOLS.SUMI) {
+      this.perfMonitor.markPhase('stroke_end_bake', { tool: this.brush.type, chunks: this.currentStrokeDirtyChunks ? this.currentStrokeDirtyChunks.size : 0 });
+  }
   if (this.brush.type !== TOOLS.ERASER && this.brush.type !== TOOLS.SMUDGE && this.brush.type !== TOOLS.LIQUIFY && this.brush.type !== TOOLS.FLUID && this.brush.type !== TOOLS.AIR && this.brush.type !== TOOLS.SUMI) {
       this.currentStrokeDirtyChunks.forEach((data, id) => {
           const chunk = this.chunks.get(id);
@@ -958,61 +1025,114 @@ export function _endStroke(e = null) {
               this.flushPendingGpuCommits();
           }
           this.currentStrokeDirtyChunks.forEach((data, id) => {
+              resolveBackupEntry(data);
               const chunk = this.chunks.get(id);
-              if (chunk && (data.canvas || data.wasEmpty)) {
+              if (chunk && (data.isPatchList || data.canvas || data.wasEmpty)) {
                   const lx = this.isStatic ? -this.staticWidth / 2 : chunk.cx * this.chunkSize;
                   const ly = this.isStatic ? -this.staticHeight / 2 : chunk.cy * this.chunkSize;
-
-                  const maskCanvas = acquireBackupCanvas(this, chunk.width, chunk.height, false);
-                  const maskCtx = maskCanvas._cached2dCtx || maskCanvas.getContext('2d');
-                  maskCtx.save();
-                  maskCtx.setTransform(1, 0, 0, 1, 0, 0);
-                  maskCtx.clearRect(0, 0, chunk.width, chunk.height);
-                  this.drawSelectionMask(maskCtx, this.activeSelectionPath, lx, ly);
-                  maskCtx.restore();
-
                   const layerCtx = chunk.ctxs[this.activeLayer];
 
-                  if (data.wasEmpty || !data.canvas) {
-                      layerCtx.save();
-                      layerCtx.setTransform(1, 0, 0, 1, 0, 0);
-                      layerCtx.globalCompositeOperation = 'destination-in';
-                      layerCtx.drawImage(maskCanvas, 0, 0);
-                      layerCtx.restore();
+                  if (data.isPatchList && data.patches) {
+                      const texW = chunk.canvases[this.activeLayer].width;
+                      const texH = chunk.canvases[this.activeLayer].height;
+                      const scaleX = texW / chunk.width;
+                      const scaleY = texH / chunk.height;
+                      data.patches.forEach((p) => {
+                          if (!p || !p.canvas || p.rw <= 0 || p.rh <= 0) return;
+                          const pWorldX = lx + p.rx / scaleX;
+                          const pWorldY = ly + p.ry / scaleY;
+
+                          const maskCanvas = acquireBackupCanvas(this, p.rw, p.rh, false);
+                          const maskCtx = maskCanvas._cached2dCtx || maskCanvas.getContext('2d');
+                          maskCtx.save();
+                          maskCtx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
+                          maskCtx.clearRect(0, 0, p.rw / scaleX, p.rh / scaleY);
+                          this.drawSelectionMask(maskCtx, this.activeSelectionPath, pWorldX, pWorldY);
+                          maskCtx.restore();
+
+                          const tempCurrent = acquireBackupCanvas(this, p.rw, p.rh, false);
+                          const tempCurrentCtx = tempCurrent._cached2dCtx || tempCurrent.getContext('2d');
+                          tempCurrentCtx.save();
+                          tempCurrentCtx.setTransform(1, 0, 0, 1, 0, 0);
+                          tempCurrentCtx.globalCompositeOperation = 'copy';
+                          tempCurrentCtx.drawImage(chunk.canvases[this.activeLayer], p.rx, p.ry, p.rw, p.rh, 0, 0, p.rw, p.rh);
+                          tempCurrentCtx.globalCompositeOperation = 'destination-in';
+                          tempCurrentCtx.drawImage(maskCanvas, 0, 0);
+                          tempCurrentCtx.restore();
+
+                          const tempBackup = acquireBackupCanvas(this, p.rw, p.rh, false);
+                          const tempBackupCtx = tempBackup._cached2dCtx || tempBackup.getContext('2d');
+                          tempBackupCtx.save();
+                          tempBackupCtx.setTransform(1, 0, 0, 1, 0, 0);
+                          tempBackupCtx.globalCompositeOperation = 'copy';
+                          tempBackupCtx.drawImage(p.canvas, 0, 0);
+                          tempBackupCtx.globalCompositeOperation = 'destination-out';
+                          tempBackupCtx.drawImage(maskCanvas, 0, 0);
+                          tempBackupCtx.restore();
+
+                          layerCtx.save();
+                          layerCtx.setTransform(1, 0, 0, 1, 0, 0);
+                          layerCtx.clearRect(p.rx, p.ry, p.rw, p.rh);
+                          layerCtx.globalCompositeOperation = 'source-over';
+                          layerCtx.drawImage(tempBackup, p.rx, p.ry);
+                          layerCtx.drawImage(tempCurrent, p.rx, p.ry);
+                          layerCtx.restore();
+
+                          releaseBackupCanvas(this, tempCurrent);
+                          releaseBackupCanvas(this, tempBackup);
+                          releaseBackupCanvas(this, maskCanvas);
+                      });
                   } else {
-                      const tempCurrent = acquireBackupCanvas(this, chunk.width, chunk.height, false);
-                      const tempCurrentCtx = tempCurrent._cached2dCtx || tempCurrent.getContext('2d');
-                      tempCurrentCtx.save();
-                      tempCurrentCtx.setTransform(1, 0, 0, 1, 0, 0);
-                      tempCurrentCtx.globalCompositeOperation = 'copy';
-                      tempCurrentCtx.drawImage(chunk.canvases[this.activeLayer], 0, 0);
-                      tempCurrentCtx.globalCompositeOperation = 'destination-in';
-                      tempCurrentCtx.drawImage(maskCanvas, 0, 0);
-                      tempCurrentCtx.restore();
+                      const maskCanvas = acquireBackupCanvas(this, chunk.width, chunk.height, false);
+                      const maskCtx = maskCanvas._cached2dCtx || maskCanvas.getContext('2d');
+                      maskCtx.save();
+                      maskCtx.setTransform(1, 0, 0, 1, 0, 0);
+                      maskCtx.clearRect(0, 0, chunk.width, chunk.height);
+                      this.drawSelectionMask(maskCtx, this.activeSelectionPath, lx, ly);
+                      maskCtx.restore();
 
-                      const tempBackup = acquireBackupCanvas(this, chunk.width, chunk.height, false);
-                      const tempBackupCtx = tempBackup._cached2dCtx || tempBackup.getContext('2d');
-                      tempBackupCtx.save();
-                      tempBackupCtx.setTransform(1, 0, 0, 1, 0, 0);
-                      tempBackupCtx.globalCompositeOperation = 'copy';
-                      tempBackupCtx.drawImage(data.canvas, 0, 0);
-                      tempBackupCtx.globalCompositeOperation = 'destination-out';
-                      tempBackupCtx.drawImage(maskCanvas, 0, 0);
-                      tempBackupCtx.restore();
+                      if (data.wasEmpty || !data.canvas) {
+                          layerCtx.save();
+                          layerCtx.setTransform(1, 0, 0, 1, 0, 0);
+                          layerCtx.globalCompositeOperation = 'destination-in';
+                          layerCtx.drawImage(maskCanvas, 0, 0);
+                          layerCtx.restore();
+                      } else {
+                          const tempCurrent = acquireBackupCanvas(this, chunk.width, chunk.height, false);
+                          const tempCurrentCtx = tempCurrent._cached2dCtx || tempCurrent.getContext('2d');
+                          tempCurrentCtx.save();
+                          tempCurrentCtx.setTransform(1, 0, 0, 1, 0, 0);
+                          tempCurrentCtx.globalCompositeOperation = 'copy';
+                          tempCurrentCtx.drawImage(chunk.canvases[this.activeLayer], 0, 0);
+                          tempCurrentCtx.globalCompositeOperation = 'destination-in';
+                          tempCurrentCtx.drawImage(maskCanvas, 0, 0);
+                          tempCurrentCtx.restore();
 
-                      layerCtx.save();
-                      layerCtx.setTransform(1, 0, 0, 1, 0, 0);
-                      layerCtx.globalCompositeOperation = 'copy';
-                      layerCtx.drawImage(tempBackup, 0, 0);
-                      layerCtx.globalCompositeOperation = 'lighter';
-                      layerCtx.drawImage(tempCurrent, 0, 0);
-                      layerCtx.restore();
+                          const tempBackup = acquireBackupCanvas(this, chunk.width, chunk.height, false);
+                          const tempBackupCtx = tempBackup._cached2dCtx || tempBackup.getContext('2d');
+                          tempBackupCtx.save();
+                          tempBackupCtx.setTransform(1, 0, 0, 1, 0, 0);
+                          tempBackupCtx.globalCompositeOperation = 'copy';
+                          tempBackupCtx.drawImage(data.canvas, 0, 0);
+                          tempBackupCtx.globalCompositeOperation = 'destination-out';
+                          tempBackupCtx.drawImage(maskCanvas, 0, 0);
+                          tempBackupCtx.restore();
 
-                      releaseBackupCanvas(this, tempCurrent);
-                      releaseBackupCanvas(this, tempBackup);
+                          layerCtx.save();
+                          layerCtx.setTransform(1, 0, 0, 1, 0, 0);
+                          layerCtx.globalCompositeOperation = 'copy';
+                          layerCtx.drawImage(tempBackup, 0, 0);
+                          layerCtx.globalCompositeOperation = 'lighter';
+                          layerCtx.drawImage(tempCurrent, 0, 0);
+                          layerCtx.restore();
+
+                          releaseBackupCanvas(this, tempCurrent);
+                          releaseBackupCanvas(this, tempBackup);
+                      }
+
+                      releaseBackupCanvas(this, maskCanvas);
                   }
 
-                  releaseBackupCanvas(this, maskCanvas);
                   if (this.gpuRenderer) {
                       this.gpuRenderer.markChunkLayerDirty(chunk, this.activeLayer);
                   }
@@ -1129,7 +1249,20 @@ export function _endStroke(e = null) {
       };
       if (this.brush.type === TOOLS.SUMI && this.gpuRenderer?.sumiSolver?.attachHistoryAction) {
           this.gpuRenderer.sumiSolver.attachHistoryAction(this, historyAction);
+      } else if (this.brush.type === TOOLS.LIQUIFY && this.gpuRenderer?.liquifySolver?.attachHistoryAction) {
+          this.gpuRenderer.liquifySolver.attachHistoryAction(this, historyAction);
+      } else if (this.brush.type === TOOLS.SMUDGE && this.gpuRenderer?.sumiSolver?.attachSmudgeHistoryAction) {
+          this.gpuRenderer.sumiSolver.attachSmudgeHistoryAction(this, historyAction);
       }
+      this._pushHistory(historyAction);
+  } else if (this.brush.type === TOOLS.SMUDGE && this.gpuRenderer?.sumiSolver?.hasPendingSmudgeHistory?.()) {
+      const historyAction = {
+          type: 'stroke',
+          chunks: new Map(),
+          zoom: this.zoom,
+          pan: { ...this.pan }
+      };
+      this.gpuRenderer.sumiSolver.attachSmudgeHistoryAction(this, historyAction);
       this._pushHistory(historyAction);
   }
   
@@ -1170,7 +1303,25 @@ export function _endStroke(e = null) {
   this.shiftLockAxis = null;
   this._status('READY');
   this._updateCursor();
-  if (this.perfMonitor) this.perfMonitor.markPhase('idle');
+  if (this.perfMonitor) {
+      if (_pmEnd0) {
+          this.perfMonitor.recordWork(performance.now() - _pmEnd0, this.perfMonitor.currentPhase || 'stroke_end');
+      }
+      const sumi = this.gpuRenderer?.sumiSolver;
+      const keepSimPhase = (
+          this.brush.type === TOOLS.SUMI &&
+          sumi &&
+          sumi.active &&
+          (
+              (sumi.simActiveFrames > 0 && (sumi._activeWetCount > 0 || (sumi.activeTiles && sumi.activeTiles.size > 0))) ||
+              (typeof sumi.hasPendingSyncs === 'function' && sumi.hasPendingSyncs())
+          )
+      );
+      this.perfMonitor.markStrokeEnd();
+      if (keepSimPhase) {
+          this.perfMonitor.markPhase('sumi_sim', { tool: 'sumi' });
+      }
+  }
   
   if (e) {
       if (e.pointerType === 'touch') {
@@ -1231,6 +1382,9 @@ export function _cancelStroke() {
               if (this.gpuRenderer) {
                   this.gpuRenderer.markChunkStrokeDirty(chunk, false);
               }
+          }
+          if (typeof data._cancelSync === 'function') {
+              data._cancelSync();
           }
           if (data.canvas) {
               releaseBackupCanvas(this, data);

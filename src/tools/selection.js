@@ -1046,11 +1046,17 @@ export function applySelection(engine) {
         }
     }
 
-    engine._pushHistory({ 
-        type: 'stroke', 
+    const applyAction = {
+        type: 'stroke',
         chunks: applyHistory,
-        selection: { ...engine.floatingSelection } 
-    });
+        selection: { ...engine.floatingSelection }
+    };
+    const sumiSolver = engine.gpuRenderer && engine.gpuRenderer.sumiSolver;
+    if (sel.sumiPoreData && sumiSolver && typeof sumiSolver.applySelectionPores === 'function') {
+        sumiSolver.applySelectionPores(engine, engine.activeLayer, sel, applyAction);
+    }
+
+    engine._pushHistory(applyAction);
     engine.floatingSelection = null;
     engine._gizmoDrag = null;
     engine.transformHistory = [];
@@ -1059,6 +1065,59 @@ export function applySelection(engine) {
     engine.refresh();
     engine._status('APPLIED');
     if (engine.onDrawEnd) engine.onDrawEnd();
+}
+
+export function computePinWarpVertices(w, h, pins, GRID_SIZE = 10) {
+    const vertices = [];
+    for (let i = 0; i <= GRID_SIZE; i++) {
+        vertices[i] = [];
+        const u = i / GRID_SIZE;
+        const ox = u * w;
+
+        for (let j = 0; j <= GRID_SIZE; j++) {
+            const v = j / GRID_SIZE;
+            const oy = v * h;
+
+            let sumW = 0;
+            let dispX = 0;
+            let dispY = 0;
+            let exactMatch = false;
+
+            if (pins && pins.length > 0) {
+                for (const pin of pins) {
+                    const dx = ox - pin.ox;
+                    const dy = oy - pin.oy;
+                    const distSq = dx * dx + dy * dy;
+
+                    if (distSq < 0.0001) {
+                        dispX = pin.x - pin.ox;
+                        dispY = pin.y - pin.oy;
+                        exactMatch = true;
+                        break;
+                    }
+
+                    const weight = 1.0 / distSq;
+                    sumW += weight;
+                    dispX += weight * (pin.x - pin.ox);
+                    dispY += weight * (pin.y - pin.oy);
+                }
+            }
+
+            let vx = ox;
+            let vy = oy;
+
+            if (exactMatch) {
+                vx += dispX;
+                vy += dispY;
+            } else if (sumW > 0) {
+                vx += dispX / sumW;
+                vy += dispY / sumW;
+            }
+
+            vertices[i][j] = { x: vx, y: vy };
+        }
+    }
+    return vertices;
 }
 
 export function warpSelectionImage(engine) {
@@ -1081,56 +1140,7 @@ export function warpSelectionImage(engine) {
     
     // Divide into a mesh grid of e.g. 10x10 vertices
     const GRID_SIZE = 10;
-    const vertices = [];
-    
-    // 1. Calculate displaced position of each vertex in the grid
-    for (let i = 0; i <= GRID_SIZE; i++) {
-        vertices[i] = [];
-        const u = i / GRID_SIZE;
-        const ox = u * w;
-        
-        for (let j = 0; j <= GRID_SIZE; j++) {
-            const v = j / GRID_SIZE;
-            const oy = v * h;
-            
-            // Calculate IDW displacement
-            let sumW = 0;
-            let dispX = 0;
-            let dispY = 0;
-            let exactMatch = false;
-            
-            for (const pin of sel.pins) {
-                const dx = ox - pin.ox;
-                const dy = oy - pin.oy;
-                const distSq = dx * dx + dy * dy;
-                
-                if (distSq < 0.0001) {
-                    dispX = pin.x - pin.ox;
-                    dispY = pin.y - pin.oy;
-                    exactMatch = true;
-                    break;
-                }
-                
-                const weight = 1.0 / distSq; // p = 2 is mathematically perfect and cheap
-                sumW += weight;
-                dispX += weight * (pin.x - pin.ox);
-                dispY += weight * (pin.y - pin.oy);
-            }
-            
-            let vx = ox;
-            let vy = oy;
-            
-            if (exactMatch) {
-                vx += dispX;
-                vy += dispY;
-            } else if (sumW > 0) {
-                vx += dispX / sumW;
-                vy += dispY / sumW;
-            }
-            
-            vertices[i][j] = { x: vx, y: vy };
-        }
-    }
+    const vertices = computePinWarpVertices(w, h, sel.pins, GRID_SIZE);
     
     // 2. Render triangles
     // Each quad has 2 triangles:

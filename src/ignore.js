@@ -1,9 +1,46 @@
 export function setupIgnoreSystem(engine) {
-    const isEditingText = () => {
+    const getTargetEl = (target) => {
+        if (!target) return null;
+        return target instanceof Element ? target : target.parentElement;
+    };
+
+    const isTextInputEl = (el) => {
+        if (!el || !(el instanceof Element)) return false;
+        if (el.isContentEditable) return true;
+        const tag = el.tagName;
+        if (tag === 'TEXTAREA') return true;
+        if (tag === 'INPUT') {
+            const type = (el.type || 'text').toLowerCase();
+            return !['range', 'checkbox', 'radio', 'button', 'submit', 'reset', 'color', 'file', 'image'].includes(type);
+        }
+        return false;
+    };
+
+    const isEditingText = () => isTextInputEl(document.activeElement);
+
+    const clearRogueSelection = () => {
+        const sel = window.getSelection?.();
+        if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
         const active = document.activeElement;
-        if (!active) return false;
-        const tag = active.tagName;
-        return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || active.isContentEditable;
+        if (!isTextInputEl(active)) {
+            sel.removeAllRanges();
+            return;
+        }
+        if (active.isContentEditable) {
+            if (!active.contains(sel.anchorNode) || !active.contains(sel.focusNode)) {
+                sel.removeAllRanges();
+            }
+            return;
+        }
+        const insideParentOnly = (
+            sel.anchorNode === active.parentNode &&
+            sel.focusNode === active.parentNode &&
+            Math.abs(sel.focusOffset - sel.anchorOffset) <= 1
+        );
+        const insideActive = active.contains(sel.anchorNode) && active.contains(sel.focusNode);
+        if (!insideActive && !insideParentOnly) {
+            sel.removeAllRanges();
+        }
     };
 
     // 1. Keydown default action blocks
@@ -54,6 +91,7 @@ export function setupIgnoreSystem(engine) {
             // Ctrl+A (Select All text/elements)
             if (lowKey === 'a') {
                 e.preventDefault();
+                clearRogueSelection();
                 return;
             }
             // Ctrl+P (Print)
@@ -81,8 +119,32 @@ export function setupIgnoreSystem(engine) {
         }
     }, { capture: true });
 
-    // 2. Prevent Alt+Click standard behaviors (downloading, focus stealing, etc.)
+    // 2. Prevent accidental text selection & non-draggable element drag-selection
+    document.addEventListener('selectstart', (e) => {
+        const el = getTargetEl(e.target);
+        if (!isTextInputEl(el)) {
+            e.preventDefault();
+        }
+    }, { capture: true });
+
+    document.addEventListener('dragstart', (e) => {
+        const el = getTargetEl(e.target);
+        if (isTextInputEl(el)) return;
+        if (el && el.closest('[draggable="true"]')) return;
+        e.preventDefault();
+    }, { capture: true });
+
+    document.addEventListener('selectionchange', clearRogueSelection);
+
+    // 3. Prevent Alt+Click standard behaviors and clear any non-input text selection
     window.addEventListener('pointerdown', (e) => {
+        const el = getTargetEl(e.target);
+        if (!isTextInputEl(el)) {
+            const sel = window.getSelection?.();
+            if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
+                sel.removeAllRanges();
+            }
+        }
         if (e.altKey) {
             // Prevent default behavior (e.g., Firefox window dragging, text selection)
             // but still allow our pointer handlers to capture coordinates.
@@ -90,7 +152,7 @@ export function setupIgnoreSystem(engine) {
         }
     }, { capture: true });
 
-    // 3. Block Context Menu globally in the drawing workspace and show selection options
+    // 4. Block Context Menu globally in the drawing workspace and show selection options
     window.addEventListener('contextmenu', (e) => {
         if (isEditingText()) {
             return;

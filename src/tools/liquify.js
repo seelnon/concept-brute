@@ -126,6 +126,7 @@ export function startLiquifyStroke(engine, worldPos) {
     if (engine.layerSettings[engine.activeLayer]?.locked) return;
 
     flushLiquifyGpuCommits(engine);
+    engine?.gpuRenderer?.sumiSolver?.flushActiveForExternalEdit?.(engine, engine.activeLayer);
 
     const gpuSolver = getGpuLiquifySolver(engine);
     if (gpuSolver && gpuSolver.beginStroke(engine)) {
@@ -479,6 +480,8 @@ export function paintLiquifyStroke(engine, from, to, dynamicSize, pressure) {
                         boxH,
                         boxImageData
                     );
+                    if (!chunk.nonSumiRev) chunk.nonSumiRev = [];
+                    chunk.nonSumiRev[engine.activeLayer] = (chunk.nonSumiRev[engine.activeLayer] || 0) + 1;
                 } else {
                     engine._markDirty(id, engine.activeLayer, false);
                 }

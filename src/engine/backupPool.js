@@ -100,6 +100,44 @@ export function captureLayerSnapshot(engine, chunk, layer, options = {}) {
         ? !!options.wasEmpty
         : !!(chunk.isEmpty && chunk.isEmpty[layer]);
 
+    if (options.regionFrom && options.regionFrom.isPatchList && options.regionFrom.patches) {
+        const patches = new Map();
+        options.regionFrom.patches.forEach((p, pk) => {
+            if (!p || p.rw <= 0 || p.rh <= 0) return;
+            const patchCanvas = acquireBackupCanvas(engine, p.rw, p.rh, willReadFrequently);
+            let pCtx = patchCanvas._cached2dCtx;
+            if (!pCtx) {
+                pCtx = patchCanvas.getContext('2d', willReadFrequently ? { willReadFrequently: true } : undefined);
+                patchCanvas._cached2dCtx = pCtx;
+            }
+            pCtx.save();
+            pCtx.setTransform(1, 0, 0, 1, 0, 0);
+            pCtx.globalAlpha = 1.0;
+            pCtx.globalCompositeOperation = 'copy';
+            pCtx.drawImage(srcCanvas, p.rx, p.ry, p.rw, p.rh, 0, 0, p.rw, p.rh);
+            pCtx.restore();
+            patches.set(pk, {
+                rx: p.rx,
+                ry: p.ry,
+                rw: p.rw,
+                rh: p.rh,
+                canvas: patchCanvas,
+                ctx: pCtx,
+                width: p.rw,
+                height: p.rh,
+                _willReadFrequently: willReadFrequently
+            });
+        });
+        return {
+            layer,
+            isPatchList: true,
+            wasEmpty: false,
+            width: srcCanvas.width,
+            height: srcCanvas.height,
+            patches
+        };
+    }
+
     if (!needCanvas && wasChunkEmpty) {
         return {
             layer,
@@ -152,8 +190,16 @@ export function backupChunkLayer(engine, chunk, id, options = {}) {
     return targetMap.get(id);
 }
 
+export function resolveBackupEntry(entry) {
+    if (entry && typeof entry._resolveSync === 'function') {
+        entry._resolveSync();
+    }
+    return entry;
+}
+
 export function restoreBackupToLayer(engine, chunk, id, data) {
     if (!engine || !chunk || !data) return;
+    resolveBackupEntry(data);
     const layer = data.layer;
     const dstCanvas = chunk.canvases[layer];
     const ctx = chunk.ctxs[layer];
@@ -161,7 +207,20 @@ export function restoreBackupToLayer(engine, chunk, id, data) {
 
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    if (data.wasEmpty || !data.canvas) {
+    if (data.isPatchList && data.patches) {
+        data.patches.forEach((p) => {
+            if (!p || p.rw <= 0 || p.rh <= 0) return;
+            ctx.clearRect(p.rx, p.ry, p.rw, p.rh);
+            if (p.canvas) {
+                ctx.globalAlpha = 1.0;
+                ctx.globalCompositeOperation = 'source-over';
+                ctx.imageSmoothingEnabled = false;
+                ctx.drawImage(p.canvas, p.rx, p.ry);
+            }
+        });
+        ctx.restore();
+        engine._markDirty(id, layer, false);
+    } else if (data.wasEmpty || !data.canvas) {
         ctx.clearRect(0, 0, dstCanvas.width, dstCanvas.height);
         ctx.restore();
         engine._markDirty(id, layer, true);

@@ -327,6 +327,14 @@ export class GpuLiquifySolver {
     this._sessionDispRes = DEFAULT_DISP_RES;
     this._activeModeCfg = null;
 
+    // Sumi-e passive dryPig/baseBg distortion sync state
+    this._sumiSessionOrigs = new Map();
+    this._sumiStrokeBefore = null;
+    this._sumiStrokeDstBounds = null;
+    this._sumiWarpedThisStroke = false;
+    this._sumiTouchLayer = -1;
+    this._sumiTouchProjId = null;
+
     this.boundMinDx = 0;
     this.boundMaxDx = 0;
     this.boundMinDy = 0;
@@ -916,6 +924,7 @@ export class GpuLiquifySolver {
     }
     this._releaseAllDispTiles();
     this._releaseAllOrigs();
+    this._sumiSessionOrigs.clear();
     this._sessionActive = false;
     this._sessionProjectId = null;
     this._sessionLayer = -1;
@@ -927,13 +936,18 @@ export class GpuLiquifySolver {
       this.flushPendingCommits(engine);
     }
 
+    const layer = engine?.activeLayer ?? -1;
+    const sumiSolver = this.gpuRenderer?.sumiSolver;
+    if (sumiSolver && sumiSolver.flushActiveForExternalEdit) {
+      sumiSolver.flushActiveForExternalEdit(engine, layer);
+    }
+
     const cfg = this._getModeConfig(engine);
     this._ensureWorkDispSize(cfg.workTex);
     this._activeDispRes = cfg.dispRes;
     this._activeModeCfg = cfg;
 
     const projId = engine?.currentProjectId || 'default';
-    const layer = engine?.activeLayer ?? -1;
     const canReuseSession = !!(
       cfg.sessionPersistent &&
       !engine?.activeSelectionPath &&
@@ -949,12 +963,19 @@ export class GpuLiquifySolver {
     if (!canReuseSession) {
       this._releaseAllDispTiles();
       this._releaseAllOrigs();
+      this._sumiSessionOrigs.clear();
       this._sessionActive = !!cfg.sessionPersistent && !engine?.activeSelectionPath;
       this._sessionProjectId = projId;
       this._sessionLayer = layer;
       this._sessionQuality = cfg.quality;
       this._sessionDispRes = cfg.dispRes;
     }
+
+    this._sumiStrokeBefore = new Map();
+    this._sumiStrokeDstBounds = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+    this._sumiWarpedThisStroke = false;
+    this._sumiTouchLayer = layer;
+    this._sumiTouchProjId = projId;
 
     this.touchedDestChunks.clear();
     this.boundMinDx = 0;
@@ -1129,6 +1150,27 @@ export class GpuLiquifySolver {
     const srcMaxX = Math.ceil(dstMaxX - localMinDx + 6);
     const srcMinY = Math.floor(dstMinY - localMaxDy - 6);
     const srcMaxY = Math.ceil(dstMaxY - localMinDy + 6);
+
+    if (this._sumiStrokeDstBounds) {
+      this._sumiStrokeDstBounds.minX = Math.min(this._sumiStrokeDstBounds.minX, dstMinX);
+      this._sumiStrokeDstBounds.maxX = Math.max(this._sumiStrokeDstBounds.maxX, dstMaxX);
+      this._sumiStrokeDstBounds.minY = Math.min(this._sumiStrokeDstBounds.minY, dstMinY);
+      this._sumiStrokeDstBounds.maxY = Math.max(this._sumiStrokeDstBounds.maxY, dstMaxY);
+    }
+    const sumiSolver = this.gpuRenderer?.sumiSolver;
+    if (sumiSolver && sumiSolver.captureSumiRegionForLiquify) {
+      sumiSolver.captureSumiRegionForLiquify(
+        engine,
+        layer,
+        this._sumiTouchProjId || engine?.currentProjectId || 'default',
+        Math.min(srcMinX, dstMinX),
+        Math.min(srcMinY, dstMinY),
+        Math.max(srcMaxX, dstMaxX),
+        Math.max(srcMaxY, dstMaxY),
+        this._sumiSessionOrigs,
+        this._sumiStrokeBefore
+      );
+    }
 
     // Gather non-empty source chunks BEFORE binding progWarp
     const srcEntries = [];
@@ -1678,6 +1720,10 @@ export class GpuLiquifySolver {
     this.chunkOrigs.clear();
     this.origPool = [];
     this.touchedDestChunks.clear();
+    this._sumiSessionOrigs.clear();
+    this._sumiStrokeBefore = null;
+    this._sumiStrokeDstBounds = null;
+    this._sumiWarpedThisStroke = false;
     this._pboRing = [];
     this.workDispA = null;
     this.workDispB = null;
@@ -1743,6 +1789,8 @@ export class GpuLiquifySolver {
 
       if (chunk.isEmpty) chunk.isEmpty[layer] = false;
       if (chunk.gpuDirty) chunk.gpuDirty[layer] = false;
+      if (!chunk.nonSumiRev) chunk.nonSumiRev = [];
+      chunk.nonSumiRev[layer] = (chunk.nonSumiRev[layer] || 0) + 1;
       if (chunk._cachedOffscreenImageData) {
         chunk._cachedOffscreenImageData[layer] = null;
       }
@@ -1785,10 +1833,69 @@ export class GpuLiquifySolver {
     }
   }
 
+  _warpSumiPassiveAfterCommit(engine) {
+    const sumiSolver = this.gpuRenderer?.sumiSolver;
+    if (!sumiSolver || !sumiSolver.applyLiquifyWarpToPassive) return false;
+    if (!this._sumiStrokeBefore || this._sumiStrokeBefore.size === 0) return false;
+    if (!this._sumiStrokeDstBounds || !(this._sumiStrokeDstBounds.maxX > this._sumiStrokeDstBounds.minX)) return false;
+
+    let anyPassive = false;
+    for (const v of this._sumiStrokeBefore.values()) {
+      if (v && v.entry) {
+        anyPassive = true;
+        break;
+      }
+    }
+    if (!anyPassive) {
+      for (const v of this._sumiSessionOrigs.values()) {
+        if (v && v.dryPigBytes) {
+          anyPassive = true;
+          break;
+        }
+      }
+    }
+    if (!anyPassive) return false;
+
+    const layer = this._sumiTouchLayer >= 0 ? this._sumiTouchLayer : (engine?.activeLayer ?? 0);
+    const projId = this._sumiTouchProjId || engine?.currentProjectId || 'default';
+    const dispRes = this._activeDispRes || DEFAULT_DISP_RES;
+
+    const warped = sumiSolver.applyLiquifyWarpToPassive(
+      engine,
+      layer,
+      projId,
+      this._sumiStrokeDstBounds,
+      this._sumiSessionOrigs,
+      this._sumiStrokeBefore,
+      this.activeDispTiles,
+      dispRes
+    );
+    if (warped) {
+      this._sumiWarpedThisStroke = true;
+    }
+    return warped;
+  }
+
+  attachHistoryAction(engine, action) {
+    if (!action || !this._sumiWarpedThisStroke || !this._sumiStrokeBefore || this._sumiStrokeBefore.size === 0) {
+      this._sumiStrokeBefore = null;
+      this._sumiWarpedThisStroke = false;
+      return;
+    }
+    action.sumiLayer = this._sumiTouchLayer >= 0 ? this._sumiTouchLayer : (engine?.activeLayer ?? 0);
+    action.sumiProjId = this._sumiTouchProjId || engine?.currentProjectId || 'default';
+    action.sumiPassive = this._sumiStrokeBefore;
+    this._sumiStrokeBefore = null;
+    this._sumiWarpedThisStroke = false;
+  }
+
   endStroke(engine) {
     if (!this.ready || !this.active) return;
 
     this._commitToCanvas2D(engine, !!engine.activeSelectionPath);
+    this._warpSumiPassiveAfterCommit(engine);
+    this._sumiStrokeDstBounds = null;
+
     const cfg = this._activeModeCfg || this._getModeConfig(engine);
     const keepSession = !!(
       cfg.sessionPersistent &&
@@ -1800,6 +1907,7 @@ export class GpuLiquifySolver {
     if (!keepSession) {
       this._releaseAllDispTiles();
       this._releaseAllOrigs();
+      this._sumiSessionOrigs.clear();
       this._sessionActive = false;
     }
 
@@ -1825,6 +1933,10 @@ export class GpuLiquifySolver {
     }
     this._releaseAllDispTiles();
     this._releaseAllOrigs();
+    this._sumiSessionOrigs.clear();
+    this._sumiStrokeBefore = null;
+    this._sumiStrokeDstBounds = null;
+    this._sumiWarpedThisStroke = false;
     this._sessionActive = false;
     this.touchedDestChunks.clear();
     this.active = false;

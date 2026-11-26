@@ -430,8 +430,12 @@ export class GPURenderer {
         this.airSolver.ready = false;
       }
       if (this.sumiSolver) {
-        this.sumiSolver.active = false;
-        this.sumiSolver.ready = false;
+        if (this.sumiSolver.onContextLost) {
+          this.sumiSolver.onContextLost();
+        } else {
+          this.sumiSolver.active = false;
+          this.sumiSolver.ready = false;
+        }
       }
       if (this.eraserSolver) {
         this.eraserSolver.active = false;
@@ -467,6 +471,7 @@ export class GPURenderer {
 
     this.selectionTexture = null;
     this.ccLutTex = null;
+    this._clearFbo = null;
     this.ccPreviewEnabled = false;
     this.ccPreviewPaused = false;
     this.ccPreviewLayer = -1;
@@ -502,6 +507,13 @@ export class GPURenderer {
       }
       this.markAllChunksDirty();
       this.requestRender();
+      if (this.engine && this.engine.app) {
+        if (this.engine.app._warmedTools) this.engine.app._warmedTools.clear();
+        this.engine.app._allToolsPrewarmed = false;
+        if (typeof this.engine.app._scheduleLazyHotTools === 'function') {
+          this.engine.app._scheduleLazyHotTools(180);
+        }
+      }
     }
   }
 
@@ -632,6 +644,37 @@ export class GPURenderer {
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
   }
 
+  _clearTexture(tex) {
+    if (!tex || !this.gl || this.gl.isContextLost()) return;
+    const gl = this.gl;
+    if (!this._clearFbo) {
+      this._clearFbo = gl.createFramebuffer();
+    }
+    const prevFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+    const prevScissor = gl.isEnabled(gl.SCISSOR_TEST);
+    if (prevScissor) gl.disable(gl.SCISSOR_TEST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._clearFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, null, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, prevFbo);
+    if (prevScissor) gl.enable(gl.SCISSOR_TEST);
+  }
+
+  _createEmptyTexture(w, h, useLinear = true) {
+    const gl = this.gl;
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, useLinear ? gl.LINEAR : gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, useLinear ? gl.LINEAR : gl.NEAREST);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    this._clearTexture(tex);
+    return tex;
+  }
+
   _createOrUpdateTexture(existingTex, sourceCanvasOrImg, useLinear = true) {
     const gl = this.gl;
     let tex = existingTex;
@@ -743,6 +786,7 @@ export class GPURenderer {
     this.fluidOverlay = null;
     this.smudgeOverlay = null;
     this.sumiOverlay = null;
+    this._pendingSumiPores = null;
     if (this.airSolver?.resetProjectState) this.airSolver.resetProjectState(prevProjId);
     if (this.fluidSolver?.resetProjectState) this.fluidSolver.resetProjectState();
     if (this.smudgeSolver?.resetProjectState) this.smudgeSolver.resetProjectState();
@@ -771,6 +815,10 @@ export class GPURenderer {
       this.gl.deleteTexture(this.ccLutTex);
       this.ccLutTex = null;
     }
+    if (this._clearFbo) {
+      this.gl.deleteFramebuffer(this._clearFbo);
+      this._clearFbo = null;
+    }
     if (this.airSolver) {
       this.airSolver.dispose();
       this.airSolver = null;
@@ -795,6 +843,7 @@ export class GPURenderer {
       this.sumiSolver = null;
     }
     this.sumiOverlay = null;
+    this._pendingSumiPores = null;
     if (this.eraserSolver) {
       this.eraserSolver.dispose();
       this.eraserSolver = null;
@@ -863,6 +912,12 @@ export class GPURenderer {
     const engine = this.engine;
     const rect = engine.getContainerRect();
     if (!rect || !rect.width || !rect.height) return;
+
+    const _pm = (engine && engine.perfMonitor && engine.perfMonitor.enabled) ? engine.perfMonitor : null;
+    const _sumiPerf = (engine && engine.perfMonitor && engine.perfMonitor.sumiFrameStats && this.sumiSolver && this.sumiSolver.active)
+      ? engine.perfMonitor.sumiFrameStats
+      : null;
+    const _tRender0 = (_sumiPerf || _pm) ? performance.now() : 0;
 
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const targetW = Math.round(rect.width * dpr);
@@ -1154,6 +1209,15 @@ export class GPURenderer {
         const isEmpty = chunk.isEmpty && chunk.isEmpty[layer] && !chunk.gpuDirty[layer];
         if (isEmpty && !chunk.gpuTextures[layer]) continue;
 
+        if (chunk.gpuDirty[layer] && chunk.isEmpty && chunk.isEmpty[layer]) {
+          if (chunk.gpuTextures[layer]) {
+            gl.deleteTexture(chunk.gpuTextures[layer]);
+            chunk.gpuTextures[layer] = null;
+          }
+          chunk.gpuDirty[layer] = false;
+          continue;
+        }
+
         if (chunk.gpuDirty[layer] || !chunk.gpuTextures[layer]) {
           chunk.gpuTextures[layer] = this._createOrUpdateTexture(
             chunk.gpuTextures[layer],
@@ -1284,5 +1348,10 @@ export class GPURenderer {
     }
 
     gl.bindVertexArray(null);
+    if (_sumiPerf || _pm) {
+      const renderDt = performance.now() - _tRender0;
+      if (_sumiPerf) _sumiPerf.gpuRenderMs += renderDt;
+      if (_pm) _pm.recordWork(renderDt, 'gpu_render');
+    }
   }
 }

@@ -259,22 +259,47 @@ export class TimelapseRecorder {
     }
   }
 
-  async flushBufferedFrames() {
+  async flushBufferedFrames(opts = {}) {
+    const background = !!opts.background;
+    const shouldAbort = typeof opts.shouldAbort === 'function' ? opts.shouldAbort : null;
     if (this._pendingGpuCapture && this.engine && typeof this.engine.flushPendingGpuCommits === 'function') {
-      this.engine.flushPendingGpuCommits();
+      if (background) {
+        this.engine.flushPendingGpuCommits({
+          keepSumiSession: this.app && this.app.activeTool === 'sumi',
+          syncSumiForReadback: true
+        });
+      } else {
+        this.engine.flushPendingGpuCommits();
+      }
     }
     if (this._flushPromise) return this._flushPromise;
     this._clearEncodeTimer();
-    if (!this._hasBufferedFrames()) return;
+    if (!this._hasBufferedFrames()) return { aborted: false };
 
+    let aborted = false;
     this._flushPromise = (async () => {
       const waitStart = Date.now();
       while (this._isEncodingBuffer && (Date.now() - waitStart) < 12000) {
+        if (shouldAbort && shouldAbort()) {
+          aborted = true;
+          return;
+        }
         await new Promise(r => setTimeout(r, 10));
       }
       for (let i = 0; i < this.frames.length; i++) {
+        if (shouldAbort && shouldAbort()) {
+          aborted = true;
+          return;
+        }
         const item = this.frames[i];
         if (item && typeof item === 'object' && item.__buffered && item.canvas) {
+          if (background) {
+            await new Promise(r => setTimeout(r, 0));
+            if (shouldAbort && shouldAbort()) {
+              aborted = true;
+              return;
+            }
+          }
           try {
             const blob = await canvasToJpegBlobAsync(item.canvas, 0.8);
             if (blob) {
@@ -295,6 +320,7 @@ export class TimelapseRecorder {
     } finally {
       this._flushPromise = null;
     }
+    return { aborted };
   }
 
   _getFramePreviewSrc(frame) {
@@ -403,9 +429,15 @@ export class TimelapseRecorder {
     this.updateUI();
   }
 
-  async saveCurrentSession(explicitProjectId = null) {
-    if (!this.app || !this.app.storage) return;
-    await this.flushBufferedFrames();
+  async saveCurrentSession(explicitProjectId = null, opts = {}) {
+    if (!this.app || !this.app.storage) return { aborted: false };
+    const background = !!opts.background;
+    const shouldAbort = typeof opts.shouldAbort === 'function' ? opts.shouldAbort : null;
+
+    const flushRes = await this.flushBufferedFrames({ background, shouldAbort });
+    if (flushRes && flushRes.aborted) {
+      return { aborted: true };
+    }
 
     if (this._legacyNeedsPageMigration) {
       this._markPagesDirtyFrom(0);
@@ -425,6 +457,15 @@ export class TimelapseRecorder {
         : Array.from(this._dirtyPageVersions.keys()).filter(p => p >= 0 && p < pageCount);
 
       for (const pageIdx of pagesToWrite) {
+        if (shouldAbort && shouldAbort()) {
+          return { aborted: true };
+        }
+        if (background) {
+          await new Promise(r => setTimeout(r, 0));
+          if (shouldAbort && shouldAbort()) {
+            return { aborted: true };
+          }
+        }
         const versionAtStart = this._dirtyPageVersions.get(pageIdx);
         const start = pageIdx * TIMELAPSE_PAGE_SIZE;
         let slice = this.frames.slice(start, start + TIMELAPSE_PAGE_SIZE);

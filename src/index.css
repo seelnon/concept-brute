@@ -1,13 +1,18 @@
 /* BRUTALIST RESET */
-* {
+*, *::before, *::after {
     box-sizing: border-box;
     margin: 0;
     padding: 0;
     -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -ms-user-select: none;
+    -moz-user-select: none;
     touch-action: manipulation;
 }
 
-body {
+html, body {
     background-color: #f0f0f0;
     color: black;
     overflow: hidden;
@@ -19,10 +24,29 @@ body {
     touch-action: none;
 }
 
+button, input, select, textarea, label, span, div {
+    -webkit-touch-callout: none;
+}
+
 button, input, select, textarea {
     font-family: inherit;
     color: inherit;
-    -webkit-touch-callout: none;
+}
+
+input[type="text"],
+input[type="number"],
+input[type="search"],
+input[type="email"],
+input[type="url"],
+input[type="password"],
+input:not([type]),
+textarea,
+[contenteditable="true"] {
+    user-select: text;
+    -webkit-user-select: text;
+    -ms-user-select: text;
+    -moz-user-select: text;
+    -webkit-touch-callout: default;
 }
 
 button {
@@ -1911,9 +1935,28 @@ input[type="range"] {
     gap: 12px;
 }
 
-::selection {
+input::selection,
+textarea::selection,
+[contenteditable="true"]::selection {
     background-color: black;
     color: white;
+}
+
+input::-moz-selection,
+textarea::-moz-selection,
+[contenteditable="true"]::-moz-selection {
+    background-color: black;
+    color: white;
+}
+
+*:not(input):not(textarea):not([contenteditable="true"])::selection {
+    background: transparent;
+    color: inherit;
+}
+
+*:not(input):not(textarea):not([contenteditable="true"])::-moz-selection {
+    background: transparent;
+    color: inherit;
 }
 
 /* SETTINGS TABS */

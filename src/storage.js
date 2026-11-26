@@ -718,8 +718,8 @@ export class SketchStorage {
 
   async saveSetting(id, value, explicitProjectId = null, immediate = false) {
     const key = this._getSettingKey(id, explicitProjectId);
-    // Keep heavyweight keys (historyStack, referenceImages, canvasSurface, timelapse) immediate when saved
-    const isHeavy = immediate || id === 'historyStack' || id === 'redoStack' || id === 'referenceImages' || id === 'canvasSurface' || id.startsWith('timelapse');
+    // Keep heavyweight keys (historyStack, referenceImages, canvasSurface, sumiPores, timelapse) immediate when saved
+    const isHeavy = immediate || id === 'historyStack' || id === 'redoStack' || id === 'referenceImages' || id === 'canvasSurface' || id === 'sumiPores' || id.startsWith('timelapse');
     return this._putCompartment('settings', key, { id: key, value }, isHeavy);
   }
 

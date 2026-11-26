@@ -861,6 +861,17 @@
                           <span class="checkbox-custom"></span>
                        </div>
                     </div>
+                    <div class="settings-group" style="margin-top: 8px; margin-bottom: 0;">
+                       <div style="display: flex; justify-content: space-between; align-items: center;">
+                           <label class="settings-label">SAVE MODE</label>
+                           <span id="save-mode-val" style="font-size: 8px; font-weight: 900;">BACKGROUND</span>
+                       </div>
+                       <div style="display: flex; gap: 4px;">
+                           <button type="button" id="btn-save-mode-bg" class="brutal-btn active-btn" style="flex: 1; font-size: 8px; padding: 4px 6px;">BACKGROUND</button>
+                           <button type="button" id="btn-save-mode-fast" class="brutal-btn" style="flex: 1; font-size: 8px; padding: 4px 6px;">FAST</button>
+                       </div>
+                       <p id="save-mode-hint" style="font-size: 8px; margin: 2px 0 0 0; opacity: 0.7; line-height: 1.25;">Gentle idle-sliced background save (keeps painting at 60 FPS).</p>
+                    </div>
                  </div>
 
                  <div class="settings-divider"></div>
@@ -1390,9 +1401,21 @@
                             <span class="checkbox-custom"></span>
                          </div>
                       </div>
-                      <div class="settings-row">
+                      <div class="settings-row" style="margin-bottom: 6px;">
                          <label class="settings-label">HEIGHT SOURCE</label>
                          <button id="adv-sumi-height-source" class="brutal-btn" style="font-size: 8px; height: 20px; padding: 0 8px;">SURFACE</button>
+                      </div>
+                      <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 2px;">
+                          <label class="settings-label" title="Fluid solver texel resolution &amp; Jacobi precision (world bleed invariant)">SOLVER RES</label>
+                          <span id="adv-sumi-quality-val" style="font-size: 9px; font-weight: 900;">FULL 1:1</span>
+                      </div>
+                      <input type="range" id="adv-sumi-quality" min="1" max="3" step="1" value="3" class="brutal-range" style="width: 100%;">
+                      <div class="settings-row" style="margin-top: 8px;">
+                         <label class="settings-label" title="Pause fluid simulation while dragging so strokes feel like a fast brush, then settle after pen lift">PAUSE SIM ON STROKE</label>
+                         <div class="checkbox-wrapper">
+                            <input type="checkbox" id="adv-sumi-pause-paint" class="settings-input-check">
+                            <span class="checkbox-custom"></span>
+                         </div>
                       </div>
                    </div>
                 </div>
@@ -2244,12 +2267,12 @@
         </div>
 
         <!-- PAPER BLEED -->
-        <div class="slider-container">
+        <div class="slider-container" title="0% = full paper resistance &amp; friction, 50% = natural canvas properties, 100% = ~2x bleed bypassing canvas sizing">
           <div class="slider-header">
             <label class="slider-label" style="font-size: 8px;">PAPER BLEED</label>
-            <span id="val-sumi-bleed" class="slider-value" style="font-size: 8px; font-weight: bold;">58%</span>
+            <span id="val-sumi-bleed" class="slider-value" style="font-size: 8px; font-weight: bold;">50%</span>
           </div>
-          <input type="range" id="slider-sumi-bleed" min="0" max="100" value="58" class="brutal-range">
+          <input type="range" id="slider-sumi-bleed" min="0" max="100" value="50" class="brutal-range">
         </div>
 
         <!-- SURFACE HEIGHTMAP COLLISION & SOURCE -->
@@ -2267,10 +2290,35 @@
           <input type="checkbox" id="chk-sumi-physical-mix" checked style="width: 14px; height: 14px; cursor: pointer; accent-color: black;">
         </div>
 
+        <!-- SOLVER RESOLUTION & PRECISION PRESETS -->
+        <div style="display: flex; flex-direction: column; gap: 3px; border: 1px solid black; padding: 4px 6px; background: white;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-size: 7px; font-weight: 900; letter-spacing: 0.03em;">SOLVER RES</span>
+            <span id="val-sumi-quality" style="font-size: 7px; font-weight: 900;">FULL 1:1</span>
+          </div>
+          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px;">
+            <button id="btn-sumi-q-1" class="brutal-btn" title="FAST: 1/2x texel resolution, 4 Jacobi passes (best for wide 30% zoom)" style="font-size: 7px; height: 18px; padding: 0 2px;">FAST 1/2</button>
+            <button id="btn-sumi-q-2" class="brutal-btn" title="CRISP: 3/4x texel resolution, 6 Jacobi passes (fast &amp; sharp)" style="font-size: 7px; height: 18px; padding: 0 2px;">CRISP 3/4</button>
+            <button id="btn-sumi-q-3" class="brutal-btn active-btn" title="FULL: 1:1 native texel resolution, 8 Jacobi passes" style="font-size: 7px; height: 18px; padding: 0 2px;">FULL 1:1</button>
+          </div>
+        </div>
+
+        <!-- PAUSE SIMULATION WHILE PAINTING -->
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 4px; border: 1px solid black; padding: 5px 6px; background: white;">
+          <label for="chk-sumi-pause-paint" style="font-size: 8px; font-weight: bold; cursor: pointer; user-select: none;" title="Pause fluid simulation while dragging so strokes feel like a fast brush, then settle after pen lift">PAUSE SIM ON STROKE</label>
+          <input type="checkbox" id="chk-sumi-pause-paint" style="width: 14px; height: 14px; cursor: pointer; accent-color: black;">
+        </div>
+
+        <!-- ACTIVE SOLVERS STATUS & WATER STOP HINT -->
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 4px; border: 1px solid black; padding: 4px 6px; background: #f4f4f4; font-size: 7px; font-weight: 900; letter-spacing: 0.03em;">
+          <span>ACTIVE SOLVERS: <span id="val-sumi-active-solvers">0</span></span>
+          <span style="opacity: 0.72;">SHIFT+S: STOP WATER</span>
+        </div>
+
         <!-- PERFORMANCE KILL SWITCHES -->
         <div style="display: flex; flex-direction: column; gap: 4px; border-top: 2px solid black; padding-top: 6px; margin-top: 2px;">
           <div style="display: flex; gap: 4px;">
-            <button id="btn-sumi-stop" class="brutal-btn" title="Full-dry all wet ink and halt water simulation immediately" style="flex: 1; font-size: 8px; font-weight: 900; height: 22px; background: black; color: white; padding: 0 4px;">STOP</button>
+            <button id="btn-sumi-stop" class="brutal-btn" title="Full-dry all wet ink and halt water simulation immediately (Shift+S)" style="flex: 1; font-size: 8px; font-weight: 900; height: 22px; background: black; color: white; padding: 0 4px;">STOP</button>
             <button id="btn-sumi-clear-pores" class="brutal-btn" title="Flush visible ink, full-dry, and purge all background fiber/albedo/pore layers from memory" style="flex: 1; font-size: 8px; font-weight: 900; height: 22px; padding: 0 4px;">CLEAR PORES</button>
           </div>
         </div>

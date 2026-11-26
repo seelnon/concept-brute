@@ -5,7 +5,7 @@ export class PerfMonitor {
   constructor(app) {
     this.app = app;
     this.engine = app.engine;
-    this.enabled = true;
+    this.enabled = false;
     this.paintOnly = true; // Focus on painting & user actions
     this.autoOpenOnDrop = false;
     this._prewarmSuppressed = false;
@@ -36,9 +36,71 @@ export class PerfMonitor {
     this.strokePointsCount = 0;
     this.lastInteractionTime = performance.now();
 
+    // Zero-allocation per-frame Stroke Init instrumentation accumulators (reset every rAF)
+    this.strokeInitStats = {
+      tool: '',
+      pointerType: '',
+      flushGpuMs: 0,
+      mousePosMs: 0,
+      pressureMs: 0,
+      tipCacheMs: 0,
+      backupMs: 0,
+      toolStartMs: 0,
+      redoClearMs: 0,
+      totalMs: 0,
+      chunksBackedUp: 0,
+      backupBytes: 0,
+      isStatic: false,
+      canvasDim: ''
+    };
+
+    // Zero-allocation per-frame Sumi-e instrumentation accumulators (reset every rAF)
+    this.sumiFrameStats = {
+      beginMs: 0,
+      tuftMs: 0,
+      backupMs: 0,
+      backupMode: '',
+      backupBytes: 0,
+      tileEnsureMs: 0,
+      tilesCreated: 0,
+      tilesEvicted: 0,
+      subBakeMs: 0,
+      subBakedCount: 0,
+      assembleMs: 0,
+      physicsMs: 0,
+      compositeMs: 0,
+      storeBlitMs: 0,
+      stampMs: 0,
+      stampMoves: 0,
+      stampBoxes: 0,
+      stampSegs: 0,
+      simMs: 0,
+      simClusters: 0,
+      simBoxes: 0,
+      retireDryBoxes: 0,
+      syncMs: 0,
+      syncTiles: 0,
+      probeMs: 0,
+      gpuRenderMs: 0,
+      previewMs: 0,
+      activeTiles: 0,
+      wetTiles: 0,
+      passiveTiles: 0,
+      inFlightSyncs: 0,
+      inFlightBackups: 0,
+      retireQueue: 0,
+      canvasDim: '',
+      isStatic: false,
+      zoom: 1,
+      quality: 2
+    };
+
     // UI throttler: update DOM only 5 times a second to ensure 0 lag from profiler itself
     this.lastUiUpdateTime = 0;
     this.uiUpdateInterval = 180; // ms
+    this.frameWorkMs = 0;
+    this.frameWorkLabel = '';
+    this._frameWorkPeakMs = 0;
 
     // Animation frame handle
     this.rafId = null;
@@ -83,9 +145,82 @@ export class PerfMonitor {
     this.start();
   }
 
+  _resetStrokeInitStats() {
+    const s = this.strokeInitStats;
+    s.tool = '';
+    s.pointerType = '';
+    s.flushGpuMs = 0;
+    s.mousePosMs = 0;
+    s.pressureMs = 0;
+    s.tipCacheMs = 0;
+    s.backupMs = 0;
+    s.toolStartMs = 0;
+    s.redoClearMs = 0;
+    s.totalMs = 0;
+    s.chunksBackedUp = 0;
+    s.backupBytes = 0;
+    s.isStatic = false;
+    s.canvasDim = '';
+  }
+
+  _resetSumiFrameStats() {
+    const s = this.sumiFrameStats;
+    s.beginMs = 0;
+    s.tuftMs = 0;
+    s.backupMs = 0;
+    s.backupMode = '';
+    s.backupBytes = 0;
+    s.tileEnsureMs = 0;
+    s.tilesCreated = 0;
+    s.tilesEvicted = 0;
+    s.subBakeMs = 0;
+    s.subBakedCount = 0;
+    s.assembleMs = 0;
+    s.physicsMs = 0;
+    s.compositeMs = 0;
+    s.storeBlitMs = 0;
+    s.stampMs = 0;
+    s.stampMoves = 0;
+    s.stampBoxes = 0;
+    s.stampSegs = 0;
+    s.simMs = 0;
+    s.simClusters = 0;
+    s.simBoxes = 0;
+    s.retireDryBoxes = 0;
+    s.syncMs = 0;
+    s.syncTiles = 0;
+    s.probeMs = 0;
+    s.gpuRenderMs = 0;
+    s.previewMs = 0;
+    s.activeTiles = 0;
+    s.wetTiles = 0;
+    s.passiveTiles = 0;
+    s.inFlightSyncs = 0;
+    s.inFlightBackups = 0;
+    s.retireQueue = 0;
+  }
+
+  _resetFrameWorkStats() {
+    this.frameWorkMs = 0;
+    this.frameWorkLabel = '';
+    this._frameWorkPeakMs = 0;
+  }
+
+  recordWork(ms, label = '') {
+    if (!this.enabled || !Number.isFinite(ms) || ms <= 0) return;
+    this.frameWorkMs += ms;
+    if (label && ms > this._frameWorkPeakMs) {
+      this._frameWorkPeakMs = ms;
+      this.frameWorkLabel = label;
+    }
+  }
+
   resetTiming() {
     this.lastFrameTime = performance.now();
     this.fpsHistory.length = 0;
+    this._resetStrokeInitStats();
+    this._resetSumiFrameStats();
+    this._resetFrameWorkStats();
   }
 
   markInteraction() {
@@ -158,10 +293,20 @@ export class PerfMonitor {
     if ((now - (this._lastFocusTime || 0)) < 400) return false; // Allow compositor wake-up settle after Alt-Tab
 
     if (this.paintOnly) {
-      // Must be actively painting on canvas or within 70ms of stroke commit
+      // Must be actively painting on canvas, within 70ms of stroke commit, or stepping live Sumi fluid sim
       const isDrawing = !!(this.engine && this.engine.isDrawing);
       const isFinishingStroke = (now - (this.lastStrokeEndTime || 0)) < 70;
-      if (!isDrawing && !isFinishingStroke) return false;
+      const sumi = this.engine && this.engine.gpuRenderer && this.engine.gpuRenderer.sumiSolver;
+      const isLiveSumiSim = !!(
+        (this.currentPhase === 'sumi_sim' || this.currentPhase === 'sumi_end') &&
+        sumi &&
+        sumi.active &&
+        (
+          (sumi.simActiveFrames > 0 && (sumi._activeWetCount > 0 || (sumi.activeTiles && sumi.activeTiles.size > 0))) ||
+          (typeof sumi.hasPendingSyncs === 'function' && sumi.hasPendingSyncs())
+        )
+      );
+      if (!isDrawing && !isFinishingStroke && !isLiveSumiSim) return false;
     }
 
     // Idle phase has no active engine rendering; ignore OS/browser power-saving rAF jitter
@@ -195,6 +340,8 @@ export class PerfMonitor {
   _checkFrame(now) {
     if (document.hidden || (typeof document.hasFocus === 'function' && !document.hasFocus())) {
       this.lastFrameTime = now;
+      this._resetStrokeInitStats();
+      this._resetSumiFrameStats();
       return;
     }
 
@@ -204,6 +351,9 @@ export class PerfMonitor {
     // Discard spikes from background tab reactivation or device sleep (> 250ms)
     if (dt > 250) {
       this.fpsHistory.length = 0;
+      this._resetStrokeInitStats();
+      this._resetSumiFrameStats();
+      this._resetFrameWorkStats();
       return;
     }
 
@@ -218,14 +368,19 @@ export class PerfMonitor {
     for (let i = 0; i < this.fpsHistory.length; i++) sum += this.fpsHistory[i];
     this.avgFps = sum / this.fpsHistory.length;
 
-    if (instantFps < this.minFps && this.isMonitoringEligible(now)) {
+    const eligible = this.isMonitoringEligible(now);
+    if (instantFps < this.minFps && eligible) {
       this.minFps = instantFps;
     }
 
     // Check for FPS drop below threshold
-    if (dt > this.thresholdMs && this.isMonitoringEligible(now)) {
+    if (dt > this.thresholdMs && eligible) {
       this._recordDrop(dt, instantFps, now);
     }
+
+    this._resetStrokeInitStats();
+    this._resetSumiFrameStats();
+    this._resetFrameWorkStats();
 
     // Throttled UI refresh so the profiler itself uses 0.0% CPU
     if (now - this.lastUiUpdateTime > this.uiUpdateInterval) {
@@ -236,6 +391,135 @@ export class PerfMonitor {
     }
   }
 
+  _snapshotStrokeInitStats() {
+    const s = this.strokeInitStats;
+    if (!s || (!s.totalMs && !s.flushGpuMs && !s.toolStartMs && !s.backupMs && !s.tipCacheMs)) {
+      return null;
+    }
+    const r = (v) => Math.round(v * 100) / 100;
+    const out = {
+      totalMs: r(s.totalMs),
+      tool: s.tool || this.lastTool,
+      pointerType: s.pointerType || '',
+      isStatic: !!s.isStatic,
+      canvasDim: s.canvasDim || ''
+    };
+    if (s.flushGpuMs > 0.01) out.flushGpuMs = r(s.flushGpuMs);
+    if (s.mousePosMs > 0.01) out.mousePosMs = r(s.mousePosMs);
+    if (s.pressureMs > 0.01) out.pressureMs = r(s.pressureMs);
+    if (s.tipCacheMs > 0.01) out.tipCacheMs = r(s.tipCacheMs);
+    if (s.backupMs > 0.01) out.backupMs = r(s.backupMs);
+    if (s.toolStartMs > 0.01) out.toolStartMs = r(s.toolStartMs);
+    if (s.redoClearMs > 0.01) out.redoClearMs = r(s.redoClearMs);
+    if (s.chunksBackedUp > 0) out.chunksBackedUp = s.chunksBackedUp;
+    if (s.backupBytes > 0) out.backupMB = Math.round((s.backupBytes / (1024 * 1024)) * 100) / 100;
+    return out;
+  }
+
+  _snapshotSumiFrameStats(activeTool, phase) {
+    const s = this.sumiFrameStats;
+    const hasActivity = (
+      s.beginMs > 0 || s.tuftMs > 0 || s.backupMs > 0 || s.tileEnsureMs > 0 ||
+      s.subBakeMs > 0 || s.assembleMs > 0 || s.physicsMs > 0 || s.compositeMs > 0 ||
+      s.storeBlitMs > 0 || s.stampMs > 0 || s.simMs > 0 || s.syncMs > 0 ||
+      s.probeMs > 0 || s.previewMs > 0 || s.tilesCreated > 0 || s.tilesEvicted > 0 ||
+      s.simBoxes > 0 || s.stampBoxes > 0
+    );
+    if (!hasActivity && activeTool !== 'sumi' && !(phase && phase.startsWith('sumi'))) {
+      return null;
+    }
+    const r = (v) => Math.round(v * 100) / 100;
+    const out = {
+      canvasDim: s.canvasDim || '',
+      isStatic: !!s.isStatic,
+      zoom: Math.round((s.zoom || 1) * 1000) / 1000,
+      quality: s.quality || 2,
+      activeTiles: s.activeTiles,
+      wetTiles: s.wetTiles,
+      passiveTiles: s.passiveTiles
+    };
+    if (s.beginMs > 0.01) out.beginMs = r(s.beginMs);
+    if (s.tuftMs > 0.01) out.tuftMs = r(s.tuftMs);
+    if (s.backupMs > 0.01) out.backupMs = r(s.backupMs);
+    if (s.backupMode) out.backupMode = s.backupMode;
+    if (s.backupBytes > 0) out.backupMB = Math.round((s.backupBytes / (1024 * 1024)) * 100) / 100;
+    if (s.tileEnsureMs > 0.01) out.tileEnsureMs = r(s.tileEnsureMs);
+    if (s.tilesCreated > 0) out.tilesCreated = s.tilesCreated;
+    if (s.tilesEvicted > 0) out.tilesEvicted = s.tilesEvicted;
+    if (s.subBakeMs > 0.01) out.subBakeMs = r(s.subBakeMs);
+    if (s.subBakedCount > 0) out.subBakedCount = s.subBakedCount;
+    if (s.assembleMs > 0.01) out.assembleMs = r(s.assembleMs);
+    if (s.physicsMs > 0.01) out.physicsMs = r(s.physicsMs);
+    if (s.compositeMs > 0.01) out.compositeMs = r(s.compositeMs);
+    if (s.storeBlitMs > 0.01) out.storeBlitMs = r(s.storeBlitMs);
+    if (s.stampMs > 0.01) out.stampMs = r(s.stampMs);
+    if (s.stampMoves > 0) out.stampMoves = s.stampMoves;
+    if (s.stampBoxes > 0) out.stampBoxes = s.stampBoxes;
+    if (s.stampSegs > 0) out.stampSegs = s.stampSegs;
+    if (s.simMs > 0.01) out.simMs = r(s.simMs);
+    if (s.simClusters > 0) out.simClusters = s.simClusters;
+    if (s.simBoxes > 0) out.simBoxes = s.simBoxes;
+    if (s.retireDryBoxes > 0) out.retireDryBoxes = s.retireDryBoxes;
+    if (s.syncMs > 0.01) out.syncMs = r(s.syncMs);
+    if (s.syncTiles > 0) out.syncTiles = s.syncTiles;
+    if (s.probeMs > 0.01) out.probeMs = r(s.probeMs);
+    if (s.gpuRenderMs > 0.01) out.gpuRenderMs = r(s.gpuRenderMs);
+    if (s.previewMs > 0.01) out.previewMs = r(s.previewMs);
+    if (s.inFlightSyncs > 0) out.inFlightSyncs = s.inFlightSyncs;
+    if (s.inFlightBackups > 0) out.inFlightBackups = s.inFlightBackups;
+    if (s.retireQueue > 0) out.retireQueue = s.retireQueue;
+    return out;
+  }
+
+  _buildBreakdownLine(si, ss) {
+    const parts = [];
+    if (si) {
+      const steps = [
+        ['total', si.totalMs],
+        ['flush', si.flushGpuMs],
+        ['tipCache', si.tipCacheMs],
+        ['backup', si.backupMs],
+        ['toolStart', si.toolStartMs],
+        ['redo', si.redoClearMs]
+      ];
+      for (let i = 0; i < steps.length; i++) {
+        if ((steps[i][1] || 0) >= 0.3) parts.push(`${steps[i][0]}:${steps[i][1].toFixed(1)}ms`);
+      }
+      if (si.backupMB) parts.push(`bak:${si.backupMB.toFixed(1)}MB`);
+    }
+    if (ss) {
+      const steps = [
+        ['tuft', ss.tuftMs],
+        ['begin', ss.beginMs],
+        ['ensure', ss.tileEnsureMs],
+        ['subBake', ss.subBakeMs],
+        ['sumiBak', ss.backupMs],
+        ['stamp', ss.stampMs],
+        ['sim', ss.simMs],
+        ['asm', ss.assembleMs],
+        ['phys', ss.physicsMs],
+        ['comp', ss.compositeMs],
+        ['blit', ss.storeBlitMs],
+        ['sync', ss.syncMs],
+        ['gpuRend', ss.gpuRenderMs],
+        ['prev', ss.previewMs]
+      ];
+      for (let i = 0; i < steps.length; i++) {
+        if ((steps[i][1] || 0) >= 0.3) parts.push(`${steps[i][0]}:${steps[i][1].toFixed(1)}ms`);
+      }
+      if (ss.backupMode) parts.push(`bakMode:${ss.backupMode}`);
+      if (ss.backupMB) parts.push(`bak:${ss.backupMB.toFixed(1)}MB`);
+      if (ss.tilesCreated) parts.push(`+tiles:${ss.tilesCreated}`);
+      if (ss.tilesEvicted) parts.push(`evict:${ss.tilesEvicted}`);
+      if (ss.stampBoxes) parts.push(`stmpBox:${ss.stampBoxes}`);
+      if (ss.simBoxes) parts.push(`simBox:${ss.simBoxes}`);
+      if (ss.retireDryBoxes) parts.push(`retBox:${ss.retireDryBoxes}`);
+      if (ss.syncTiles) parts.push(`syncT:${ss.syncTiles}`);
+      parts.push(`T:${ss.wetTiles}/${ss.activeTiles} z:${Math.round((ss.zoom || 1) * 100)}% q:${ss.quality}`);
+    }
+    return parts.join(' | ');
+  }
+
   _recordDrop(dt, instantFps, now) {
     this.dropsCount++;
 
@@ -244,7 +528,36 @@ export class PerfMonitor {
     const activeTool = (this.engine && this.engine.brush) ? this.engine.brush.type : (this.lastTool || 'unknown');
     const activeLayer = this.engine ? this.engine.activeLayer : 1;
 
-    const diagnosis = this._diagnoseCause(dt, this.currentPhase, this.phaseDetails, timeSinceStroke, timeSinceTool, activeTool);
+    const strokeInitSnap = this._snapshotStrokeInitStats();
+    const sumiSnap = this._snapshotSumiFrameStats(activeTool, this.currentPhase);
+    const frameWorkMs = this.frameWorkMs || 0;
+    const frameWorkLabel = this.frameWorkLabel || '';
+    const sumiMeasured = sumiSnap
+      ? ((sumiSnap.beginMs || 0) + (sumiSnap.tuftMs || 0) + (sumiSnap.backupMs || 0) + (sumiSnap.tileEnsureMs || 0) +
+         (sumiSnap.subBakeMs || 0) + (sumiSnap.assembleMs || 0) + (sumiSnap.physicsMs || 0) + (sumiSnap.compositeMs || 0) +
+         (sumiSnap.storeBlitMs || 0) + (sumiSnap.stampMs || 0) + (sumiSnap.simMs || 0) + (sumiSnap.syncMs || 0) +
+         (sumiSnap.probeMs || 0) + (sumiSnap.gpuRenderMs || 0) + (sumiSnap.previewMs || 0))
+      : 0;
+    const engineWorkMs = Math.max(frameWorkMs, strokeInitSnap?.totalMs || 0, sumiMeasured);
+
+    let breakdown = this._buildBreakdownLine(strokeInitSnap, sumiSnap);
+    if (frameWorkMs >= 0.05) {
+      const engTag = `eng:${engineWorkMs.toFixed(1)}ms${frameWorkLabel ? '(' + frameWorkLabel + ')' : ''}`;
+      breakdown = breakdown ? `${engTag} | ${breakdown}` : engTag;
+    }
+
+    const diagnosis = this._diagnoseCause(
+      dt,
+      this.currentPhase,
+      this.phaseDetails,
+      timeSinceStroke,
+      timeSinceTool,
+      activeTool,
+      strokeInitSnap,
+      sumiSnap,
+      breakdown,
+      engineWorkMs
+    );
 
     const record = {
       id: Date.now() + Math.random(),
@@ -252,6 +565,7 @@ export class PerfMonitor {
       timeString: new Date().toTimeString().split(' ')[0] + '.' + String(Math.floor(now % 1000)).padStart(3, '0'),
       dt: dt.toFixed(1),
       fps: instantFps.toFixed(1),
+      engineMs: Number(engineWorkMs.toFixed(2)),
       phase: this.currentPhase,
       category: diagnosis.category,
       title: diagnosis.title,
@@ -262,6 +576,9 @@ export class PerfMonitor {
       timeSinceTool: timeSinceTool !== null ? Math.round(timeSinceTool) : null,
       timeSinceStroke: timeSinceStroke !== null ? Math.round(timeSinceStroke) : null
     };
+    if (breakdown) record.breakdown = breakdown;
+    if (strokeInitSnap) record.strokeInitStats = strokeInitSnap;
+    if (sumiSnap) record.sumiStats = sumiSnap;
 
     this.records.unshift(record);
     if (this.records.length > 80) this.records.pop();
@@ -277,28 +594,55 @@ export class PerfMonitor {
     }
   }
 
-  _diagnoseCause(dt, phase, details, timeSinceStroke, timeSinceTool, activeTool) {
+  _diagnoseCause(dt, phase, details, timeSinceStroke, timeSinceTool, activeTool, si = null, ss = null, breakdown = '', engineWorkMs = 0) {
     details = details || {};
     const isVeryEarlyInStroke = timeSinceStroke !== null && timeSinceStroke < 80;
     const isRightAfterTool = timeSinceTool !== null && timeSinceTool < 350;
+    const bdSuffix = breakdown ? ` [${breakdown}]` : '';
+
+    // 0. Detect external browser/OS/GPU wakeup stalls when measured engine CPU/GPU submit work was tiny
+    const hasInstrumentation = !!(si || ss || engineWorkMs > 0);
+    const isZeroTileSumi = !!(ss && !ss.activeTiles && !ss.wetTiles && !ss.simBoxes && !ss.stampBoxes && !ss.backupMs);
+    if (!details.simulated && dt >= 22.0 && ((hasInstrumentation && engineWorkMs < 3.0) || isZeroTileSumi)) {
+      return {
+        category: 'BROWSER / GPU WAKEUP',
+        title: `Browser/driver stall (${dt.toFixed(1)}ms; engine ${engineWorkMs.toFixed(1)}ms)`,
+        description: `Frame waited ${dt.toFixed(1)}ms while engine CPU/GPU submit work took only ${engineWorkMs.toFixed(1)}ms.`,
+        details: `Likely compositor wake, Windows Ink/tablet sync, GPU clock ramp, or GC pause after idle. Phase: ${phase} | Tool: ${activeTool}.${bdSuffix}`
+      };
+    }
 
     // 1. Tool change transition
     if (isRightAfterTool || phase === 'tool_change') {
       return {
         category: 'TOOL CHANGE',
         title: `Engine after tool change (${activeTool})`,
-        description: `Frame hitch of ${dt.toFixed(1)}ms (${(1000/dt).toFixed(0)} FPS) occurred right after switching tools.`,
-        details: `Switched from ${this.prevTool || 'prev'} to ${activeTool} ${timeSinceTool !== null ? timeSinceTool : 0}ms ago. Tip cache or tool pipeline was activating.`
+        description: `Frame hitch of ${dt.toFixed(1)}ms (${(1000 / dt).toFixed(0)} FPS) occurred right after switching tools.`,
+        details: `Switched from ${this.prevTool || 'prev'} to ${activeTool} ${timeSinceTool !== null ? timeSinceTool : 0}ms ago.${bdSuffix}`
       };
     }
 
-    // 2. Stroke initialisation (strictly within the first 90ms of stroke start)
-    if ((phase === 'stroke_init' && (timeSinceStroke === null || timeSinceStroke < 90)) || (isVeryEarlyInStroke && phase !== 'chunk_paint')) {
+    // 2. Stroke initialisation (pointerdown setup / chunk backup / tile init)
+    if ((phase === 'stroke_init' && (timeSinceStroke === null || timeSinceStroke < 90)) || (si && si.totalMs > 8 && isVeryEarlyInStroke)) {
+      let dominant = 'tip/backup setup';
+      if (ss && ss.backupMs >= 4) {
+        dominant = `GPU backup (${ss.backupMode || 'readback'} ${(ss.backupMB || 0).toFixed(1)}MB in ${ss.backupMs.toFixed(1)}ms)`;
+      } else if (ss && ss.tileEnsureMs >= 4) {
+        dominant = `tile init (${ss.tilesCreated || 0} created, ${ss.tileEnsureMs.toFixed(1)}ms)`;
+      } else if (si && si.backupMs >= 4) {
+        dominant = `chunk snapshot (${si.backupMs.toFixed(1)}ms)`;
+      } else if (si && si.flushGpuMs >= 4) {
+        dominant = `GPU flush (${si.flushGpuMs.toFixed(1)}ms)`;
+      } else if (si && si.tipCacheMs >= 4) {
+        dominant = `tip cache (${si.tipCacheMs.toFixed(1)}ms)`;
+      } else if (ss && ss.beginMs >= 4) {
+        dominant = `Sumi session switch/flush (${ss.beginMs.toFixed(1)}ms)`;
+      }
       return {
         category: 'STROKE INIT',
-        title: `Stroke initialisation & tip preparation`,
-        description: `Delay at stroke start while initializing chunk dirty-buffers or updating tip color cache.`,
-        details: `Tool: ${activeTool}. Point 0 setup, pressure thresholding, and dirty chunk pre-allocation.`
+        title: `Stroke init (${activeTool}): ${dominant}`,
+        description: `Pointerdown initialization stalled for ${(si?.totalMs || dt).toFixed(1)}ms.`,
+        details: `Tool: ${activeTool} | ptr: ${si?.pointerType || '?'} | canvas: ${si?.canvasDim || ss?.canvasDim || '?'}.${bdSuffix}`
       };
     }
 
@@ -308,7 +652,34 @@ export class PerfMonitor {
         category: '1ST STAMP',
         title: `1st stamp calculation & dynamic speed modulation`,
         description: `Recalibrating initial stamp parameters to match stroke speed and pressure ramp.`,
-        details: `Evaluated point 1 to point 2 ramp. Dynamic scale and opacity recalculation for initial segment.`
+        details: `Evaluated point 1 to point 2 ramp. Dynamic scale and opacity recalculation for initial segment.${bdSuffix}`
+      };
+    }
+
+    // 3b. Sumi-e phases (interactive stamping, live Navier-Stokes bleed sim, stroke end sync)
+    if (phase === 'sumi_stamp' || phase === 'sumi_sim' || phase === 'sumi_end' || (activeTool === 'sumi' && ss)) {
+      const cat = phase === 'sumi_sim' ? 'SUMI SIM' : (phase === 'sumi_end' ? 'SUMI END' : 'SUMI STAMP');
+      let driver = `WorkBox (${ss?.simBoxes || ss?.stampBoxes || 0} boxes)`;
+      if (ss) {
+        if (ss.tilesEvicted > 0) {
+          driver = `LRU tile eviction (${ss.tilesEvicted} evicted, sync readback)`;
+        } else if (ss.backupMs >= 5) {
+          driver = `chunk backup (${ss.backupMode || ''} ${(ss.backupMB || 0).toFixed(1)}MB in ${ss.backupMs.toFixed(1)}ms)`;
+        } else if ((ss.retireDryBoxes || 0) >= 3) {
+          driver = `retire-dry queue (${ss.retireDryBoxes} boxes on ${ss.wetTiles}/${ss.activeTiles} tiles)`;
+        } else if ((ss.simBoxes || 0) >= 4 || (ss.stampBoxes || 0) >= 3) {
+          driver = `multi-box zoomed sweep (${ss.simBoxes || 0} sim / ${ss.stampBoxes || 0} stamp boxes @ ${Math.round((ss.zoom || 1) * 100)}%)`;
+        } else if ((ss.syncMs || 0) >= 5) {
+          driver = `CPU chunk readback (${ss.syncTiles || 0} tiles in ${ss.syncMs.toFixed(1)}ms)`;
+        } else if ((ss.tilesCreated || 0) >= 4) {
+          driver = `cold tile allocation (${ss.tilesCreated} tiles in ${(ss.tileEnsureMs || 0).toFixed(1)}ms)`;
+        }
+      }
+      return {
+        category: cat,
+        title: `${cat}: ${driver}`,
+        description: `Frame took ${dt.toFixed(1)}ms (${(1000 / dt).toFixed(0)} FPS) in ${phase}.`,
+        details: breakdown || `Phase: ${phase} | Tool: ${activeTool} | Layer: ${this.engine ? this.engine.activeLayer : 1}.`
       };
     }
 
@@ -323,7 +694,7 @@ export class PerfMonitor {
       };
     }
 
-    // 4. Heavy Smudge readback
+    // 5. Heavy Smudge readback
     if (phase === 'smudge_step' || activeTool === 'smudge') {
       const chunksCount = details.chunks || 1;
       const stampsCount = details.stamps || 1;
@@ -335,7 +706,7 @@ export class PerfMonitor {
       };
     }
 
-    // 5. Heavy Fluid simulation
+    // 6. Heavy Fluid simulation
     if (phase === 'fluid_step' || activeTool === 'fluid') {
       return {
         category: 'FLUID STEP',
@@ -345,7 +716,7 @@ export class PerfMonitor {
       };
     }
 
-    // 6. Liquify mesh warp
+    // 7. Liquify mesh warp
     if (phase === 'liquify_step' || activeTool === 'liquify') {
       return {
         category: 'LIQUIFY WARP',
@@ -355,7 +726,7 @@ export class PerfMonitor {
       };
     }
 
-    // 7. Air particle simulation
+    // 8. Air particle simulation
     if (phase === 'air_step' || activeTool === 'air') {
       return {
         category: 'AIR PARTICLES',
@@ -365,18 +736,18 @@ export class PerfMonitor {
       };
     }
 
-    // 8. Stroke end baking
+    // 9. Stroke end baking
     if (phase === 'stroke_end_bake') {
       const chunks = details.chunks || 1;
       return {
         category: 'BUFFER BAKE',
         title: `Stroke end buffer bake & commit`,
         description: `Committing stroke buffer canvases to permanent chunk layers.`,
-        details: `${chunks} dirty chunks committed, alpha mask processed, and history frame pushed.`
+        details: `${chunks} dirty chunks committed, alpha mask processed, and history frame pushed.${bdSuffix}`
       };
     }
 
-    // 9. Prolonged calculations (high density stamps / oil relief)
+    // 10. Prolonged calculations (high density stamps / oil relief)
     if (phase === 'chunk_paint') {
       const stamps = details.stamps || 0;
       const chunks = details.chunks || 1;
@@ -404,7 +775,7 @@ export class PerfMonitor {
       };
     }
 
-    // 10. Viewport transform
+    // 11. Viewport transform
     if (phase === 'viewport_transform') {
       return {
         category: 'VIEWPORT',
@@ -418,8 +789,8 @@ export class PerfMonitor {
     return {
       category: 'ENGINE LAG',
       title: `Prolonged calculations in phase [${phase || 'paint loop'}]`,
-      description: `Execution took ${dt.toFixed(1)}ms (${(1000/dt).toFixed(0)} FPS).`,
-      details: `Active phase: ${phase} | Tool: ${activeTool} | Layer: ${this.engine ? this.engine.activeLayer : 1}.`
+      description: `Execution took ${dt.toFixed(1)}ms (${(1000 / dt).toFixed(0)} FPS).`,
+      details: `Active phase: ${phase} | Tool: ${activeTool} | Layer: ${this.engine ? this.engine.activeLayer : 1}.${bdSuffix}`
     };
   }
 
@@ -550,12 +921,20 @@ export class PerfMonitor {
     item.className = 'perf-log-card';
 
     let catBg = '#222';
-    if (record.category === '1ST STAMP') catBg = '#ff6600';
+    if (record.category === 'BROWSER / GPU WAKEUP') catBg = '#4b5563';
+    else if (record.category === '1ST STAMP') catBg = '#ff6600';
     else if (record.category === 'TOOL CHANGE') catBg = '#8833cc';
     else if (record.category === 'STROKE INIT') catBg = '#0066cc';
+    else if (record.category === 'SUMI STAMP') catBg = '#111111';
+    else if (record.category === 'SUMI SIM') catBg = '#0055aa';
+    else if (record.category === 'SUMI END') catBg = '#444444';
     else if (record.category === 'SMUDGE STEP') catBg = '#008888';
     else if (record.category === 'WIREFRAME MESH') catBg = '#227700';
     else if (record.category === 'PROLONGED CALC') catBg = '#cc0033';
+
+    const bdHtml = record.breakdown
+      ? `<div style="font-size: 7px; font-family: monospace; background: #111; color: #f5f5f5; padding: 2px 4px; margin-top: 2px; line-height: 1.3; word-break: break-word;">${record.breakdown}</div>`
+      : '';
 
     item.innerHTML = `
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px;">
@@ -578,6 +957,7 @@ export class PerfMonitor {
       <div style="font-size: 7px; opacity: 0.6; font-family: monospace; background: rgba(0,0,0,0.04); padding: 2px 4px; border-left: 2px solid #000;">
         ${record.details}
       </div>
+      ${bdHtml}
     `;
 
     logList.insertBefore(item, logList.firstChild);
@@ -677,7 +1057,7 @@ export class PerfMonitor {
           </div>
 
           <div style="display: flex; gap: 4px; justify-content: space-between;">
-            <button id="btn-perf-toggle-rec" class="brutal-btn" style="flex: 1; font-size: 8px; padding: 3px; font-weight: 900; background: #000; color: #fff;">● ACTIVE</button>
+            <button id="btn-perf-toggle-rec" class="brutal-btn" style="flex: 1; font-size: 8px; padding: 3px; font-weight: 900; background: ${this.enabled ? '#000' : '#888'}; color: #fff;">${this.enabled ? '● ACTIVE' : '⏸ PAUSED'}</button>
             <button id="btn-perf-test-drop" class="brutal-btn" style="font-size: 8px; padding: 3px 6px; font-weight: 900;">TEST HITCH</button>
             <button id="btn-perf-clear" class="brutal-btn" style="font-size: 8px; padding: 3px 6px; font-weight: 900;">CLEAR</button>
             <button id="btn-perf-copy" class="brutal-btn" style="font-size: 8px; padding: 3px 6px; font-weight: 900;">REPORT</button>
@@ -722,6 +1102,10 @@ export class PerfMonitor {
       const btnToggle = panel.querySelector('#btn-perf-toggle-rec');
       btnToggle.onclick = () => {
         this.enabled = !this.enabled;
+        if (this.enabled) {
+          this.resetTiming();
+          if (!this.rafId) this.start();
+        }
         btnToggle.innerText = this.enabled ? '● ACTIVE' : '⏸ PAUSED';
         btnToggle.style.background = this.enabled ? '#000' : '#888';
       };

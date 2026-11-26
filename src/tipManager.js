@@ -8,7 +8,10 @@ const TIP_SETTING_KEYS = [
   'airTipPour', 'airFollowStroke', 'airTipAngle', 'airTipHardness',
   'airPressureFlow', 'airUseHeightmap', 'airHeightSource',
   'speedHeight', 'speedWater', 'fluidHeightShield',
-  'sumiUseHeightmap', 'sumiHeightSource', 'sumiMaxWater', 'sumiPressureGate'
+  'sumiUseHeightmap', 'sumiHeightSource', 'sumiMaxWater', 'sumiPressureGate',
+  'sumiQuality', 'sumiZoomProject', 'sumiPauseWhilePainting',
+  'sumiBleedWater', 'sumiBleedEraser', 'sumiEraserMaxWater',
+  'sumiEraserSpan', 'sumiEraserBristles', 'sumiEraserSplit'
 ];
 
 export class TipManager {
@@ -79,6 +82,15 @@ export class TipManager {
     t.sumiHeightSource = saved.sumiHeightSource || 'surface';
     t.sumiMaxWater = saved.sumiMaxWater ?? 100;
     t.sumiPressureGate = saved.sumiPressureGate ?? 20;
+    t.sumiQuality = saved.sumiQuality ?? 3;
+    t.sumiZoomProject = !!saved.sumiZoomProject;
+    t.sumiPauseWhilePainting = !!saved.sumiPauseWhilePainting;
+    t.sumiBleedWater = saved.sumiBleedWater ?? saved.sumiBleed ?? 50;
+    t.sumiBleedEraser = saved.sumiBleedEraser ?? 50;
+    t.sumiEraserMaxWater = saved.sumiEraserMaxWater ?? 100;
+    t.sumiEraserSpan = saved.sumiEraserSpan ?? 550;
+    t.sumiEraserBristles = saved.sumiEraserBristles ?? 28;
+    t.sumiEraserSplit = saved.sumiEraserSplit ?? 48;
   }
 
   _extractTipSettings(t) {

@@ -18,7 +18,13 @@ export const sumiSettings = {
   waterWash: 75,         // 0..100 ('water' subtool water charge)
   eraserInk: 85,         // 0..100 ('eraser' subtool erase strength)
   eraserWater: 25,       // 0..100 ('eraser' subtool water charge)
-  bleed: 58,             // 0..100
+  eraserMaxWater: 100,   // 15..200 ('eraser' subtool max water)
+  eraserSpan: 550,       // 150..2400 px ('eraser' subtool ink span)
+  eraserBristles: 28,    // 8..48 ('eraser' subtool bristles)
+  eraserSplit: 48,       // 0..100 ('eraser' subtool split/dry)
+  bleed: 50,             // 0..100 (0% resistance, 50% natural canvas, 100% ~2x bleed)
+  bleedWater: 50,        // 0..100 ('water' subtool paper bleed)
+  bleedEraser: 50,       // 0..100 ('eraser' subtool paper bleed)
   bristles: 28,          // 8..48
   stiffness: 60,         // 10..100
   splitDry: 48,          // 0..100
@@ -40,7 +46,10 @@ export const sumiSettings = {
   pressureGate: 20,      // 0..100 (radial bristle contact taper under light pressure)
   maxWater: 100,         // 15..200 (max water puddle cap on paper)
   useHeightmap: false,
-  heightSource: 'surface' // 'surface' | 'layer'
+  heightSource: 'surface', // 'surface' | 'layer'
+  solverQuality: 3,        // 1: fast 1/2, 2: crisp 3/4, 3: full 1:1
+  zoomProject: false,      // viewport zoom projected solver resolution
+  pauseWhilePainting: false // pause fluid simulation until pointer lift
 };
 
 function computeSpeedWaterProfile(baseWaterPct, speedWaterSlider, vFactor) {
@@ -76,6 +85,29 @@ function computeSpeedWaterProfile(baseWaterPct, speedWaterSlider, vFactor) {
   };
 }
 
+function getActiveSumiBleed(s = sumiSettings) {
+  const m = s.mode || 'draw';
+  if (m === 'water') return s.bleedWater ?? s.bleed ?? 50;
+  if (m === 'eraser') return s.bleedEraser ?? 50;
+  return s.bleed ?? 50;
+}
+
+function getActiveSumiMaxWater(s = sumiSettings) {
+  return (s.mode === 'eraser') ? (s.eraserMaxWater ?? 100) : (s.maxWater ?? 100);
+}
+
+function getActiveSumiSpan(s = sumiSettings) {
+  return (s.mode === 'eraser') ? (s.eraserSpan ?? 550) : (s.depleteSpan ?? 550);
+}
+
+function getActiveSumiBristles(s = sumiSettings) {
+  return (s.mode === 'eraser') ? (s.eraserBristles ?? 28) : (s.bristles ?? 28);
+}
+
+function getActiveSumiSplit(s = sumiSettings) {
+  return (s.mode === 'eraser') ? (s.eraserSplit ?? 48) : (s.splitDry ?? 48);
+}
+
 function getEffectiveSumiParams(s = sumiSettings, effWaterOverride = null, effInkOverride = null) {
   const m = s.mode || 'draw';
   let inkVal = effInkOverride !== null ? effInkOverride : (s.ink ?? 78);
@@ -89,7 +121,16 @@ function getEffectiveSumiParams(s = sumiSettings, effWaterOverride = null, effIn
   const effWater = effWaterOverride !== null
     ? Math.max(0, Math.min(165, effWaterOverride))
     : Math.max(0, Math.min(100, waterVal));
-  return { ...s, ink: Math.max(0, Math.min(150, inkVal)), water: effWater };
+  return {
+    ...s,
+    ink: Math.max(0, Math.min(150, inkVal)),
+    water: effWater,
+    bleed: getActiveSumiBleed(s),
+    maxWater: getActiveSumiMaxWater(s),
+    depleteSpan: getActiveSumiSpan(s),
+    bristles: getActiveSumiBristles(s),
+    splitDry: getActiveSumiSplit(s)
+  };
 }
 
 function getPressureInkMod(engine, pressure, e) {
@@ -114,7 +155,13 @@ export function syncSumiSettingsFromTip(tipSettings) {
   sumiSettings.waterWash = tipSettings.sumiWaterWash ?? tipSettings.sumiWater ?? 75;
   sumiSettings.eraserInk = tipSettings.sumiEraserInk ?? 85;
   sumiSettings.eraserWater = tipSettings.sumiEraserWater ?? 25;
-  sumiSettings.bleed = tipSettings.sumiBleed ?? 58;
+  sumiSettings.eraserMaxWater = tipSettings.sumiEraserMaxWater ?? 100;
+  sumiSettings.eraserSpan = tipSettings.sumiEraserSpan ?? 550;
+  sumiSettings.eraserBristles = tipSettings.sumiEraserBristles ?? 28;
+  sumiSettings.eraserSplit = tipSettings.sumiEraserSplit ?? 48;
+  sumiSettings.bleed = tipSettings.sumiBleed ?? 50;
+  sumiSettings.bleedWater = tipSettings.sumiBleedWater ?? tipSettings.sumiBleed ?? 50;
+  sumiSettings.bleedEraser = tipSettings.sumiBleedEraser ?? 50;
   sumiSettings.bristles = tipSettings.sumiBristles ?? 28;
   sumiSettings.stiffness = tipSettings.sumiStiffness ?? 60;
   sumiSettings.splitDry = tipSettings.sumiSplit ?? 48;
@@ -137,6 +184,13 @@ export function syncSumiSettingsFromTip(tipSettings) {
   sumiSettings.maxWater = tipSettings.sumiMaxWater ?? 100;
   sumiSettings.useHeightmap = tipSettings.sumiUseHeightmap !== undefined ? !!tipSettings.sumiUseHeightmap : false;
   sumiSettings.heightSource = tipSettings.sumiHeightSource || 'surface';
+  if (tipSettings.sumiQuality !== undefined) {
+    sumiSettings.solverQuality = Math.max(1, Math.min(3, Math.round(tipSettings.sumiQuality)));
+  } else {
+    sumiSettings.solverQuality = 3;
+  }
+  sumiSettings.zoomProject = !!tipSettings.sumiZoomProject;
+  sumiSettings.pauseWhilePainting = !!tipSettings.sumiPauseWhilePainting;
 }
 
 const TIP_SAMPLE_RES = 64;
@@ -436,7 +490,7 @@ class AlphaBristleBrush {
     const pClamped = Math.max(0.08, Math.min(1.0, pressure || 1.0));
     const contactRadiusPx = Math.max(2.0, (sizePx || 40) * 0.5);
 
-    const splitThresh = Math.max(0.0, Math.min(1.0, sumiSettings.splitDry / 100));
+    const splitThresh = Math.max(0.0, Math.min(1.0, getActiveSumiSplit(sumiSettings) / 100));
     const baseDryness = Math.max(0, 1.0 - this.avgWaterRes * 1.15);
     const dryness = Math.min(
       1.0,
@@ -461,7 +515,7 @@ class AlphaBristleBrush {
 
     const resSizePx = reservoirSizePx || sizePx || 40;
     const sizeRatio = Math.max(0.45, Math.min(2.4, resSizePx / 40));
-    const spanPx = Math.max(90, (sumiSettings.depleteSpan || 550) * sizeRatio);
+    const spanPx = Math.max(90, (getActiveSumiSpan(sumiSettings) || 550) * sizeRatio);
     const travelNorm = Math.min(0.28, stepDist / spanPx);
     const gateInf = Math.max(0, Math.min(1, (sumiSettings.pressureGate ?? 20) / 100));
     const splayP = (1.0 - gateInf) * 0.85 + gateInf * pClamped;
@@ -586,6 +640,21 @@ let _lastMidPt = null;
 let _isFirstMove = false;
 let _lastStrokeTime = 0;
 let _lastPreviewTime = 0;
+let _lastKnownTip = null;
+let _lastDisplayedSolvers = -1;
+
+export function updateSumiActiveSolversUI(engine = null) {
+  const el = document.getElementById('val-sumi-active-solvers');
+  if (!el) return;
+  const solver = engine?.gpuRenderer?.sumiSolver;
+  const count = (solver && typeof solver.getActiveSolverCount === 'function')
+    ? solver.getActiveSolverCount()
+    : 0;
+  if (count !== _lastDisplayedSolvers) {
+    _lastDisplayedSolvers = count;
+    el.innerText = String(count);
+  }
+}
 
 function hexToPigmentK(hex) {
   const rgb = hexToRgb(hex || '#141414');
@@ -607,7 +676,9 @@ function getModeInt(mode) {
   return 0;
 }
 
-export function renderSumiBristlePreview() {
+export function renderSumiBristlePreview(engine = null) {
+  const _sumiPerf = engine && engine.perfMonitor ? engine.perfMonitor.sumiFrameStats : null;
+  const _tPrev0 = _sumiPerf ? performance.now() : 0;
   const canvas = document.getElementById('sumi-bristle-preview');
   const stateEl = document.getElementById('sumi-bristle-state');
   if (stateEl) {
@@ -625,7 +696,10 @@ export function renderSumiBristlePreview() {
       stateEl.innerText = pct < 26 ? `DRY SPLIT ${pct}%` : `LOAD ${pct}%`;
     }
   }
-  if (!canvas) return;
+  if (!canvas) {
+    if (_sumiPerf) _sumiPerf.previewMs += performance.now() - _tPrev0;
+    return;
+  }
   const ctx = canvas.getContext('2d');
   const w = canvas.width;
   const h = canvas.height;
@@ -668,6 +742,9 @@ export function renderSumiBristlePreview() {
     ctx.beginPath();
     ctx.arc(px, py, pr, 0, Math.PI * 2);
     ctx.fill();
+  }
+  if (_sumiPerf) {
+    _sumiPerf.previewMs += performance.now() - _tPrev0;
   }
 }
 
@@ -720,18 +797,54 @@ export function updateSumiSubtoolUI(mode) {
   if (watSlider) watSlider.value = wRounded;
   if (watValEl) watValEl.innerText = `${wRounded}%`;
 
+  const bleedVal = Math.round(getActiveSumiBleed(sumiSettings));
+  const bleedSlider = document.getElementById('slider-sumi-bleed');
+  const bleedValEl = document.getElementById('val-sumi-bleed');
+  if (bleedSlider) bleedSlider.value = bleedVal;
+  if (bleedValEl) bleedValEl.innerText = `${bleedVal}%`;
+
+  const maxWaterVal = Math.round(getActiveSumiMaxWater(sumiSettings));
+  const maxWaterSlider = document.getElementById('sumi-max-water');
+  const maxWaterValEl = document.getElementById('max-water-val');
+  if (maxWaterSlider) maxWaterSlider.value = maxWaterVal;
+  if (maxWaterValEl) maxWaterValEl.innerText = `${maxWaterVal}%`;
+
+  const spanVal = Math.round(getActiveSumiSpan(sumiSettings));
+  const spanSlider = document.getElementById('brush-sumi-span');
+  const spanValEl = document.getElementById('sumi-span-val');
+  if (spanSlider) spanSlider.value = spanVal;
+  if (spanValEl) spanValEl.innerText = `${spanVal}px`;
+
+  const bristlesVal = Math.round(getActiveSumiBristles(sumiSettings));
+  const bristlesSlider = document.getElementById('brush-sumi-bristles');
+  const bristlesValEl = document.getElementById('sumi-bristles-val');
+  if (bristlesSlider) bristlesSlider.value = bristlesVal;
+  if (bristlesValEl) bristlesValEl.innerText = `${bristlesVal}`;
+
+  const splitVal = Math.round(getActiveSumiSplit(sumiSettings));
+  const splitSlider = document.getElementById('brush-sumi-split');
+  const splitValEl = document.getElementById('sumi-split-val');
+  if (splitSlider) splitSlider.value = splitVal;
+  if (splitValEl) splitValEl.innerText = `${splitVal}%`;
+
+  if (_brush.tufts.length !== bristlesVal) {
+    _brush.rebuildTufts(bristlesVal, _lastKnownTip);
+  }
+
   renderSumiBristlePreview();
 }
 
 export function syncSumiTip(engine) {
-  _brush.rebuildTufts(sumiSettings.bristles, engine?.brush?.tip || null);
-  renderSumiBristlePreview();
+  _lastKnownTip = engine?.brush?.tip || _lastKnownTip || null;
+  _brush.rebuildTufts(getActiveSumiBristles(sumiSettings), _lastKnownTip);
+  renderSumiBristlePreview(engine);
 }
 
 export function reDipSumi(engine) {
-  _brush.rebuildTufts(sumiSettings.bristles, engine?.brush?.tip || null);
+  _lastKnownTip = engine?.brush?.tip || _lastKnownTip || null;
+  _brush.rebuildTufts(getActiveSumiBristles(sumiSettings), _lastKnownTip);
   _brush.reDip(false);
-  renderSumiBristlePreview();
+  renderSumiBristlePreview(engine);
 }
 
 export function warmSumiSolver(engine) {
@@ -739,6 +852,23 @@ export function warmSumiSolver(engine) {
   if (!gr || !gr.supported || gr._contextLost) return null;
   if (!gr.sumiSolver) {
     gr.sumiSolver = new GpuSumiSolver(gr);
+  }
+  const curPid = engine.currentProjectId || 'default';
+  if (
+    curPid !== '__prewarm_scratch__' &&
+    gr._pendingSumiPores &&
+    gr._pendingSumiPores.projId === curPid &&
+    gr.sumiSolver.importPassiveArchiveFromStorage
+  ) {
+    const pending = gr._pendingSumiPores;
+    gr._pendingSumiPores = null;
+    gr.sumiSolver.importPassiveArchiveFromStorage(engine, curPid, pending.payload);
+  }
+  if (gr.sumiSolver.setSolverQuality) {
+    gr.sumiSolver.setSolverQuality(sumiSettings.solverQuality ?? 3, engine);
+  }
+  if (gr.sumiSolver.updateZoomProjection) {
+    gr.sumiSolver.updateZoomProjection(engine, !!sumiSettings.zoomProject);
   }
   if (gr.sumiSolver.ready && gr.sumiSolver.prewarmPipelines) {
     gr.sumiSolver.prewarmPipelines(engine);
@@ -753,36 +883,122 @@ function stopLiveSimLoop() {
   }
 }
 
-export function stopSumiSimLoop() {
+function _clearSumiSimPhase(engine) {
+  const pm = engine && engine.perfMonitor;
+  if (pm && !engine.isDrawing && (pm.currentPhase === 'sumi_sim' || pm.currentPhase === 'sumi_end')) {
+    pm.markPhase('idle');
+  }
+}
+
+export function stopSumiSimLoop(engine = null) {
   stopLiveSimLoop();
+  _clearSumiSimPhase(engine);
 }
 
 function ensureLiveSimLoop(engine) {
   if (_simRafId) return;
   let idleTick = 0;
+  let dripCounter = 0;
   const stepTick = () => {
     _simRafId = 0;
     const gr = engine?.gpuRenderer;
     const solver = gr?.sumiSolver;
-    if (!solver || !solver.active || !solver.ready || gr._contextLost) return;
-
-    // Water propagates continuously in real time — throttle gently during late idle settling
-    if (solver.simActiveFrames > 0) {
-      const isIdleDecay = !engine.isDrawing && solver.simActiveFrames < 260;
-      idleTick = (idleTick + 1) & 1;
-      if (!isIdleDecay || idleTick === 0) {
-        solver.stepSimulation(engine, isIdleDecay ? 0.024 : 0.016, false);
-      }
-      solver.simActiveFrames--;
-    } else if (!engine.isDrawing) {
-      solver.syncTilesToCanvas2D(engine);
+    if (!solver || !solver.active || !solver.ready || gr._contextLost) {
+      _clearSumiSimPhase(engine);
+      updateSumiActiveSolversUI(engine);
       return;
     }
 
-    if (solver.active && (engine.isDrawing || solver.simActiveFrames > 0)) {
+    const isSaving = !!(engine.app && engine.app._isSavingProject);
+
+    if (!engine.isDrawing && engine.perfMonitor) {
+      if (solver._activeWetCount > 0 || solver.activeTiles.size > 0 || solver.hasCpuDirtyTiles() || (solver.hasPendingSyncs && solver.hasPendingSyncs())) {
+        engine.perfMonitor.markPhase('sumi_sim', { tool: 'sumi' });
+      } else {
+        _clearSumiSimPhase(engine);
+      }
+    }
+
+    if (solver.pumpAsyncWork) {
+      solver.pumpAsyncWork(engine, isSaving);
+    }
+
+    const pausePaint = !!(
+      sumiSettings.pauseWhilePainting &&
+      engine.isDrawing &&
+      (sumiSettings.mode === 'draw' || sumiSettings.mode === 'water')
+    );
+    if (pausePaint) {
       _simRafId = requestAnimationFrame(stepTick);
-    } else if (solver.active && !engine.isDrawing && solver.hasCpuDirtyTiles()) {
-      solver.syncTilesToCanvas2D(engine);
+      return;
+    }
+
+    const triggerFollowUpSaveIfNeeded = () => {
+      if (
+        engine.app &&
+        engine.app.autosaveEnabled &&
+        !engine.app._isSavingProject &&
+        !engine.app.saveTimeout &&
+        engine.dirtyChunks &&
+        engine.dirtyChunks.size > 0
+      ) {
+        engine.app._triggerAutoSave();
+      }
+    };
+
+    // Water propagates continuously in real time — throttle gently during late idle settling
+    if (solver.simActiveFrames > 0) {
+      const heavyPausedSettle = !engine.isDrawing && sumiSettings.pauseWhilePainting && (solver._lastStepSimBoxes || 0) >= 3;
+      const isIdleDecay = !engine.isDrawing && (solver.simActiveFrames < 260 || heavyPausedSettle);
+      idleTick = (idleTick + 1) & 1;
+      if (!isIdleDecay || idleTick === 0) {
+        const stepped = solver.stepSimulation(engine, isIdleDecay ? 0.024 : 0.016, false, {}, true);
+        if (stepped !== false) {
+          solver.simActiveFrames--;
+        }
+        updateSumiActiveSolversUI(engine);
+      }
+      if (!engine.isDrawing && !isSaving) {
+        dripCounter = (dripCounter + 1) & 7;
+        if (dripCounter === 0 && solver._inFlightSyncs && solver._inFlightSyncs.length < 2 && solver.syncSettledTilesAsync) {
+          solver.syncSettledTilesAsync(engine, 2);
+        }
+      }
+    } else if (!engine.isDrawing) {
+      if (solver.hasActiveWetTiles && solver.hasActiveWetTiles()) {
+        solver.stepSimulation(engine, 0.024, true, {}, true);
+      }
+      updateSumiActiveSolversUI(engine);
+      if (!isSaving && solver.hasCpuDirtyTiles()) {
+        solver.syncTilesToCanvas2D(engine, undefined, null, true);
+      }
+      if (isSaving || (solver.hasActiveWetTiles && solver.hasActiveWetTiles()) || (solver.hasPendingSyncs && solver.hasPendingSyncs())) {
+        _simRafId = requestAnimationFrame(stepTick);
+      } else {
+        _clearSumiSimPhase(engine);
+        updateSumiActiveSolversUI(engine);
+        triggerFollowUpSaveIfNeeded();
+      }
+      return;
+    }
+
+    if (solver.active && (engine.isDrawing || solver.simActiveFrames > 0 || isSaving)) {
+      _simRafId = requestAnimationFrame(stepTick);
+    } else if (solver.active && !engine.isDrawing && (solver.hasCpuDirtyTiles() || (solver.hasPendingSyncs && solver.hasPendingSyncs()))) {
+      if (solver.hasCpuDirtyTiles()) {
+        solver.syncTilesToCanvas2D(engine, undefined, null, true);
+      }
+      if (solver.hasPendingSyncs && solver.hasPendingSyncs()) {
+        _simRafId = requestAnimationFrame(stepTick);
+      } else {
+        _clearSumiSimPhase(engine);
+        updateSumiActiveSolversUI(engine);
+        triggerFollowUpSaveIfNeeded();
+      }
+    } else {
+      _clearSumiSimPhase(engine);
+      updateSumiActiveSolversUI(engine);
+      triggerFollowUpSaveIfNeeded();
     }
   };
   _simRafId = requestAnimationFrame(stepTick);
@@ -807,6 +1023,7 @@ export function initSumiPaint(app) {
     };
   }
   updateSumiSubtoolUI(sumiSettings.mode);
+  updateSumiActiveSolversUI(app?.engine || null);
 }
 
 export function activateSumiPaint(app) {
@@ -816,8 +1033,10 @@ export function activateSumiPaint(app) {
     const ts = app.getCurrentTipSettings();
     if (ts) syncSumiSettingsFromTip(ts);
   }
-  _brush.rebuildTufts(sumiSettings.bristles, app?.engine?.brush?.tip || null);
+  _lastKnownTip = app?.engine?.brush?.tip || null;
+  _brush.rebuildTufts(getActiveSumiBristles(sumiSettings), _lastKnownTip);
   updateSumiSubtoolUI(sumiSettings.mode);
+  updateSumiActiveSolversUI(app?.engine || null);
   app._status('SUMI-E INK ACTIVE');
 }
 
@@ -825,31 +1044,37 @@ export function deactivateSumiPaint(app) {
   const panel = document.getElementById('panel-sumi');
   if (panel) panel.classList.add('hidden');
   if (app && app.engine) {
-    flushSumiToChunks(app.engine, true);
+    flushSumiToChunks(app.engine, false);
   }
 }
 
 export function flushSumiToChunks(engine, closeSession = true) {
   stopLiveSimLoop();
+  _clearSumiSimPhase(engine);
   const solver = engine?.gpuRenderer?.sumiSolver;
   if (solver && solver.active) {
     solver.commitToChunks(engine, undefined, closeSession);
   }
+  updateSumiActiveSolversUI(engine);
 }
 
 export function forceDrySumi(engine) {
   stopLiveSimLoop();
+  _clearSumiSimPhase(engine);
   const solver = engine?.gpuRenderer?.sumiSolver;
   if (solver && solver.active) {
     solver.forceDry(engine);
+    updateSumiActiveSolversUI(engine);
     if (engine.gpuRenderer) engine.gpuRenderer.requestRender();
     return true;
   }
+  updateSumiActiveSolversUI(engine);
   return false;
 }
 
 export function stopSumiSimulation(engine) {
   stopLiveSimLoop();
+  _clearSumiSimPhase(engine);
   _lastStrokeWorld = null;
   _lastRawPt = null;
   _lastMidPt = null;
@@ -860,13 +1085,15 @@ export function stopSumiSimulation(engine) {
   } else if (solver && solver.active) {
     solver.forceDry(engine);
   }
+  updateSumiActiveSolversUI(engine);
   if (engine?.gpuRenderer) engine.gpuRenderer.requestRender();
-  renderSumiBristlePreview();
+  renderSumiBristlePreview(engine);
   return true;
 }
 
 export function clearSumiPores(engine) {
   stopLiveSimLoop();
+  _clearSumiSimPhase(engine);
   _lastStrokeWorld = null;
   _lastRawPt = null;
   _lastMidPt = null;
@@ -877,8 +1104,15 @@ export function clearSumiPores(engine) {
   } else if (solver && typeof solver.clearPassiveArchive === 'function') {
     solver.clearPassiveArchive(null, null);
   }
-  if (engine?.gpuRenderer) engine.gpuRenderer.requestRender();
-  renderSumiBristlePreview();
+  updateSumiActiveSolversUI(engine);
+  if (engine?.gpuRenderer) {
+    engine.gpuRenderer._pendingSumiPores = null;
+    engine.gpuRenderer.requestRender();
+  }
+  if (engine?.app?._triggerAutoSave && engine.app.autosaveEnabled) {
+    engine.app._triggerAutoSave();
+  }
+  renderSumiBristlePreview(engine);
   return true;
 }
 
@@ -887,15 +1121,22 @@ export function startSumiPaintStroke(engine, worldPos, e = null) {
   if (engine.brush) {
     if (engine.brush.sumiUseHeightmap !== undefined) sumiSettings.useHeightmap = !!engine.brush.sumiUseHeightmap;
     if (engine.brush.sumiHeightSource !== undefined) sumiSettings.heightSource = engine.brush.sumiHeightSource;
+    if (engine.brush.sumiQuality !== undefined) sumiSettings.solverQuality = engine.brush.sumiQuality;
+    if (engine.brush.sumiZoomProject !== undefined) sumiSettings.zoomProject = !!engine.brush.sumiZoomProject;
+    if (engine.brush.sumiPauseWhilePainting !== undefined) sumiSettings.pauseWhilePainting = !!engine.brush.sumiPauseWhilePainting;
   }
+  const _sumiPerf = engine.perfMonitor ? engine.perfMonitor.sumiFrameStats : null;
+  let _t0 = _sumiPerf ? performance.now() : 0;
   const solver = warmSumiSolver(engine);
   if (!solver || !solver.ready) return;
 
-  _brush.rebuildTufts(sumiSettings.bristles, engine.brush?.tip || null);
+  _lastKnownTip = engine.brush?.tip || _lastKnownTip || null;
+  _brush.rebuildTufts(getActiveSumiBristles(sumiSettings), _lastKnownTip);
   if (sumiSettings.autoReDip) {
     _brush.reDip(false);
   }
   _brush.beginStroke(1, 0);
+  if (_sumiPerf) _sumiPerf.tuftMs += performance.now() - _t0;
 
   const startPres = worldPos.pressure ?? 1.0;
   const startInkMod = getPressureInkMod(engine, startPres, e);
@@ -925,6 +1166,7 @@ export function startSumiPaintStroke(engine, worldPos, e = null) {
   _isFirstMove = true;
   _lastStrokeTime = performance.now();
 
+  if (_sumiPerf) _t0 = performance.now();
   const segments = _brush.buildSegments({
     fromX: worldPos.x,
     fromY: worldPos.y,
@@ -942,6 +1184,7 @@ export function startSumiPaintStroke(engine, worldPos, e = null) {
     bridgeCapsule: false,
     inkScale: startInkMod
   });
+  if (_sumiPerf) _sumiPerf.tuftMs += performance.now() - _t0;
 
   const pigmentK = hexToPigmentK(worldPos.color || engine.brush.color);
   solver.stampAndStep(
@@ -953,7 +1196,9 @@ export function startSumiPaintStroke(engine, worldPos, e = null) {
     pigmentK,
     effParams
   );
-  renderSumiBristlePreview();
+  _lastPreviewTime = performance.now();
+  renderSumiBristlePreview(engine);
+  updateSumiActiveSolversUI(engine);
   if (modeInt !== 3) {
     ensureLiveSimLoop(engine);
   }
@@ -966,9 +1211,8 @@ function _emitQuadraticCurveBatch(engine, solver, pStart, pCtrl, pEnd, modeInt, 
   if (arcEst < 0.2) return;
 
   const avgSize = (pStart.size + pEnd.size) * 0.5;
-  const refStep = Math.max(2.0, avgSize * 0.20);
-  const maxSubStep = Math.max(1.1, Math.min(refStep, avgSize * 0.042));
-  const steps = Math.max(1, Math.min(128, Math.ceil(arcEst / maxSubStep)));
+  const maxSubStep = Math.max(4.0, Math.min(28.0, avgSize * 0.24));
+  const steps = Math.max(1, Math.min(24, Math.ceil(arcEst / maxSubStep)));
 
   const baseInkPct = modeInt === 4 ? (sumiSettings.eraserInk ?? 85) : (sumiSettings.ink ?? 78);
   const baseWaterPct = modeInt === 1
@@ -1037,7 +1281,7 @@ function _emitQuadraticCurveBatch(engine, solver, pStart, pCtrl, pEnd, modeInt, 
     batchInkSum += baseInkPct * stepInkMod;
     batchSteps++;
 
-    const stepWeight = Math.min(1.5, subDist / Math.max(2.0, stepSize * 0.20));
+    const stepWeight = Math.min(2.2, subDist / Math.max(2.0, stepSize * 0.20));
     const bridgeCapsule = subDist > Math.max(1.6, stepSize * 0.055);
 
     const segs = _brush.buildSegments({
@@ -1086,7 +1330,7 @@ export function paintSumiMove(engine, worldTo, dynamicSize, _opacMod, color, pre
 
   const now = performance.now();
   const dt = Math.max(0.004, Math.min(0.05, (now - _lastStrokeTime) / 1000));
-  const velMag = (dist / dt) * 0.04;
+  const velMag = Math.min(28, (dist / dt) * 0.04);
   const tiltX = (e && Number.isFinite(e.tiltX)) ? e.tiltX / 90 : 0;
   const tiltY = (e && Number.isFinite(e.tiltY)) ? e.tiltY / 90 : 0;
   const modeInt = getModeInt(sumiSettings.mode);
@@ -1108,6 +1352,10 @@ export function paintSumiMove(engine, worldTo, dynamicSize, _opacMod, color, pre
     tiltX,
     tiltY
   };
+
+  const _sumiPerf = engine.perfMonitor ? engine.perfMonitor.sumiFrameStats : null;
+  const _tStamp0 = _sumiPerf ? performance.now() : 0;
+  if (_sumiPerf) _sumiPerf.stampMoves++;
 
   if (!_lastMidPt) {
     const mid1 = {
@@ -1142,6 +1390,9 @@ export function paintSumiMove(engine, worldTo, dynamicSize, _opacMod, color, pre
     _emitQuadraticCurveBatch(engine, solver, _lastMidPt, _lastRawPt, mid2, modeInt, velMag, dt, sw, pNew.color);
     _lastMidPt = mid2;
   }
+  if (_sumiPerf) {
+    _sumiPerf.stampMs += performance.now() - _tStamp0;
+  }
 
   _lastRawPt = pNew;
   _lastStrokeWorld = { x: worldTo.x, y: worldTo.y, size: effectiveSize };
@@ -1149,7 +1400,7 @@ export function paintSumiMove(engine, worldTo, dynamicSize, _opacMod, color, pre
 
   if (now - _lastPreviewTime > 48) {
     _lastPreviewTime = now;
-    renderSumiBristlePreview();
+    renderSumiBristlePreview(engine);
   }
   if (modeInt !== 3) {
     ensureLiveSimLoop(engine);
@@ -1158,13 +1409,15 @@ export function paintSumiMove(engine, worldTo, dynamicSize, _opacMod, color, pre
 
 export function endSumiPaintStroke(engine) {
   const solver = engine?.gpuRenderer?.sumiSolver;
+  const _sumiPerf = engine?.perfMonitor ? engine.perfMonitor.sumiFrameStats : null;
   if (solver && solver.active && solver.ready && _lastMidPt && _lastRawPt) {
     const remDist = Math.hypot(_lastRawPt.x - _lastMidPt.x, _lastRawPt.y - _lastMidPt.y);
     if (remDist > 0.35) {
+      const _tTail0 = _sumiPerf ? performance.now() : 0;
       const modeInt = getModeInt(sumiSettings.mode);
       const sw = engine?.brush?.speedWater ?? 0;
       const dt = Math.max(0.004, Math.min(0.05, (performance.now() - _lastStrokeTime) / 1000));
-      const velMag = (remDist / dt) * 0.04;
+      const velMag = Math.min(28, (remDist / dt) * 0.04);
       const ctrlEnd = {
         x: (_lastMidPt.x + _lastRawPt.x) * 0.5,
         y: (_lastMidPt.y + _lastRawPt.y) * 0.5
@@ -1181,6 +1434,7 @@ export function endSumiPaintStroke(engine) {
         sw,
         _lastRawPt.color || engine.brush.color
       );
+      if (_sumiPerf) _sumiPerf.stampMs += performance.now() - _tTail0;
     }
   }
   _lastStrokeWorld = null;
@@ -1190,21 +1444,30 @@ export function endSumiPaintStroke(engine) {
 
   if (!engine) return;
   if (solver && solver.active) {
-    // Sync current tiles to Canvas2D for Undo & Selection while keeping live ink/pore layers active
-    solver.syncTilesToCanvas2D(engine);
+    // Only sync synchronously on pointerup when an active selection mask must clip Canvas2D immediately
+    if (engine.activeSelectionPath) {
+      solver.syncTilesToCanvas2D(engine, undefined, null, false);
+    }
     if (sumiSettings.mode === 'dry') {
       solver.simActiveFrames = 0;
+      if (solver.hasCpuDirtyTiles() || (solver.hasPendingSyncs && solver.hasPendingSyncs())) {
+        ensureLiveSimLoop(engine);
+      } else {
+        _clearSumiSimPhase(engine);
+      }
     } else {
       const evapPct = sumiSettings.evaporation ?? 28;
       solver.simActiveFrames = evapPct < 2 ? 320 : 480;
       ensureLiveSimLoop(engine);
     }
   }
-  renderSumiBristlePreview();
+  renderSumiBristlePreview(engine);
+  updateSumiActiveSolversUI(engine);
 }
 
 export function cancelSumiStroke(engine) {
   stopLiveSimLoop();
+  _clearSumiSimPhase(engine);
   _lastStrokeWorld = null;
   _lastRawPt = null;
   _lastMidPt = null;
@@ -1213,11 +1476,13 @@ export function cancelSumiStroke(engine) {
   if (solver) {
     solver.cancel(engine, true);
   }
-  renderSumiBristlePreview();
+  renderSumiBristlePreview(engine);
+  updateSumiActiveSolversUI(engine);
 }
 
 export function flushSumiCaches(engine) {
   stopLiveSimLoop();
+  _clearSumiSimPhase(engine);
   _lastStrokeWorld = null;
   _lastRawPt = null;
   _lastMidPt = null;

@@ -995,6 +995,21 @@ export function setupUI(app) {
         };
     }
 
+    const btnSaveModeBg = document.getElementById('btn-save-mode-bg');
+    const btnSaveModeFast = document.getElementById('btn-save-mode-fast');
+    if (btnSaveModeBg) {
+        btnSaveModeBg.onclick = () => {
+            app.setSaveMode?.('background', true);
+            app._status('SAVE MODE: BACKGROUND');
+        };
+    }
+    if (btnSaveModeFast) {
+        btnSaveModeFast.onclick = () => {
+            app.setSaveMode?.('fast', true);
+            app._status('SAVE MODE: FAST');
+        };
+    }
+
     // Palette
     app._renderPalette();
 
@@ -1815,10 +1830,23 @@ export function setupUI(app) {
         };
     };
 
-    // Brush Textures sidebar Sumi sliders
-    bindSumiSlider('brush-sumi-span', 'sumi-span-val', 'sumiSpan', 'px', false);
-    bindSumiSlider('brush-sumi-bristles', 'sumi-bristles-val', 'sumiBristles', '', true);
-    bindSumiSlider('brush-sumi-split', 'sumi-split-val', 'sumiSplit', '%', false);
+    // Brush Textures sidebar Sumi sliders (eraser subtool has independent values)
+    const bindModeAwareSumiSlider = (inputId, valId, getTargetKey, suffix = '%', rebuildTip = false) => {
+        const el = document.getElementById(inputId);
+        if (!el) return;
+        el.oninput = (e) => {
+            const val = parseFloat(e.target.value);
+            const valEl = document.getElementById(valId);
+            if (valEl) valEl.innerText = `${Math.round(val)}${suffix}`;
+            const targetKey = typeof getTargetKey === 'function' ? getTargetKey() : getTargetKey;
+            app.updateActiveSetting(targetKey, val);
+            syncSumiLive(rebuildTip);
+        };
+    };
+
+    bindModeAwareSumiSlider('brush-sumi-span', 'sumi-span-val', () => (sumiSettings.mode === 'eraser' ? 'sumiEraserSpan' : 'sumiSpan'), 'px', false);
+    bindModeAwareSumiSlider('brush-sumi-bristles', 'sumi-bristles-val', () => (sumiSettings.mode === 'eraser' ? 'sumiEraserBristles' : 'sumiBristles'), '', true);
+    bindModeAwareSumiSlider('brush-sumi-split', 'sumi-split-val', () => (sumiSettings.mode === 'eraser' ? 'sumiEraserSplit' : 'sumiSplit'), '%', false);
 
     // Floating #panel-sumi sliders & subtools
     const sliderSumiInk = document.getElementById('slider-sumi-ink');
@@ -1847,7 +1875,11 @@ export function setupUI(app) {
             syncSumiLive(false);
         };
     }
-    bindSumiSlider('slider-sumi-bleed', 'val-sumi-bleed', 'sumiBleed', '%', false);
+    bindModeAwareSumiSlider('slider-sumi-bleed', 'val-sumi-bleed', () => {
+        if (sumiSettings.mode === 'water') return 'sumiBleedWater';
+        if (sumiSettings.mode === 'eraser') return 'sumiBleedEraser';
+        return 'sumiBleed';
+    }, '%', false);
 
     ['draw', 'water', 'blow', 'dry', 'eraser'].forEach(mode => {
         const btn = document.getElementById(`btn-sumi-mode-${mode}`);
@@ -1906,11 +1938,76 @@ export function setupUI(app) {
         };
     }
 
+    const applySumiQualityUI = (val) => {
+        const q = Math.max(1, Math.min(3, parseInt(val, 10) || 3));
+        const names = { 1: 'FAST 1/2', 2: 'CRISP 3/4', 3: 'FULL 1:1' };
+        const msgs = {
+            1: 'SUMI SOLVER: FAST 1/2x (MAX FPS FOR WIDE 30% ZOOM)',
+            2: 'SUMI SOLVER: CRISP 3/4x (BALANCED SPEED & DETAIL)',
+            3: 'SUMI SOLVER: FULL 1:1 (NATIVE WORLD PRECISION)'
+        };
+        const valEl = document.getElementById('val-sumi-quality');
+        if (valEl) valEl.innerText = names[q];
+        const advValEl = document.getElementById('adv-sumi-quality-val');
+        if (advValEl) advValEl.innerText = names[q];
+        const advSlider = document.getElementById('adv-sumi-quality');
+        if (advSlider) advSlider.value = q;
+        for (let qi = 1; qi <= 3; qi++) {
+            const qb = document.getElementById(`btn-sumi-q-${qi}`);
+            if (qb) qb.classList.toggle('active-btn', qi === q);
+        }
+        app.updateActiveSetting('sumiQuality', q);
+        syncSumiLive(false);
+        const solver = app.engine?.gpuRenderer?.sumiSolver;
+        if (solver && typeof solver.setSolverQuality === 'function') {
+            solver.setSolverQuality(q, app.engine);
+        }
+        app._status(msgs[q]);
+    };
+
+    for (let qi = 1; qi <= 3; qi++) {
+        const qb = document.getElementById(`btn-sumi-q-${qi}`);
+        if (qb) {
+            qb.onclick = () => applySumiQualityUI(qi);
+        }
+    }
+    const advSumiQual = document.getElementById('adv-sumi-quality');
+    if (advSumiQual) {
+        advSumiQual.oninput = (e) => applySumiQualityUI(e.target.value);
+    }
+
     // Advanced Sumi-e Physics Controls
     bindSumiCheck('adv-sumi-deplete', 'sumiDeplete');
     bindSumiCheck('adv-sumi-split-enabled', 'sumiSplitEnabled');
     bindSumiCheck('adv-sumi-tilt', 'sumiTilt');
     bindSumiCheck('adv-sumi-follow-stroke', 'sumiFollowStroke');
+
+    const bindSumiPairCheck = (idA, idB, settingKey, onToggle = null) => {
+        const elA = document.getElementById(idA);
+        const elB = document.getElementById(idB);
+        const handler = (e) => {
+            const checked = !!e.target.checked;
+            if (elA && elA !== e.target) elA.checked = checked;
+            if (elB && elB !== e.target) elB.checked = checked;
+            app.updateActiveSetting(settingKey, checked);
+            syncSumiLive(false);
+            if (onToggle) onToggle(checked);
+        };
+        if (elA) elA.onchange = handler;
+        if (elB) elB.onchange = handler;
+    };
+
+    bindSumiPairCheck('chk-sumi-zoom-project', 'adv-sumi-zoom-project', 'sumiZoomProject', (checked) => {
+        const solver = app.engine?.gpuRenderer?.sumiSolver;
+        if (solver && typeof solver.updateZoomProjection === 'function') {
+            solver.updateZoomProjection(app.engine, checked);
+        }
+        app._status(checked ? 'SUMI ZOOM PROJECTED RES: ON' : 'SUMI ZOOM PROJECTED RES: NATIVE');
+    });
+
+    bindSumiPairCheck('chk-sumi-pause-paint', 'adv-sumi-pause-paint', 'sumiPauseWhilePainting', (checked) => {
+        app._status(checked ? 'SUMI SOLVER: PAUSE WHILE PAINTING' : 'SUMI SOLVER: LIVE WHILE PAINTING');
+    });
     bindSumiSlider('adv-sumi-stiffness', 'adv-sumi-stiffness-val', 'sumiStiffness', '%', false);
     bindSumiSlider('adv-sumi-glue', 'adv-sumi-glue-val', 'sumiGlue', '%', false);
     bindSumiSlider('adv-sumi-warmth', 'adv-sumi-warmth-val', 'sumiWarmth', '', false);
@@ -1922,7 +2019,7 @@ export function setupUI(app) {
     bindSumiSlider('adv-sumi-tip-angle', 'adv-sumi-tip-angle-val', 'sumiTipAngle', '°', false);
     bindSumiSlider('adv-sumi-pressure-flow', 'adv-sumi-pressure-flow-val', 'sumiPressureFlow', '%', false);
     bindSumiSlider('adv-sumi-pressure-gate', 'sumi-pressure-gate-val', 'sumiPressureGate', '%', false);
-    bindSumiSlider('sumi-max-water', 'max-water-val', 'sumiMaxWater', '%', false);
+    bindModeAwareSumiSlider('sumi-max-water', 'max-water-val', () => (sumiSettings.mode === 'eraser' ? 'sumiEraserMaxWater' : 'sumiMaxWater'), '%', false);
 
     const syncSumiHeightUi = (useH, src) => {
         const chkPanel = document.getElementById('chk-sumi-use-heightmap');

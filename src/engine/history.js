@@ -1,7 +1,8 @@
 import {
   captureLayerSnapshot,
   restoreBackupToLayer,
-  releaseBackupCanvas
+  releaseBackupCanvas,
+  resolveBackupEntry
 } from './backupPool.js';
 import { stopSumiSimLoop } from '../tools/sumiPaint.js';
 
@@ -9,10 +10,28 @@ export function _disposeAction(action) {
   if (!action) return;
   if (action.chunks) {
       action.chunks.forEach(data => {
-          if (data && data.canvas) {
-              releaseBackupCanvas(this, data);
-              data.canvas = null;
-              data.ctx = null;
+          if (data) {
+              if (typeof data._cancelSync === 'function') {
+                  data._cancelSync();
+              }
+              if (data.isPatchList && data.patches) {
+                  data.patches.forEach(p => {
+                      if (p) {
+                          if (typeof p._cancelSync === 'function') p._cancelSync();
+                          if (p.canvas) {
+                              releaseBackupCanvas(this, p);
+                              p.canvas = null;
+                              p.ctx = null;
+                          }
+                      }
+                  });
+                  data.patches.clear();
+              }
+              if (data.canvas) {
+                  releaseBackupCanvas(this, data);
+                  data.canvas = null;
+                  data.ctx = null;
+              }
           }
       });
       action.chunks.clear();
@@ -79,8 +98,13 @@ export function undo() {
   if (isSumiAction) {
       stopSumiSimLoop();
       if (this.flushPendingGpuCommits) this.flushPendingGpuCommits({ keepSumiSession: true });
-      if (sumiSolver && sumiSolver.active && sumiSolver.hasCpuDirtyTiles()) {
-          sumiSolver.syncTilesToCanvas2D(this, sumiSolver.lastParams || {}, peekAction.chunks || null);
+      if (sumiSolver) {
+          if (sumiSolver.flushPendingChunkBackups) sumiSolver.flushPendingChunkBackups();
+          if (sumiSolver.flushPendingSyncs) sumiSolver.flushPendingSyncs(this);
+          if (sumiSolver.flushPendingPacks) sumiSolver.flushPendingPacks();
+          if (sumiSolver.active && sumiSolver.hasCpuDirtyTiles()) {
+              sumiSolver.syncTilesToCanvas2D(this, sumiSolver.lastParams || {}, peekAction.chunks || null);
+          }
       }
   } else {
       if (this.flushPendingGpuCommits) this.flushPendingGpuCommits();
@@ -107,14 +131,14 @@ export function undo() {
           selection: this.floatingSelection ? { ...this.floatingSelection } : null
       };
 
-      if (action.isSumiStroke && sumiSolver) {
-          redoAction.isSumiStroke = true;
+      if ((action.isSumiStroke || action.sumiPassive) && sumiSolver) {
+          if (action.isSumiStroke) redoAction.isSumiStroke = true;
           redoAction.sumiLayer = action.sumiLayer;
           redoAction.sumiProjId = action.sumiProjId;
           redoAction.sumiPassive = sumiSolver.capturePassiveAfterForAction
               ? sumiSolver.capturePassiveAfterForAction(this, action)
               : null;
-          if (sumiSolver.active) {
+          if (action.isSumiStroke && sumiSolver.active) {
               sumiSolver.cancel(this, false);
           }
       }
@@ -124,14 +148,14 @@ export function undo() {
           action.chunks.forEach((data, id) => {
               const chunk = this.chunks.get(id);
               if (chunk) {
-                  const redoBackup = captureLayerSnapshot(this, chunk, data.layer);
+                  const redoBackup = captureLayerSnapshot(this, chunk, data.layer, { regionFrom: data });
                   redoAction.chunks.set(id, redoBackup);
                   restoreBackupToLayer(this, chunk, id, data);
               }
           });
       }
 
-      if (action.isSumiStroke && action.sumiPassive && sumiSolver?.restorePassiveSnapshot) {
+      if (action.sumiPassive && sumiSolver?.restorePassiveSnapshot) {
           sumiSolver.restorePassiveSnapshot(this, action.sumiPassive, action.sumiLayer);
       }
 
@@ -181,9 +205,14 @@ export function redo() {
   if (isSumiAction) {
       stopSumiSimLoop();
       if (this.flushPendingGpuCommits) this.flushPendingGpuCommits({ keepSumiSession: true });
-      if (sumiSolver && sumiSolver.active) {
-          // Commit any unrelated live Sumi work before restoring a future Sumi snapshot
-          sumiSolver.commitToChunks(this, sumiSolver.lastParams || {}, true);
+      if (sumiSolver) {
+          if (sumiSolver.flushPendingChunkBackups) sumiSolver.flushPendingChunkBackups();
+          if (sumiSolver.flushPendingSyncs) sumiSolver.flushPendingSyncs(this);
+          if (sumiSolver.flushPendingPacks) sumiSolver.flushPendingPacks();
+          if (sumiSolver.active) {
+              // Commit any unrelated live Sumi work before restoring a future Sumi snapshot
+              sumiSolver.commitToChunks(this, sumiSolver.lastParams || {}, true);
+          }
       }
   } else {
       if (this.flushPendingGpuCommits) this.flushPendingGpuCommits();
@@ -210,8 +239,8 @@ export function redo() {
           selection: this.floatingSelection ? { ...this.floatingSelection } : null
       };
 
-      if (action.isSumiStroke && sumiSolver) {
-          undoAction.isSumiStroke = true;
+      if ((action.isSumiStroke || action.sumiPassive) && sumiSolver) {
+          if (action.isSumiStroke) undoAction.isSumiStroke = true;
           undoAction.sumiLayer = action.sumiLayer;
           undoAction.sumiProjId = action.sumiProjId;
           undoAction.sumiPassive = sumiSolver.capturePassiveAfterForAction
@@ -223,14 +252,14 @@ export function redo() {
           action.chunks.forEach((data, id) => {
               const chunk = this.chunks.get(id);
               if (chunk) {
-                  const undoBackup = captureLayerSnapshot(this, chunk, data.layer);
+                  const undoBackup = captureLayerSnapshot(this, chunk, data.layer, { regionFrom: data });
                   undoAction.chunks.set(id, undoBackup);
                   restoreBackupToLayer(this, chunk, id, data);
               }
           });
       }
 
-      if (action.isSumiStroke && action.sumiPassive && sumiSolver?.restorePassiveSnapshot) {
+      if (action.sumiPassive && sumiSolver?.restorePassiveSnapshot) {
           sumiSolver.restorePassiveSnapshot(this, action.sumiPassive, action.sumiLayer);
       }
 
@@ -326,6 +355,27 @@ export function toggleFloatingSelectionMirrorX() {
 // HISTORY STORAGE CACHE / INDEXDB SERIALIZATION
 // -------------------------------------------------------------
 
+function canvasToBlobAsyncLocal(canvas, type = 'image/webp', quality = 0.95) {
+  if (!canvas || canvas.width <= 0 || canvas.height <= 0) {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(val);
+    };
+    const timer = setTimeout(() => done(null), 10000);
+    try {
+      canvas.toBlob((blob) => done(blob || null), type, quality);
+    } catch (e) {
+      done(null);
+    }
+  });
+}
+
 function canvasToDataURLAsync(canvas, type = 'image/png', quality) {
   if (!canvas || canvas.width <= 0 || canvas.height <= 0) {
     return Promise.resolve('');
@@ -364,10 +414,75 @@ function canvasToDataURLAsync(canvas, type = 'image/png', quality) {
   });
 }
 
-async function serializeHistoryState(historyArray) {
+function yieldBackgroundSlice(shouldAbort) {
+  return new Promise((resolve) => {
+    if (typeof shouldAbort === 'function' && shouldAbort()) {
+      resolve(false);
+      return;
+    }
+    const done = () => {
+      resolve(!(typeof shouldAbort === 'function' && shouldAbort()));
+    };
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(done, { timeout: 90 });
+    } else {
+      setTimeout(done, 12);
+    }
+  });
+}
+
+async function serializeCanvasPayload(canvas, { useDataUrl = false } = {}) {
+  if (!canvas || canvas.width <= 0 || canvas.height <= 0) {
+    return { blob: null, dataUrl: null };
+  }
+  if (!useDataUrl) {
+    const blob = await canvasToBlobAsyncLocal(canvas, 'image/webp', 0.95);
+    if (blob) {
+      return { blob, dataUrl: null };
+    }
+  }
+  const dataUrl = await canvasToDataURLAsync(canvas, 'image/webp', 0.95);
+  return { blob: null, dataUrl: dataUrl || null };
+}
+
+function loadImageFromSerialized(img, { blob = null, dataUrl = null }) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let objUrl = null;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (objUrl) {
+        try { URL.revokeObjectURL(objUrl); } catch (_) {}
+        objUrl = null;
+      }
+      resolve();
+    };
+    const timer = setTimeout(() => { img.src = ''; finish(); }, 10000);
+    img.onload = img.onerror = finish;
+    if (blob instanceof Blob) {
+      objUrl = URL.createObjectURL(blob);
+      img.src = objUrl;
+    } else if (dataUrl) {
+      img.src = dataUrl;
+    } else {
+      finish();
+    }
+  });
+}
+
+async function serializeHistoryState(historyArray, options = {}) {
   if (!historyArray) return [];
+  const background = !!options.background;
+  const shouldAbort = typeof options.shouldAbort === 'function' ? options.shouldAbort : null;
+  const useDataUrl = !!options.useDataUrl;
   const serialized = [];
+
   for (const action of historyArray) {
+    if (background && !(await yieldBackgroundSlice(shouldAbort))) {
+      return { aborted: true };
+    }
     const act = {
       type: action.type,
       path: action.path ? JSON.parse(JSON.stringify(action.path)) : null,
@@ -397,23 +512,93 @@ async function serializeHistoryState(historyArray) {
 
     if (action.chunks) {
       const chunkEntries = Array.from(action.chunks.entries());
-      const chunksArr = await Promise.all(chunkEntries.map(async ([chunkId, data]) => {
+      const serializeSingleChunk = async ([chunkId, data]) => {
+        if (background && !(await yieldBackgroundSlice(shouldAbort))) {
+          return null;
+        }
+        resolveBackupEntry(data);
+        if (data.isPatchList && data.patches) {
+          const patchEntries = Array.from(data.patches.entries());
+          let serializedPatches;
+          if (background) {
+            serializedPatches = [];
+            for (const [pk, p] of patchEntries) {
+              if (!(await yieldBackgroundSlice(shouldAbort))) return null;
+              const payload = (p && p.canvas)
+                ? await serializeCanvasPayload(p.canvas, { useDataUrl })
+                : { blob: null, dataUrl: null };
+              serializedPatches.push({
+                pk,
+                rx: p.rx,
+                ry: p.ry,
+                rw: p.rw,
+                rh: p.rh,
+                blob: payload.blob,
+                dataUrl: payload.dataUrl
+              });
+            }
+          } else {
+            serializedPatches = await Promise.all(patchEntries.map(async ([pk, p]) => {
+              const payload = (p && p.canvas)
+                ? await serializeCanvasPayload(p.canvas, { useDataUrl })
+                : { blob: null, dataUrl: null };
+              return {
+                pk,
+                rx: p.rx,
+                ry: p.ry,
+                rw: p.rw,
+                rh: p.rh,
+                blob: payload.blob,
+                dataUrl: payload.dataUrl
+              };
+            }));
+          }
+          return {
+            chunkId,
+            layer: data.layer,
+            isPatchList: true,
+            wasEmpty: false,
+            width: data.width || 1024,
+            height: data.height || 1024,
+            patches: serializedPatches
+          };
+        }
         const isWasEmpty = !!(data.wasEmpty || !data.canvas);
-        const dataUrl = (!isWasEmpty && data.canvas) ? await canvasToDataURLAsync(data.canvas, 'image/png') : null;
+        const payload = (!isWasEmpty && data.canvas)
+          ? await serializeCanvasPayload(data.canvas, { useDataUrl })
+          : { blob: null, dataUrl: null };
         return {
           chunkId,
           layer: data.layer,
           wasEmpty: isWasEmpty,
-          dataUrl,
+          blob: payload.blob,
+          dataUrl: payload.dataUrl,
           width: data.canvas ? data.canvas.width : (data.width || 1024),
           height: data.canvas ? data.canvas.height : (data.height || 1024)
         };
-      }));
+      };
+
+      let chunksArr;
+      if (background) {
+        chunksArr = [];
+        for (const entry of chunkEntries) {
+          const res = await serializeSingleChunk(entry);
+          if (res === null) return { aborted: true };
+          chunksArr.push(res);
+        }
+      } else {
+        chunksArr = await Promise.all(chunkEntries.map(serializeSingleChunk));
+      }
       act.chunks = chunksArr;
     }
 
     if (action.selection) {
-      const canvasDataUrl = action.selection.canvas ? await canvasToDataURLAsync(action.selection.canvas, 'image/png') : null;
+      if (background && !(await yieldBackgroundSlice(shouldAbort))) {
+        return { aborted: true };
+      }
+      const payload = action.selection.canvas
+        ? await serializeCanvasPayload(action.selection.canvas, { useDataUrl })
+        : { blob: null, dataUrl: null };
       act.selection = {
         x: action.selection.x,
         y: action.selection.y,
@@ -426,7 +611,8 @@ async function serializeHistoryState(historyArray) {
         opacity: action.selection.opacity,
         mirrorX: action.selection.mirrorX,
         mirrorY: action.selection.mirrorY,
-        canvasDataUrl: canvasDataUrl
+        canvasBlob: payload.blob,
+        canvasDataUrl: payload.dataUrl
       };
     }
 
@@ -470,7 +656,42 @@ async function deserializeHistoryState(serializedArray) {
     if (act.chunks) {
       const chunksMap = new Map();
       await Promise.all(act.chunks.map(async (chunkItem) => {
-        if (chunkItem.wasEmpty || !chunkItem.dataUrl) {
+        if (chunkItem.isPatchList && Array.isArray(chunkItem.patches)) {
+          const patches = new Map();
+          await Promise.all(chunkItem.patches.map(async (pItem) => {
+            const pCv = document.createElement('canvas');
+            pCv.width = Math.max(1, pItem.rw | 0);
+            pCv.height = Math.max(1, pItem.rh | 0);
+            const pCtx = pCv.getContext('2d');
+            if (pItem.blob instanceof Blob || pItem.dataUrl) {
+              const img = new Image();
+              await loadImageFromSerialized(img, { blob: pItem.blob, dataUrl: pItem.dataUrl });
+              if (img.width > 0) {
+                pCtx.drawImage(img, 0, 0);
+              }
+            }
+            patches.set(pItem.pk, {
+              rx: pItem.rx,
+              ry: pItem.ry,
+              rw: pCv.width,
+              rh: pCv.height,
+              canvas: pCv,
+              ctx: pCtx,
+              width: pCv.width,
+              height: pCv.height
+            });
+          }));
+          chunksMap.set(chunkItem.chunkId, {
+            layer: chunkItem.layer,
+            isPatchList: true,
+            wasEmpty: false,
+            width: chunkItem.width || 1024,
+            height: chunkItem.height || 1024,
+            patches
+          });
+          return;
+        }
+        if (chunkItem.wasEmpty || (!(chunkItem.blob instanceof Blob) && !chunkItem.dataUrl)) {
           chunksMap.set(chunkItem.chunkId, {
             layer: chunkItem.layer,
             canvas: null,
@@ -485,18 +706,7 @@ async function deserializeHistoryState(serializedArray) {
         cv.height = chunkItem.height;
         const ctx = cv.getContext('2d');
         const img = new Image();
-        await new Promise(resolve => {
-          let settled = false;
-          const finish = () => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            resolve();
-          };
-          const timer = setTimeout(() => { img.src = ''; finish(); }, 10000);
-          img.onload = img.onerror = finish;
-          img.src = chunkItem.dataUrl;
-        });
+        await loadImageFromSerialized(img, { blob: chunkItem.blob, dataUrl: chunkItem.dataUrl });
         if (img.width > 0) {
           ctx.drawImage(img, 0, 0);
         }
@@ -516,19 +726,11 @@ async function deserializeHistoryState(serializedArray) {
       cv.width = act.selection.width || 100;
       cv.height = act.selection.height || 100;
       const ctx = cv.getContext('2d');
-      if (act.selection.canvasDataUrl) {
+      if (act.selection.canvasBlob instanceof Blob || act.selection.canvasDataUrl) {
         const img = new Image();
-        await new Promise(resolve => {
-          let settled = false;
-          const finish = () => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            resolve();
-          };
-          const timer = setTimeout(() => { img.src = ''; finish(); }, 10000);
-          img.onload = img.onerror = finish;
-          img.src = act.selection.canvasDataUrl;
+        await loadImageFromSerialized(img, {
+          blob: act.selection.canvasBlob,
+          dataUrl: act.selection.canvasDataUrl
         });
         if (img.width > 0) {
           ctx.drawImage(img, 0, 0);
@@ -545,21 +747,23 @@ async function deserializeHistoryState(serializedArray) {
   return deserialized;
 }
 
-export async function saveHistoryStackToStorage(explicitProjectId = null) {
-  if (!this.storage) return;
+export async function saveHistoryStackToStorage(explicitProjectId = null, options = {}) {
+  if (!this.storage) return { saved: true, aborted: false };
+  const background = !!options.background;
+  const shouldAbort = typeof options.shouldAbort === 'function' ? options.shouldAbort : null;
 
   try {
     const projKey = explicitProjectId || this.currentProjectId || '_default';
     if (!this.history || this.history.length === 0) {
       if (this._lastSavedHistoryAction === null && this._lastSavedHistoryProjId === projKey && this._lastSavedHistoryLen === 0) {
-        return;
+        return { saved: true, aborted: false };
       }
       await this.storage.saveSetting('historyStack', [], explicitProjectId);
       await this.storage.saveSetting('redoStack', [], explicitProjectId);
       this._lastSavedHistoryAction = null;
       this._lastSavedHistoryProjId = projKey;
       this._lastSavedHistoryLen = 0;
-      return;
+      return { saved: true, aborted: false };
     }
 
     const lastAction = this.history[this.history.length - 1];
@@ -568,12 +772,22 @@ export async function saveHistoryStackToStorage(explicitProjectId = null) {
       this._lastSavedHistoryProjId === projKey &&
       this._lastSavedHistoryLen === this.history.length
     ) {
-      return;
+      return { saved: true, aborted: false };
     }
 
     // Only serialize the last 1 action for storage persistence to prevent massive project-switching lags!
     const historyToSave = [lastAction];
-    const serializedHistory = await serializeHistoryState(historyToSave);
+    const serializedHistory = await serializeHistoryState(historyToSave, {
+      background,
+      shouldAbort,
+      useDataUrl: !!this.storage.isFallback
+    });
+    if (serializedHistory && serializedHistory.aborted) {
+      return { saved: false, aborted: true };
+    }
+    if (background && shouldAbort && shouldAbort()) {
+      return { saved: false, aborted: true };
+    }
     const serializedRedo = [];
 
     await this.storage.saveSetting('historyStack', serializedHistory, explicitProjectId);
@@ -581,8 +795,10 @@ export async function saveHistoryStackToStorage(explicitProjectId = null) {
     this._lastSavedHistoryAction = lastAction;
     this._lastSavedHistoryProjId = projKey;
     this._lastSavedHistoryLen = this.history.length;
+    return { saved: true, aborted: false };
   } catch (err) {
     console.warn('Failed to save history stacks to storage:', err);
+    return { saved: false, aborted: false };
   }
 }
 

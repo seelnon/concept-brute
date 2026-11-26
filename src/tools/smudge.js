@@ -561,6 +561,9 @@ export function warmSmudgeSolver(engine) {
   if (solver && solver.prewarmPipelines) {
     solver.prewarmPipelines(engine, _tipMask, _smudgeTipVersionCounter);
   }
+  if (engine.gpuRenderer && engine.gpuRenderer.sumiSolver && typeof engine.gpuRenderer.sumiSolver.prewarmPipelines === 'function') {
+    engine.gpuRenderer.sumiSolver.prewarmPipelines(engine);
+  }
   return solver;
 }
 
@@ -570,24 +573,6 @@ export function paintSmudgeOnChunks(engine, stamps, affectedChunks, flow, opacit
 
   const airbrush = (engine.brush && engine.brush.airbrush) || 0;
   const effectiveTip = airbrush > 0.005 ? getEffectiveSmudgeTip(tip, airbrush) : tip;
-
-  const useBrute = (engine._useBruteSmudge !== undefined)
-    ? engine._useBruteSmudge
-    : !!(engine.brush && engine.brush.smudgeAlpha === false);
-  if (useBrute) {
-    if (engine.perfMonitor) {
-      engine.perfMonitor.markPhase('smudge_step', { stamps: stamps.length, chunks: affectedChunks ? affectedChunks.size : 1, brute: true });
-    }
-    ensureEngineSmudgeCanvas(engine);
-    paintBruteSmudgeChunks(engine, stamps, affectedChunks, flow, opacity, effectiveTip);
-    return;
-  }
-
-  if (engine.perfMonitor) {
-    engine.perfMonitor.markPhase('smudge_step', { stamps: stamps.length, chunks: affectedChunks ? affectedChunks.size : 1 });
-  }
-
-  ensureSmudgeBuffers(engine);
   updateTipMaskCache(effectiveTip, airbrush);
 
   const flowBoost = engine.brush.smudgeFlowBoost !== undefined ? engine.brush.smudgeFlowBoost : 1.0;
@@ -600,6 +585,31 @@ export function paintSmudgeOnChunks(engine, stamps, affectedChunks, flow, opacit
     ? 0.0
     : Math.min(0.85, (0.04 + flow * 0.24) * (pickupSetting / 2.0));
   const effOpacity = Math.max(0.0, Math.min(1.0, opacity));
+
+  const useBrute = (engine._useBruteSmudge !== undefined)
+    ? engine._useBruteSmudge
+    : !!(engine.brush && engine.brush.smudgeAlpha === false);
+  if (useBrute) {
+    if (engine.perfMonitor) {
+      engine.perfMonitor.markPhase('smudge_step', { stamps: stamps.length, chunks: affectedChunks ? affectedChunks.size : 1, brute: true });
+    }
+    ensureEngineSmudgeCanvas(engine);
+    paintBruteSmudgeChunks(engine, stamps, affectedChunks, flow, opacity, effectiveTip);
+    if (engine.gpuRenderer?.sumiSolver?.stepPassiveSmudge) {
+      engine.gpuRenderer.sumiSolver.stepPassiveSmudge(engine, stamps, depositBase, pickupBase, effOpacity);
+    }
+    return;
+  }
+
+  if (engine.perfMonitor) {
+    engine.perfMonitor.markPhase('smudge_step', { stamps: stamps.length, chunks: affectedChunks ? affectedChunks.size : 1 });
+  }
+
+  ensureSmudgeBuffers(engine);
+
+  if (engine.gpuRenderer?.sumiSolver?.stepPassiveSmudge) {
+    engine.gpuRenderer.sumiSolver.stepPassiveSmudge(engine, stamps, depositBase, pickupBase, effOpacity);
+  }
 
   if (engine.useGpuSmudge) {
     const solver = getGpuSmudgeSolver(engine);
@@ -793,13 +803,18 @@ export function startSmudgeStroke(engine, worldPos) {
   const useBrute = !!(engine && engine.brush && engine.brush.smudgeAlpha === false);
   engine._useBruteSmudge = useBrute;
 
+  const airbrush = (engine.brush && engine.brush.airbrush) || 0;
+  const effectiveTip = airbrush > 0.005 ? getEffectiveSmudgeTip(engine.brush.tip, airbrush) : engine.brush.tip;
+  updateTipMaskCache(effectiveTip, airbrush);
+
   if (useBrute) {
     ensureEngineSmudgeCanvas(engine);
     engine.smudgeDirty = false;
     engine.useGpuSmudge = false;
-    const airbrush = (engine.brush && engine.brush.airbrush) || 0;
-    const effectiveTip = airbrush > 0.005 ? getEffectiveSmudgeTip(engine.brush.tip, airbrush) : engine.brush.tip;
     startBruteSmudgeStroke(engine, worldPos, effectiveTip);
+    if (engine.gpuRenderer?.sumiSolver?.beginPassiveSmudge) {
+      engine.gpuRenderer.sumiSolver.beginPassiveSmudge(engine, worldPos, _tipMask, _smudgeTipVersionCounter);
+    }
     return;
   }
 
@@ -813,9 +828,9 @@ export function startSmudgeStroke(engine, worldPos) {
   engine.smudgeBuf.fill(0);
   engine.useGpuSmudge = false;
 
-  const airbrush = (engine.brush && engine.brush.airbrush) || 0;
-  const effectiveTip = airbrush > 0.005 ? getEffectiveSmudgeTip(engine.brush.tip, airbrush) : engine.brush.tip;
-  updateTipMaskCache(effectiveTip, airbrush);
+  if (engine.gpuRenderer?.sumiSolver?.beginPassiveSmudge) {
+    engine.gpuRenderer.sumiSolver.beginPassiveSmudge(engine, worldPos, _tipMask, _smudgeTipVersionCounter);
+  }
 
   const solver = getGpuSmudgeSolver(engine);
   if (solver && solver.beginStroke(engine, worldPos, _tipMask, _smudgeTipVersionCounter)) {
@@ -867,6 +882,9 @@ export function endSmudgeStroke(engine) {
     }
     engine.useGpuSmudge = false;
   }
+  if (engine && engine.gpuRenderer?.sumiSolver?.endPassiveSmudge) {
+    engine.gpuRenderer.sumiSolver.endPassiveSmudge(engine);
+  }
   if (engine && engine.smudgeTiles) {
     engine.smudgeTiles.clear();
   }
@@ -887,6 +905,9 @@ export function cancelSmudgeStroke(engine) {
       solver.cancel(engine);
     }
     engine.useGpuSmudge = false;
+  }
+  if (engine.gpuRenderer?.sumiSolver?.cancelPassiveSmudge) {
+    engine.gpuRenderer.sumiSolver.cancelPassiveSmudge(engine);
   }
   if (engine.smudgeTiles) {
     engine.smudgeTiles.clear();

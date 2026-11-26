@@ -1,5 +1,22 @@
-import { LAYERS_COUNT, SECTOR_SIZE } from './constants.js';
+import { LAYERS_COUNT, SECTOR_SIZE, TOOLS } from './constants.js';
 import { isCanvasEmpty, isMobileDevice } from './colorUtils.js';
+
+function yieldSaveSlice(shouldAbort = null) {
+  return new Promise((resolve) => {
+    if (typeof shouldAbort === 'function' && shouldAbort()) {
+      resolve(false);
+      return;
+    }
+    const done = () => {
+      resolve(!(typeof shouldAbort === 'function' && shouldAbort()));
+    };
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(done, { timeout: 120 });
+    } else {
+      setTimeout(done, 12);
+    }
+  });
+}
 
 export function canvasToBlobAsync(canvas, type = 'image/webp', quality = 0.95) {
   if (!canvas || canvas.width <= 0 || canvas.height <= 0) {
@@ -67,8 +84,11 @@ export function detectSectorChunkKeyFormat(chunksObj, sx = undefined, sy = undef
     const keys = Object.keys(chunksObj);
     if (keys.length === 0) return 'l_cx_cy';
 
+    let structuralLCXCY = 0;
+    let structuralCXYL = 0;
     let scoreLCXCY = 0;
     let scoreCXYL = 0;
+    let hasNonModernSyntax = false;
 
     // Track layer occurrences per candidate chunk coordinate pair
     const countsByN0N1 = new Map(); // Candidate (cx, cy) -> set of n2 (layers)
@@ -76,10 +96,16 @@ export function detectSectorChunkKeyFormat(chunksObj, sx = undefined, sy = undef
 
     for (const key of keys) {
         if (!key || typeof key !== 'string') continue;
+        if (!/^[1-3]_-?\d+_-?\d+$/.test(key)) {
+            hasNonModernSyntax = true;
+        }
         const normalized = key.replace(/minus/g, '-');
-        
+
         // Keys with pipe '|' are self-describing
-        if (normalized.includes('|')) continue;
+        if (normalized.includes('|')) {
+            hasNonModernSyntax = true;
+            continue;
+        }
 
         const rawParts = normalized.split(/[,_]/).filter(p => p !== '' && p !== 'chunk');
         if (rawParts.length < 3) continue;
@@ -95,16 +121,20 @@ export function detectSectorChunkKeyFormat(chunksObj, sx = undefined, sy = undef
 
         // Clue 1: Layer 0 is IMG REF and is never drawn on with brush tools
         if (n0 === 0 && n2IsDrawLayer) {
+            structuralCXYL += 15;
             scoreCXYL += 15;
         } else if (n2 === 0 && n0IsDrawLayer) {
+            structuralLCXCY += 15;
             scoreLCXCY += 15;
         }
 
         // Clue 2: Out of layer bounds (<0 or >=LAYERS_COUNT)
         if (!n0IsDrawLayer && n0 !== 0 && n2IsDrawLayer) {
-            scoreCXYL += 50; // n0 cannot be layer, so n2 must be layer
+            structuralCXYL += 50; // n0 cannot be layer, so n2 must be layer
+            scoreCXYL += 50;
         } else if (!n2IsDrawLayer && n2 !== 0 && n0IsDrawLayer) {
-            scoreLCXCY += 50; // n2 cannot be layer, so n0 must be layer
+            structuralLCXCY += 50; // n2 cannot be layer, so n0 must be layer
+            scoreLCXCY += 50;
         }
 
         // Clue 3: Track multiple layers sharing the same chunk coordinate pair
@@ -124,12 +154,28 @@ export function detectSectorChunkKeyFormat(chunksObj, sx = undefined, sy = undef
             const inSectorA = (Math.floor(n1 / SECTOR_SIZE) === sx && Math.floor(n2 / SECTOR_SIZE) === sy);
             const inSectorB = (Math.floor(n0 / SECTOR_SIZE) === sx && Math.floor(n1 / SECTOR_SIZE) === sy);
 
-            if (inSectorA && !inSectorB) scoreLCXCY += 25;
-            if (inSectorB && !inSectorA) scoreCXYL += 25;
+            if (inSectorA && !inSectorB) {
+                structuralLCXCY += 25;
+                scoreLCXCY += 25;
+            }
+            if (inSectorB && !inSectorA) {
+                structuralCXYL += 25;
+                scoreCXYL += 25;
+            }
         }
     }
 
-    // Award bonus scores if multiple distinct layers share identical (cx, cy) candidate coordinates
+    if (structuralCXYL > structuralLCXCY) return 'cx_cy_l';
+    if (structuralLCXCY > structuralCXYL) return 'l_cx_cy';
+
+    // When structural clues tie (e.g. modern keys like "2_1_1" & "2_1_2" inside sector (0,0)),
+    // NEVER guess cx_cy_l solely from Clue 3 if all keys match modern `${l}_${cx}_${cy}` syntax.
+    // Let project-wide consensus (defaulting to l_cx_cy) resolve ambiguous sectors safely.
+    if (!hasNonModernSyntax) {
+        return null;
+    }
+
+    // Legacy non-modern keys fallback: use multi-layer coordinate clustering tiebreaker
     for (const layers of countsByN0N1.values()) {
         if (layers.size > 1) {
             scoreCXYL += (layers.size * 20);
@@ -141,7 +187,9 @@ export function detectSectorChunkKeyFormat(chunksObj, sx = undefined, sy = undef
         }
     }
 
-    return scoreCXYL > scoreLCXCY ? 'cx_cy_l' : 'l_cx_cy';
+    if (scoreCXYL > scoreLCXCY) return 'cx_cy_l';
+    if (scoreLCXCY > scoreCXYL) return 'l_cx_cy';
+    return null;
 }
 
 export function parseChunkKey(chunkKey, sx = undefined, sy = undefined, sectorFormatHint = null) {
@@ -1198,7 +1246,8 @@ export async function loadProject(app, targetProjectId = null, switchToken = nul
         let projectVotesCXYL = 0;
         for (const { sx, sy, sector } of sectors) {
             if (sector && sector.chunks) {
-                const sectorFmt = detectSectorChunkKeyFormat(sector.chunks, sx, sy);
+                const taggedFmt = (sector.keyFormat === 'l_cx_cy' || sector.keyFormat === 'cx_cy_l') ? sector.keyFormat : null;
+                const sectorFmt = taggedFmt || detectSectorChunkKeyFormat(sector.chunks, sx, sy);
                 if (sectorFmt === 'cx_cy_l') projectVotesCXYL++;
                 else if (sectorFmt === 'l_cx_cy') projectVotesLCXCY++;
             }
@@ -1212,8 +1261,9 @@ export async function loadProject(app, targetProjectId = null, switchToken = nul
 
         for (const { sx, sy, sector } of sectors) {
             if (sector && sector.chunks) {
-                const sectorFmt = detectSectorChunkKeyFormat(sector.chunks, sx, sy) || defaultProjectFormat;
-                
+                const taggedFmt = (sector.keyFormat === 'l_cx_cy' || sector.keyFormat === 'cx_cy_l') ? sector.keyFormat : null;
+                const sectorFmt = taggedFmt || detectSectorChunkKeyFormat(sector.chunks, sx, sy) || defaultProjectFormat;
+
                 // Sort keys: process legacy/non-standard keys first, modern standardized keys (l_cx_cy) second
                 // so newer data takes precedence in case of duplicate chunk entries
                 const allKeys = Object.keys(sector.chunks);
@@ -1232,13 +1282,13 @@ export async function loadProject(app, targetProjectId = null, switchToken = nul
                     if (!parsed) continue;
                     const { layerId, cx, cy } = parsed;
                     const chunkData = sector.chunks[chunkKey];
-                    
+
                     const modernKey = `${layerId}_${cx}_${cy}`;
                     if (chunkKey !== modernKey) {
                         needsMigration = true;
                     }
                     normalizedSectorChunks[modernKey] = chunkData;
-                    
+
                     if (chunkData) {
                         chunkLoadPromises.push(() => (async () => {
                             if (switchToken !== null && switchToken !== app._switchProjectGeneration) return;
@@ -1269,6 +1319,7 @@ export async function loadProject(app, targetProjectId = null, switchToken = nul
 
                 if (needsMigration) {
                     sector.chunks = normalizedSectorChunks;
+                    sector.keyFormat = 'l_cx_cy';
                     sectorsToMigrate.push({ sx, sy, sector });
                 }
             }
@@ -1321,6 +1372,18 @@ export async function loadProject(app, targetProjectId = null, switchToken = nul
         if (app.engine && app.engine.loadHistoryStackFromStorage) {
             await app.engine.loadHistoryStackFromStorage(projId);
         }
+        if (switchToken !== null && switchToken !== app._switchProjectGeneration) return;
+        const savedSumiPores = app.storage.isFallback ? null : await app.storage.loadSetting('sumiPores', projId);
+        if (switchToken !== null && switchToken !== app._switchProjectGeneration) return;
+        const grLoad = app.engine?.gpuRenderer;
+        if (grLoad) {
+            if (grLoad.sumiSolver && grLoad.sumiSolver.importPassiveArchiveFromStorage) {
+                grLoad._pendingSumiPores = null;
+                grLoad.sumiSolver.importPassiveArchiveFromStorage(app.engine, projId, savedSumiPores);
+            } else {
+                grLoad._pendingSumiPores = savedSumiPores ? { projId, payload: savedSumiPores } : null;
+            }
+        }
 
         // Pre-warm initial viewport chunk (0, 0) and strokeCanvas so the first user stroke
         // never suffers a multi-canvas VRAM allocation freeze
@@ -1348,27 +1411,43 @@ export async function loadProject(app, targetProjectId = null, switchToken = nul
 
 export async function saveProject(app, force = false, targetProjectId = null) {
     const projId = targetProjectId || app.currentProjectId;
+    const engine = app.engine;
+    const fastMode = Boolean(force || app.saveMode === 'fast');
+    const shouldAbort = () => !force && !!(engine && (engine.isDrawing || engine.isPanning || engine.isZooming));
 
-    if (app.engine.isDrawing && !force) {
+    if (shouldAbort()) {
         app._triggerAutoSave();
         return;
     }
-    if (app.engine.isDrawing && force) {
-        app.engine._endStroke();
+    if (engine.isDrawing && force) {
+        engine._endStroke();
     }
-    if (app.engine && app.engine.flushPendingGpuCommits) {
-        app.engine.flushPendingGpuCommits();
+
+    const sumi = engine?.gpuRenderer?.sumiSolver;
+    if (!force && engine?.hasPendingGpuCommits) {
+        // Only briefly defer if Liquify still has an in-flight lazy readback; Sumi syncs cleanly on readback at the user's autosave delay.
+        const sumiOnly = sumi && sumi.active && app.activeTool === TOOLS.SUMI;
+        if (!sumiOnly && engine.hasPendingGpuCommits()) {
+            app._triggerAutoSave(350);
+            return;
+        }
     }
 
     const hasPendingTimelapse = !!(app.recorder && typeof app.recorder.hasPendingSave === 'function' && app.recorder.hasPendingSave());
-    const isDirty = (app.engine.dirtyChunks && app.engine.dirtyChunks.size > 0) || app.engine.refsDirty || hasPendingTimelapse;
-    if (!isDirty && !force) {
+    const sumiHasCpuDirty = !!(sumi && sumi.active && ((sumi.hasCpuDirtyTiles && sumi.hasCpuDirtyTiles()) || (sumi.hasPendingSyncs && sumi.hasPendingSyncs())));
+    const sumiHasDirtyPores = !!(!app.storage.isFallback && sumi && sumi.hasDirtyPassiveForProject && sumi.hasDirtyPassiveForProject(projId, engine));
+    const preDirty = (engine.dirtyChunks && engine.dirtyChunks.size > 0) || engine.refsDirty || hasPendingTimelapse || sumiHasCpuDirty || sumiHasDirtyPores;
+    if (!preDirty && !force) {
         app._status('SAVED');
         app._showSaved();
         return;
     }
 
     if (app._isSavingProject) {
+        if (!force) {
+            app._triggerAutoSave(400);
+            return;
+        }
         const waitStart = Date.now();
         while (app._isSavingProject && (Date.now() - waitStart) < 12000) {
             if (!app._activeSavePromise) {
@@ -1395,24 +1474,93 @@ export async function saveProject(app, force = false, targetProjectId = null) {
     app._isSavingProject = true;
     app._status('SAVING...');
 
+    let dirty = null;
+    const pendingItems = new Set();
+
+    const persistSumiPoresIfNeeded = async () => {
+        if (app.storage.isFallback || !sumi || !sumi.exportPassiveArchiveForStorage) {
+            return { aborted: false };
+        }
+        const poresNeedSave = force || (sumi.hasDirtyPassiveForProject && sumi.hasDirtyPassiveForProject(projId, engine));
+        if (!poresNeedSave) return { aborted: false };
+        const exported = await sumi.exportPassiveArchiveForStorage(engine, projId, {
+            background: !fastMode,
+            shouldAbort
+        });
+        if (exported && exported.aborted) {
+            return { aborted: true };
+        }
+        if (exported && exported.payload) {
+            await app.storage.saveSetting('sumiPores', exported.payload, projId, true);
+        } else {
+            await app.storage.deleteSetting('sumiPores', projId);
+        }
+        if (sumi.markPassiveSavedForProject) {
+            sumi.markPassiveSavedForProject(projId, exported.passiveVer, exported.tileWriteGen);
+        }
+        return { aborted: false };
+    };
+
     try {
-        if (app.recorder && typeof app.recorder.saveCurrentSession === 'function') {
-            if (force || hasPendingTimelapse) {
-                await app.recorder.saveCurrentSession(projId);
+        if (engine && engine.flushPendingGpuCommits) {
+            if (force) {
+                engine.flushPendingGpuCommits();
+            } else {
+                engine.flushPendingGpuCommits({
+                    keepSumiSession: app.activeTool === TOOLS.SUMI,
+                    syncSumiForReadback: true
+                });
             }
         }
 
-        if (app.engine && app.engine.saveHistoryStackToStorage) {
-            await app.engine.saveHistoryStackToStorage(projId);
+        const sumiPoresDirtyNow = !!(!app.storage.isFallback && sumi && sumi.hasDirtyPassiveForProject && sumi.hasDirtyPassiveForProject(projId, engine));
+        const isDirty = (engine.dirtyChunks && engine.dirtyChunks.size > 0) || engine.refsDirty || hasPendingTimelapse || sumiPoresDirtyNow;
+        if (!isDirty && !force) {
+            app._status('SAVED');
+            app._showSaved();
+            return;
         }
 
-        if (app.engine.isDrawing && !force) {
+        if (shouldAbort()) {
+            app._status(app.activeTool || 'READY');
             app._triggerAutoSave();
             return;
         }
 
-        if (app.engine.refsDirty) {
-            const refData = app.engine.referenceImages.map(r => ({
+        if (app.recorder && typeof app.recorder.saveCurrentSession === 'function') {
+            if (force || hasPendingTimelapse) {
+                const recRes = await app.recorder.saveCurrentSession(projId, {
+                    background: !fastMode,
+                    shouldAbort
+                });
+                if ((recRes && recRes.aborted) || (!fastMode && !(await yieldSaveSlice(shouldAbort)))) {
+                    app._status(app.activeTool || 'READY');
+                    app._triggerAutoSave();
+                    return;
+                }
+            }
+        }
+
+        if (engine && engine.saveHistoryStackToStorage) {
+            const histRes = await engine.saveHistoryStackToStorage(projId, {
+                background: !fastMode,
+                shouldAbort
+            });
+            if (histRes && histRes.aborted) {
+                app._status(app.activeTool || 'READY');
+                app._triggerAutoSave();
+                return;
+            }
+        }
+
+        if (shouldAbort()) {
+            app._status(app.activeTool || 'READY');
+            app._triggerAutoSave();
+            return;
+        }
+
+        if (engine.refsDirty) {
+            const refData = engine.referenceImages.map(r => ({
                 id: r.id,
                 name: r.name,
                 src: r.img.src,
@@ -1426,32 +1574,41 @@ export async function saveProject(app, force = false, targetProjectId = null) {
                 extractedPalette: r.extractedPalette || null
             }));
             await app.storage.saveSetting('referenceImages', refData, projId);
-            app.engine.refsDirty = false;
+            engine.refsDirty = false;
         }
 
-        app.engine.compact();
+        if (force) {
+            engine.compact();
+        }
 
         // When force is true (e.g. project switch or FORCE SAVE NOW),
         // mark ALL resident non-empty chunks and layers dirty so nothing in memory is ever skipped or dropped!
         if (force) {
-            app.engine.chunks.forEach((chunk, chunkId) => {
+            engine.chunks.forEach((chunk, chunkId) => {
                 for (let l = 1; l < LAYERS_COUNT; l++) {
                     const canv = chunk.canvases[l];
                     if (canv && !isCanvasEmpty(canv)) {
-                        app.engine._markDirty(chunkId, l, false);
+                        engine._markDirty(chunkId, l, false);
                     }
                 }
             });
         }
 
-        if (!app.engine.dirtyChunks || app.engine.dirtyChunks.size === 0) {
+        if (!engine.dirtyChunks || engine.dirtyChunks.size === 0) {
+            const poreRes = await persistSumiPoresIfNeeded();
+            if (poreRes.aborted) {
+                app._status(app.activeTool || 'READY');
+                app._triggerAutoSave();
+                return;
+            }
             app._status('SAVED');
             app._showSaved();
             return;
         }
 
-        const dirty = Array.from(app.engine.dirtyChunks);
-        app.engine.dirtyChunks.clear();
+        dirty = Array.from(engine.dirtyChunks);
+        engine.dirtyChunks.clear();
+        for (let i = 0; i < dirty.length; i++) pendingItems.add(dirty[i]);
 
         const sectorGroups = new Map();
 
@@ -1466,18 +1623,16 @@ export async function saveProject(app, force = false, targetProjectId = null) {
             sectorGroups.get(sKey).add(item);
         }
 
-        const pendingItems = new Set(dirty);
         let interruptedByStroke = false;
         let groupIndex = 0;
 
         for (const [sKey, affectedItems] of sectorGroups) {
-            if (!force && app.engine.isDrawing) {
+            if (shouldAbort()) {
                 interruptedByStroke = true;
                 break;
             }
-            if (!force && groupIndex > 0) {
-                await new Promise(r => setTimeout(r, 0));
-                if (app.engine.isDrawing) {
+            if (!fastMode && groupIndex > 0) {
+                if (!(await yieldSaveSlice(shouldAbort))) {
                     interruptedByStroke = true;
                     break;
                 }
@@ -1487,48 +1642,111 @@ export async function saveProject(app, force = false, targetProjectId = null) {
             const [sx, sy] = sKey.split(',').map(Number);
             let sector = await app.storage.loadSector(sx, sy, projId);
             if (!sector || !sector.chunks) {
-                sector = { chunks: {} };
+                sector = { keyFormat: 'l_cx_cy', chunks: {} };
+            } else {
+                sector.keyFormat = 'l_cx_cy';
             }
 
-            for (const item of affectedItems) {
-                if (!force && app.engine.isDrawing) {
-                    interruptedByStroke = true;
-                    break;
-                }
-                const [chunkId, layerStr] = item.split('|');
-                const l = parseInt(layerStr, 10);
-                const [cx, cy] = chunkId.split(',').map(Number);
-                const chunkKey = `${l}_${cx}_${cy}`;
+            if (fastMode) {
+                // Fast main-thread mode: encode dirty chunks in this sector concurrently with zero idle yields
+                const sectorTasks = [];
+                for (const item of affectedItems) {
+                    const [chunkId, layerStr] = item.split('|');
+                    const l = parseInt(layerStr, 10);
+                    const [cx, cy] = chunkId.split(',').map(Number);
+                    const chunkKey = `${l}_${cx}_${cy}`;
 
-                // Also remove any stale alternate representations of this chunk/layer
-                delete sector.chunks[`${cx},${cy}|${l}`];
-                delete sector.chunks[`${l},${cx},${cy}`];
-                delete sector.chunks[`${cx}_${cy}_${l}`];
+                    delete sector.chunks[`${cx},${cy}|${l}`];
+                    delete sector.chunks[`${l},${cx},${cy}`];
+                    delete sector.chunks[`${cx}_${cy}_${l}`];
 
-                const chunk = app.engine.chunks.get(chunkId);
-                if (chunk && chunk.canvases && chunk.canvases[l]) {
-                    const sourceCanvas = chunk.canvases[l];
-                    if (sourceCanvas.width === 0 || sourceCanvas.height === 0) {
-                        delete sector.chunks[chunkKey];
-                        chunk.isEmpty[l] = true;
-                        pendingItems.delete(item);
-                        continue;
-                    }
-
-                    const empty = (!force && chunk.isEmpty && chunk.isEmpty[l] === true)
-                        ? true
-                        : isCanvasEmpty(sourceCanvas);
-                    chunk.isEmpty[l] = empty;
-
-                    if (empty) {
-                        delete sector.chunks[chunkKey];
+                    const chunk = engine.chunks.get(chunkId);
+                    if (chunk && chunk.canvases && chunk.canvases[l]) {
+                        const sourceCanvas = chunk.canvases[l];
+                        if (sourceCanvas.width === 0 || sourceCanvas.height === 0) {
+                            delete sector.chunks[chunkKey];
+                            chunk.isEmpty[l] = true;
+                            pendingItems.delete(item);
+                            continue;
+                        }
+                        const empty = (!force && chunk.isEmpty && chunk.isEmpty[l] === true)
+                            ? true
+                            : isCanvasEmpty(sourceCanvas);
+                        chunk.isEmpty[l] = empty;
+                        if (empty) {
+                            delete sector.chunks[chunkKey];
+                            pendingItems.delete(item);
+                        } else if (app.storage.isFallback) {
+                            sectorTasks.push((async () => {
+                                sector.chunks[chunkKey] = await canvasToDataURLAsync(sourceCanvas, 'image/png');
+                                pendingItems.delete(item);
+                            })());
+                        } else {
+                            sectorTasks.push((async () => {
+                                const blob = await canvasToBlobAsync(sourceCanvas, 'image/webp', 0.95);
+                                sector.chunks[chunkKey] = blob || (await canvasToDataURLAsync(sourceCanvas, 'image/png'));
+                                pendingItems.delete(item);
+                            })());
+                        }
                     } else {
-                        // High-speed binary Blob storage in IndexedDB (zero base64 conversion overhead!)
-                        const blob = await canvasToBlobAsync(sourceCanvas, 'image/webp', 0.95);
-                        sector.chunks[chunkKey] = blob || (await canvasToDataURLAsync(sourceCanvas, 'image/png'));
+                        pendingItems.delete(item);
                     }
                 }
-                pendingItems.delete(item);
+                if (sectorTasks.length > 0) {
+                    await Promise.all(sectorTasks);
+                }
+            } else {
+                let itemIdx = 0;
+                for (const item of affectedItems) {
+                    if (shouldAbort()) {
+                        interruptedByStroke = true;
+                        break;
+                    }
+                    if (itemIdx > 0) {
+                        if (!(await yieldSaveSlice(shouldAbort))) {
+                            interruptedByStroke = true;
+                            break;
+                        }
+                    }
+                    itemIdx++;
+
+                    const [chunkId, layerStr] = item.split('|');
+                    const l = parseInt(layerStr, 10);
+                    const [cx, cy] = chunkId.split(',').map(Number);
+                    const chunkKey = `${l}_${cx}_${cy}`;
+
+                    // Also remove any stale alternate representations of this chunk/layer
+                    delete sector.chunks[`${cx},${cy}|${l}`];
+                    delete sector.chunks[`${l},${cx},${cy}`];
+                    delete sector.chunks[`${cx}_${cy}_${l}`];
+
+                    const chunk = engine.chunks.get(chunkId);
+                    if (chunk && chunk.canvases && chunk.canvases[l]) {
+                        const sourceCanvas = chunk.canvases[l];
+                        if (sourceCanvas.width === 0 || sourceCanvas.height === 0) {
+                            delete sector.chunks[chunkKey];
+                            chunk.isEmpty[l] = true;
+                            pendingItems.delete(item);
+                            continue;
+                        }
+
+                        const empty = (!force && chunk.isEmpty && chunk.isEmpty[l] === true)
+                            ? true
+                            : isCanvasEmpty(sourceCanvas);
+                        chunk.isEmpty[l] = empty;
+
+                        if (empty) {
+                            delete sector.chunks[chunkKey];
+                        } else if (app.storage.isFallback) {
+                            sector.chunks[chunkKey] = await canvasToDataURLAsync(sourceCanvas, 'image/png');
+                        } else {
+                            // High-speed binary Blob storage in IndexedDB (zero base64 conversion overhead!)
+                            const blob = await canvasToBlobAsync(sourceCanvas, 'image/webp', 0.95);
+                            sector.chunks[chunkKey] = blob || (await canvasToDataURLAsync(sourceCanvas, 'image/png'));
+                        }
+                    }
+                    pendingItems.delete(item);
+                }
             }
 
             await app.storage.saveSector(sx, sy, sector, projId);
@@ -1536,24 +1754,52 @@ export async function saveProject(app, force = false, targetProjectId = null) {
         }
 
         if (interruptedByStroke) {
-            pendingItems.forEach(item => app.engine.dirtyChunks.add(item));
+            pendingItems.forEach(item => engine.dirtyChunks.add(item));
+            app._status(app.activeTool || 'READY');
             app._triggerAutoSave();
             return;
         }
 
-        if (app.engine && app.engine.clearAllOffscreenCanvases && !app.engine.isDrawing) {
-            app.engine.clearAllOffscreenCanvases();
+        const poreRes = await persistSumiPoresIfNeeded();
+        if (poreRes.aborted) {
+            app._status(app.activeTool || 'READY');
+            app._triggerAutoSave();
+            return;
+        }
+
+        if (force && engine && engine.clearAllOffscreenCanvases && !engine.isDrawing) {
+            engine.clearAllOffscreenCanvases();
         }
 
         app._status('SAVED');
         app._showSaved();
-        if (!app.engine.isDrawing) {
+        if (engine.dirtyChunks && engine.dirtyChunks.size > 0 && app.autosaveEnabled) {
+            app._triggerAutoSave();
+        }
+        if (force && !engine.isDrawing) {
             await updateStorageStat(app);
+        } else if (!engine.isDrawing) {
+            const now = performance.now();
+            if (!app._lastStorageStatUpdateTime || (now - app._lastStorageStatUpdateTime) > 25000) {
+                app._lastStorageStatUpdateTime = now;
+                const runStat = () => {
+                    if (engine && !engine.isDrawing && !app._isSavingProject) {
+                        updateStorageStat(app).catch(() => {});
+                    }
+                };
+                if (typeof requestIdleCallback === 'function') {
+                    requestIdleCallback(runStat, { timeout: 2500 });
+                } else {
+                    setTimeout(runStat, 120);
+                }
+            }
         }
     } catch (e) {
         console.error("Save failed", e);
-        if (dirty && dirty.length > 0) {
-            dirty.forEach(item => app.engine.dirtyChunks.add(item));
+        if (pendingItems.size > 0) {
+            pendingItems.forEach(item => engine.dirtyChunks.add(item));
+        } else if (dirty && dirty.length > 0) {
+            dirty.forEach(item => engine.dirtyChunks.add(item));
         }
         app._status('SAVE ERROR');
     } finally {

@@ -21,7 +21,7 @@ import { setupIgnoreSystem } from './ignore.js';
 import { TimelapseRecorder } from './recording.js';
 import { initFluidPaint, activateFluidPaint, deactivateFluidPaint, syncFluidSettingsFromTip, warmFluidSolver } from './tools/fluidPaint.js';
 import { initAirPaint, activateAirPaint, deactivateAirPaint, syncAirSettingsFromTip, warmAirSolver } from './tools/airPaint.js';
-import { initSumiPaint, activateSumiPaint, deactivateSumiPaint, syncSumiSettingsFromTip, syncSumiTip, warmSumiSolver, updateSumiSubtoolUI } from './tools/sumiPaint.js';
+import { initSumiPaint, activateSumiPaint, deactivateSumiPaint, syncSumiSettingsFromTip, syncSumiTip, warmSumiSolver, updateSumiSubtoolUI, stopSumiSimulation } from './tools/sumiPaint.js';
 import { ensureSmudgeBuffers, warmSmudgeSolver } from './tools/smudge.js';
 import { warmLiquifySolver } from './tools/liquify.js';
 import { warmEraserSolver } from './tools/eraser.js';
@@ -135,6 +135,8 @@ class App {
                 this.engine.brush.flow = tipSettings.flow;
                 this.engine.brush.falloff = tipSettings.falloff ?? 0.50;
                 this.engine.brush.liquifyQuality = tipSettings.liquifyQuality ?? 2;
+                this.engine.brush.sumiQuality = tipSettings.sumiQuality ?? 3;
+                this.engine.brush.sumiPauseWhilePainting = !!tipSettings.sumiPauseWhilePainting;
                 
                 // Sensitivity
                 this.engine.brush.speedSize = tipSettings.speedSize;
@@ -192,17 +194,7 @@ class App {
         }
 
         if (this.engine && !this.engine._isLoadingProject && !this._isSwitchingProject && !this._isPrewarming) {
-            if (tool === TOOLS.SMUDGE || tool === TOOLS.FLUID || tool === TOOLS.AIR || tool === TOOLS.SUMI) {
-                if (this._tipWarmupTimer) clearTimeout(this._tipWarmupTimer);
-                this._tipWarmupTimer = setTimeout(() => {
-                    this._tipWarmupTimer = null;
-                    if (this.activeTool === tool && this.engine && !this.engine.isDrawing) {
-                        try {
-                            this._warmToolSolver(tool);
-                        } catch (_) {}
-                    }
-                }, 0);
-            }
+            this.scheduleTipWarmup(0, tool);
         }
 
         if (this.engine) {
@@ -218,12 +210,18 @@ class App {
     this._lastCanvasActivityTime = 0;
     this._brushSettingsDirty = false;
     this._saveBrushSettingsIdleId = null;
+    this._warmedTools = new Set();
+    this._lazyWarmupTimer = null;
+    this._lazyWarmupIdleId = null;
+    this._tipCacheWarmupTimer = null;
+    this._lastHoverWakeTime = 0;
     this.tipManager.shouldDeferSave = () => this._shouldDeferSettingsSave();
 
     this.hsv = { h: 0, s: 70, v: 70 };
     
     this.autosaveDelay = 4000;
     this.autosaveEnabled = true;
+    this.saveMode = 'background';
     
     this.projects = [];
     this._projectSlotStates = new Map();
@@ -320,7 +318,13 @@ class App {
             sumiWaterWash: 75,
             sumiEraserInk: 85,
             sumiEraserWater: 25,
-            sumiBleed: 58,
+            sumiEraserMaxWater: 100,
+            sumiEraserSpan: 550,
+            sumiEraserBristles: 28,
+            sumiEraserSplit: 48,
+            sumiBleed: 50,
+            sumiBleedWater: 50,
+            sumiBleedEraser: 50,
             sumiBristles: 28,
             sumiStiffness: 60,
             sumiSplit: 48,
@@ -343,6 +347,8 @@ class App {
             sumiMaxWater: 100,
             sumiUseHeightmap: false,
             sumiHeightSource: 'surface',
+            sumiQuality: 3,
+            sumiPauseWhilePainting: false,
             tip: null,
             spacing: 0.05,
             pressureEnabled: true,
@@ -421,7 +427,13 @@ class App {
     map[TOOLS.SUMI].sumiWaterWash = 75;
     map[TOOLS.SUMI].sumiEraserInk = 85;
     map[TOOLS.SUMI].sumiEraserWater = 25;
-    map[TOOLS.SUMI].sumiBleed = 58;
+    map[TOOLS.SUMI].sumiEraserMaxWater = 100;
+    map[TOOLS.SUMI].sumiEraserSpan = 550;
+    map[TOOLS.SUMI].sumiEraserBristles = 28;
+    map[TOOLS.SUMI].sumiEraserSplit = 48;
+    map[TOOLS.SUMI].sumiBleed = 50;
+    map[TOOLS.SUMI].sumiBleedWater = 50;
+    map[TOOLS.SUMI].sumiBleedEraser = 50;
     map[TOOLS.SUMI].sumiBristles = 28;
     map[TOOLS.SUMI].sumiStiffness = 60;
     map[TOOLS.SUMI].sumiSplit = 48;
@@ -444,6 +456,8 @@ class App {
     map[TOOLS.SUMI].sumiMaxWater = 100;
     map[TOOLS.SUMI].sumiUseHeightmap = false;
     map[TOOLS.SUMI].sumiHeightSource = 'surface';
+    map[TOOLS.SUMI].sumiQuality = 3;
+    map[TOOLS.SUMI].sumiPauseWhilePainting = false;
     return map;
   }
 
@@ -652,8 +666,28 @@ class App {
         const markCanvasActivity = () => {
             this._lastCanvasActivityTime = performance.now();
         };
+        const wakeCanvasOnReturn = () => {
+            const now = performance.now();
+            if ((now - (this._lastHoverWakeTime || 0)) < 1200) return;
+            if (!this.engine || this.engine.isDrawing || this.engine.isPanning || this.engine.isZooming || document.hidden) return;
+            const idleGap = now - (this._lastCanvasActivityTime || 0);
+            if (idleGap < 1500 && !this._tipWarmupPending) return;
+            this._lastHoverWakeTime = now;
+            requestAnimationFrame(() => {
+                if (!this.engine || this.engine.isDrawing || document.hidden) return;
+                try {
+                    if (this.engine.gpuRenderer) {
+                        this.engine.gpuRenderer.requestRender();
+                    }
+                    this.scheduleTipWarmup(0);
+                    this._scheduleLazyHotTools(120);
+                } catch (_) {}
+            });
+        };
         this.engine.container.addEventListener('pointerdown', markCanvasActivity, { passive: true, capture: true });
         this.engine.container.addEventListener('pointerup', markCanvasActivity, { passive: true, capture: true });
+        this.engine.container.addEventListener('pointerenter', wakeCanvasOnReturn, { passive: true });
+        window.addEventListener('focus', wakeCanvasOnReturn, { passive: true });
     }
     const flushDirtySettings = () => {
         if (this._brushSettingsDirty || (this._dirtyTools && this._dirtyTools.size > 0)) {
@@ -823,23 +857,158 @@ class App {
     }
   }
 
+  _touchBackupPoolSurface() {
+    if (!this.engine) return;
+    const bw = this.engine.isStatic ? Math.min(2560, this.engine.staticWidth || 1024) : (this.engine.chunkSize || 1024);
+    const bh = this.engine.isStatic ? Math.min(2560, this.engine.staticHeight || 1024) : (this.engine.chunkSize || 1024);
+    const c = acquireBackupCanvas(this.engine, bw, bh, false);
+    const bCtx = c._cached2dCtx || c.getContext('2d');
+    if (bCtx) bCtx.clearRect(0, 0, 1, 1);
+    releaseBackupCanvas(this.engine, c);
+  }
+
+  _warmTipCachesForActiveBrush() {
+    if (!this.engine || !this.engine.brush) return;
+    const b = this.engine.brush;
+    const tool = b.type || this.activeTool;
+    if (b.tip && (tool === TOOLS.BRUSH || tool === TOOLS.WIREFRAME || tool === TOOLS.ERASER)) {
+      const bSize = Math.round(b.size || 20);
+      const cacheSize = this.engine._getCacheSize(bSize);
+      const airbrush = (tool === TOOLS.ERASER) ? 0 : (b.airbrush || 0);
+      const sharpen = b.brushSharpen || 0;
+      const tipVer = b.tip._tipVersion || 0;
+      const color = b.color || '#000000';
+      const cacheKey = `${airbrush}_${cacheSize}_${sharpen}_${tipVer}`;
+      if (!this.engine._tipColorCache || this.engine._tipColorCache.key !== cacheKey || this.engine._tipColorCache.color !== color || this.engine._tipColorCache.srcTip !== b.tip) {
+        this.engine._updateTipCache(cacheSize, airbrush, color);
+      }
+      if ((b.paintHeight || 0) > 0 && typeof this.engine._updateReliefCache === 'function') {
+        const blur = airbrush * cacheSize * 0.45;
+        this.engine._updateReliefCache(cacheSize, blur);
+      }
+    }
+  }
+
+  scheduleTipWarmup(delayMs = 70, toolOverride = null) {
+    this._tipWarmupPending = true;
+    if (this._tipCacheWarmupTimer) {
+      clearTimeout(this._tipCacheWarmupTimer);
+      this._tipCacheWarmupTimer = null;
+    }
+    const run = () => {
+      this._tipCacheWarmupTimer = null;
+      if (!this.engine || this.engine.isDrawing || this._isSwitchingProject || this._isPrewarming || document.hidden) {
+        return;
+      }
+      this._tipWarmupPending = false;
+      const t = toolOverride || this.activeTool;
+      try {
+        this._warmTipCachesForActiveBrush();
+        if (t === TOOLS.SUMI) {
+          syncSumiTip(this.engine);
+          warmSumiSolver(this.engine);
+        } else if (t === TOOLS.FLUID || t === TOOLS.AIR || t === TOOLS.SMUDGE || t === TOOLS.ERASER || t === TOOLS.LIQUIFY) {
+          this._warmToolSolver(t);
+        }
+      } catch (_) {}
+    };
+    if (delayMs <= 0) {
+      this._tipCacheWarmupTimer = setTimeout(run, 0);
+    } else {
+      this._tipCacheWarmupTimer = setTimeout(() => {
+        if (typeof window.requestIdleCallback === 'function') {
+          window.requestIdleCallback(run, { timeout: 220 });
+        } else {
+          run();
+        }
+      }, delayMs);
+    }
+  }
+
   _warmToolSolver(tool) {
     if (!this.engine || !tool) return;
-    if (tool === TOOLS.LIQUIFY) {
+    if (tool === TOOLS.BRUSH || tool === TOOLS.WIREFRAME) {
+      this._warmTipCachesForActiveBrush();
+    } else if (tool === TOOLS.LIQUIFY) {
       if (!warmLiquifySolver(this.engine) && wasmCore && wasmCore.ready) {
         wasmCore.liquifyPrewarm();
       }
     } else if (tool === TOOLS.SMUDGE) {
+      ensureSmudgeBuffers(this.engine);
       warmSmudgeSolver(this.engine);
     } else if (tool === TOOLS.FLUID) {
+      ensureSmudgeBuffers(this.engine);
       warmFluidSolver(this.engine);
     } else if (tool === TOOLS.AIR) {
       warmAirSolver(this.engine);
     } else if (tool === TOOLS.SUMI) {
+      syncSumiTip(this.engine);
       warmSumiSolver(this.engine);
     } else if (tool === TOOLS.ERASER) {
+      this._warmTipCachesForActiveBrush();
       warmEraserSolver(this.engine);
     }
+    if (this._warmedTools) this._warmedTools.add(tool);
+  }
+
+  _scheduleLazyHotTools(delayMs = 240) {
+    if (this._lazyWarmupTimer) {
+      clearTimeout(this._lazyWarmupTimer);
+      this._lazyWarmupTimer = null;
+    }
+    if (this._lazyWarmupIdleId && typeof cancelIdleCallback === 'function') {
+      cancelIdleCallback(this._lazyWarmupIdleId);
+      this._lazyWarmupIdleId = null;
+    }
+    const order = [
+      TOOLS.BRUSH,
+      TOOLS.ERASER,
+      TOOLS.SUMI,
+      TOOLS.LIQUIFY,
+      TOOLS.SMUDGE,
+      TOOLS.FLUID,
+      TOOLS.AIR,
+      TOOLS.WIREFRAME
+    ];
+    const stepNext = () => {
+      this._lazyWarmupTimer = null;
+      this._lazyWarmupIdleId = null;
+      if (!this.engine || this._isSwitchingProject || this._isPrewarming || document.hidden) {
+        return;
+      }
+      if (this.engine.isDrawing || this.engine.isPanning || this.engine.isZooming || this._isSavingProject) {
+        this._scheduleLazyHotTools(500);
+        return;
+      }
+      let nextTool = null;
+      for (let i = 0; i < order.length; i++) {
+        if (!this._warmedTools.has(order[i])) {
+          nextTool = order[i];
+          break;
+        }
+      }
+      if (!nextTool) return;
+      try {
+        this._touchBackupPoolSurface();
+        this._warmToolSolver(nextTool);
+      } catch (_) {
+        this._warmedTools.add(nextTool);
+      }
+      for (let i = 0; i < order.length; i++) {
+        if (!this._warmedTools.has(order[i])) {
+          this._scheduleLazyHotTools(220);
+          return;
+        }
+      }
+    };
+    this._lazyWarmupTimer = setTimeout(() => {
+      this._lazyWarmupTimer = null;
+      if (typeof window.requestIdleCallback === 'function') {
+        this._lazyWarmupIdleId = window.requestIdleCallback(stepNext, { timeout: 600 });
+      } else {
+        stepNext();
+      }
+    }, delayMs);
   }
 
   async prewarmAllTools(force = false, opts = {}) {
@@ -865,10 +1034,15 @@ class App {
     if (btnNow) btnNow.disabled = false;
     if (ok) {
       this._allToolsPrewarmed = true;
+      if (this._warmedTools) {
+        [TOOLS.BRUSH, TOOLS.ERASER, TOOLS.SUMI, TOOLS.LIQUIFY, TOOLS.SMUDGE, TOOLS.FLUID, TOOLS.AIR, TOOLS.WIREFRAME]
+          .forEach(t => this._warmedTools.add(t));
+      }
       if (statusEl) statusEl.innerText = 'ALL 9 TOOLS WARMED (READY)';
       this._status('ALL TOOLS PREWARMED');
-    } else if (statusEl) {
-      statusEl.innerText = 'PREWARM INTERRUPTED';
+    } else {
+      if (statusEl) statusEl.innerText = 'LAZY WARMUP CONTINUING...';
+      this._scheduleLazyHotTools(400);
     }
     return ok;
   }
@@ -880,17 +1054,8 @@ class App {
     const runLightweightWarmup = () => {
       if (!this.engine || this.engine.isDrawing || this._isSwitchingProject) return;
       try {
-        if (this.engine.brush && this.engine.brush.tip) {
-          const bSize = Math.round(this.engine.brush.size || 20);
-          const cacheSize = this.engine._getCacheSize(bSize);
-          const airbrush = this.engine.brush.airbrush || 0;
-          const color = this.engine.brush.color || '#000000';
-          this.engine._updateTipCache(cacheSize, airbrush, color);
-        }
-        const bw = this.engine.isStatic ? Math.min(2560, this.engine.staticWidth || 1024) : (this.engine.chunkSize || 1024);
-        const bh = this.engine.isStatic ? Math.min(2560, this.engine.staticHeight || 1024) : (this.engine.chunkSize || 1024);
-        const c = acquireBackupCanvas(this.engine, bw, bh, false);
-        releaseBackupCanvas(this.engine, c);
+        this._warmTipCachesForActiveBrush();
+        this._touchBackupPoolSurface();
 
         // Prewarm all heavy tools non-blockingly across rAF ticks when enabled
         if (this._perfPrewarmTools && !this._allToolsPrewarmed) {
@@ -898,8 +1063,9 @@ class App {
           return;
         }
 
-        // Fallback when user disabled full prewarm: still warm active heavy tool
+        // Fallback when user disabled full prewarm: warm active tool immediately, then lazily keep others hot
         this._warmToolSolver(this.activeTool);
+        this._scheduleLazyHotTools(300);
       } catch (e) {
         console.warn('Startup warmup skipped:', e);
       }
@@ -923,18 +1089,13 @@ class App {
       this._postSwitchWarmupTimer = null;
       if (!this.engine || this.engine.isDrawing || this._isSwitchingProject) return;
       try {
-        if (this.engine.brush && this.engine.brush.tip) {
-          const bSize = Math.round(this.engine.brush.size || 20);
-          const cacheSize = this.engine._getCacheSize(bSize);
-          this.engine._updateTipCache(cacheSize, this.engine.brush.airbrush || 0, this.engine.brush.color || '#000000');
-        }
-        const bw = this.engine.isStatic ? Math.min(2560, this.engine.staticWidth || 1024) : (this.engine.chunkSize || 1024);
-        const bh = this.engine.isStatic ? Math.min(2560, this.engine.staticHeight || 1024) : (this.engine.chunkSize || 1024);
-        const c = acquireBackupCanvas(this.engine, bw, bh, false);
-        releaseBackupCanvas(this.engine, c);
+        this._warmTipCachesForActiveBrush();
+        this._touchBackupPoolSurface();
         this._warmToolSolver(this.activeTool);
         if (this._perfPrewarmTools && !this._allToolsPrewarmed) {
           this.prewarmAllTools(false);
+        } else {
+          this._scheduleLazyHotTools(280);
         }
       } catch (_) {}
     };
@@ -947,6 +1108,27 @@ class App {
     }, 40);
   }
 
+  setSaveMode(mode, persist = true) {
+    const normalized = (mode === 'fast') ? 'fast' : 'background';
+    this.saveMode = normalized;
+    const btnBg = this._el('btn-save-mode-bg');
+    const btnFast = this._el('btn-save-mode-fast');
+    const valEl = this._el('save-mode-val');
+    const hintEl = this._el('save-mode-hint');
+    if (btnBg) btnBg.classList.toggle('active-btn', normalized === 'background');
+    if (btnFast) btnFast.classList.toggle('active-btn', normalized === 'fast');
+    if (valEl) valEl.innerText = normalized === 'fast' ? 'FAST' : 'BACKGROUND';
+    if (hintEl) {
+      hintEl.innerText = normalized === 'fast'
+        ? 'Immediate main-thread save (fastest completion, may pause a frame).'
+        : 'Gentle idle-sliced background save (keeps painting at 60 FPS).';
+    }
+    if (persist && this.storage) {
+      this.storage.saveUiState('global_saveMode', normalized, true)?.catch?.(() => {});
+      this.storage.saveSetting('saveMode', normalized)?.catch?.(() => {});
+    }
+  }
+
   _clearSaveTimer() {
     if (this.saveTimeout) {
         clearTimeout(this.saveTimeout);
@@ -954,18 +1136,22 @@ class App {
     }
   }
 
-  _triggerAutoSave() {
+  _triggerAutoSave(overrideDelayMs = null) {
     this._clearSaveTimer();
     if (this._pauseAutosaveForModal) return;
     if (this.autosaveEnabled) {
-        const delayMs = Number.isFinite(this.autosaveDelay) ? Math.max(1000, this.autosaveDelay) : 4000;
+        const baseDelay = Number.isFinite(this.autosaveDelay) ? Math.max(1000, this.autosaveDelay) : 4000;
+        const delayMs = (overrideDelayMs !== null && Number.isFinite(overrideDelayMs))
+            ? Math.max(300, overrideDelayMs)
+            : baseDelay;
         this.saveTimeout = setTimeout(() => {
+            this.saveTimeout = null;
             if (this._pauseAutosaveForModal) return;
             const isBusy = this.isCapturingTip || 
                            (this.engine && (this.engine.isDrawing || this.engine.isPanning || this.engine.isPanningMode));
             if (isBusy) {
                 // Postpone save action again because the user is currently busy painting/liquifying/editing
-                this._triggerAutoSave();
+                this._triggerAutoSave(overrideDelayMs);
             } else {
                 this.save();
             }
@@ -1070,6 +1256,7 @@ class App {
         const keys = [
             'autosaveDelaySlider',
             'autosaveEnabled',
+            'saveMode',
             'palette',
             'canvasBg',
             'canvasSurface',
@@ -1087,6 +1274,7 @@ class App {
         const uiStateBatch = await this.storage.loadUiStateBatch([
             'global_autosaveDelaySlider',
             'global_autosaveEnabled',
+            'global_saveMode',
             'perf_prewarm_tools',
             'perf_loading_screen'
         ]);
@@ -1187,6 +1375,9 @@ class App {
         this.autosaveEnabled = enabledVal;
         const enableEl = this._el('settings-autosave-enable');
         if (enableEl) enableEl.checked = enabledVal;
+
+        const rawSaveMode = uiStateBatch['global_saveMode'] ?? settings['saveMode'];
+        this.setSaveMode(rawSaveMode === 'fast' ? 'fast' : 'background', false);
 
         // Legacy fallback if project palette wasn't yet in IDB palette compartment
         const savedPalette = settings['palette'];
@@ -1477,6 +1668,21 @@ class App {
                             });
                         }
                         migrated._sumiPressOpacV1 = true;
+                        changed = true;
+                    }
+                    if (tool === TOOLS.SUMI && !migrated._sumiQualDefaultV1) {
+                        if (migrated.sumiQuality === undefined || migrated.sumiQuality === 2) {
+                            migrated.sumiQuality = 3;
+                        }
+                        if (migrated.tips) {
+                            Object.keys(migrated.tips).forEach(tid => {
+                                const tp = migrated.tips[tid];
+                                if (tp && (tp.sumiQuality === undefined || tp.sumiQuality === 2)) {
+                                    tp.sumiQuality = 3;
+                                }
+                            });
+                        }
+                        migrated._sumiQualDefaultV1 = true;
                         changed = true;
                     }
                     this.brushSettings[tool] = { ...this.brushSettings[tool], ...migrated };
@@ -1771,6 +1977,13 @@ class App {
           if (ts) syncSumiSettingsFromTip(ts);
           updateSumiSubtoolUI(sumiSubMode);
           this._status(`SUMI MODE: ${sumiSubMode.toUpperCase()}`);
+          return;
+        }
+        if (e.code === 'KeyS') {
+          if (e.repeat) return;
+          e.preventDefault();
+          stopSumiSimulation(this.engine);
+          this._status('SUMI SIMULATION STOPPED (FULL DRY)');
           return;
         }
       }
@@ -2423,7 +2636,9 @@ class App {
 
         setDisp('max-water-container', isSumi ? '' : 'none');
         if (isSumi) {
-            setValSlider('sumi-max-water', 'max-water-val', tipSettings.sumiMaxWater ?? 100, (v) => `${Math.round(v)}%`);
+            const mMode = getVal('sumiMode', 'draw');
+            const maxWKey = mMode === 'eraser' ? 'sumiEraserMaxWater' : 'sumiMaxWater';
+            setValSlider('sumi-max-water', 'max-water-val', getVal(maxWKey, 100), (v) => `${Math.round(v)}%`);
         }
 
         setValSlider('adv-brush-sharpen', 'adv-brush-sharpen-val', getVal('brushSharpen', 0.0), (v) => v.toFixed(2));
@@ -2561,17 +2776,20 @@ class App {
         const syncSumiSlider = (elId, valId, key, defVal, unit = '%') => {
             setValSlider(elId, valId, getVal(key, defVal), (v) => `${Math.round(v)}${unit}`);
         };
-        syncSumiSlider('brush-sumi-span', 'sumi-span-val', 'sumiSpan', 550, 'px');
-        syncSumiSlider('brush-sumi-bristles', 'sumi-bristles-val', 'sumiBristles', 28, '');
-        syncSumiSlider('brush-sumi-split', 'sumi-split-val', 'sumiSplit', 48, '%');
         const activeSumiMode = getVal('sumiMode', 'draw');
-        const inkKey = activeSumiMode === 'water' ? 'sumiInkAffection' : (activeSumiMode === 'eraser' ? 'sumiEraserInk' : 'sumiInk');
-        const inkDef = activeSumiMode === 'water' ? 35 : (activeSumiMode === 'eraser' ? 85 : 78);
-        const watKey = activeSumiMode === 'water' ? 'sumiWaterWash' : (activeSumiMode === 'eraser' ? 'sumiEraserWater' : 'sumiWater');
-        const watDef = activeSumiMode === 'water' ? 75 : (activeSumiMode === 'eraser' ? 25 : 65);
+        const isSumiEraser = activeSumiMode === 'eraser';
+        syncSumiSlider('brush-sumi-span', 'sumi-span-val', isSumiEraser ? 'sumiEraserSpan' : 'sumiSpan', 550, 'px');
+        syncSumiSlider('brush-sumi-bristles', 'sumi-bristles-val', isSumiEraser ? 'sumiEraserBristles' : 'sumiBristles', 28, '');
+        syncSumiSlider('brush-sumi-split', 'sumi-split-val', isSumiEraser ? 'sumiEraserSplit' : 'sumiSplit', 48, '%');
+        const inkKey = activeSumiMode === 'water' ? 'sumiInkAffection' : (isSumiEraser ? 'sumiEraserInk' : 'sumiInk');
+        const inkDef = activeSumiMode === 'water' ? 35 : (isSumiEraser ? 85 : 78);
+        const watKey = activeSumiMode === 'water' ? 'sumiWaterWash' : (isSumiEraser ? 'sumiEraserWater' : 'sumiWater');
+        const watDef = activeSumiMode === 'water' ? 75 : (isSumiEraser ? 25 : 65);
+        const bleedKey = activeSumiMode === 'water' ? 'sumiBleedWater' : (isSumiEraser ? 'sumiBleedEraser' : 'sumiBleed');
+        const bleedFallback = activeSumiMode === 'water' ? getVal('sumiBleed', 50) : 50;
         syncSumiSlider('slider-sumi-ink', 'val-sumi-ink', inkKey, inkDef, '%');
         syncSumiSlider('slider-sumi-water', 'val-sumi-water', watKey, watDef, '%');
-        syncSumiSlider('slider-sumi-bleed', 'val-sumi-bleed', 'sumiBleed', 58, '%');
+        syncSumiSlider('slider-sumi-bleed', 'val-sumi-bleed', bleedKey, bleedFallback, '%');
         syncSumiSlider('adv-sumi-stiffness', 'adv-sumi-stiffness-val', 'sumiStiffness', 60, '%');
         syncSumiSlider('adv-sumi-glue', 'adv-sumi-glue-val', 'sumiGlue', 42, '%');
         syncSumiSlider('adv-sumi-warmth', 'adv-sumi-warmth-val', 'sumiWarmth', 12, '');
@@ -2614,6 +2832,29 @@ class App {
             const autoDip = getVal('sumiAutoReDip', true);
             btnAutoDip.classList.toggle('active-btn', !!autoDip);
             btnAutoDip.innerText = autoDip ? 'AUTO DIP' : 'MANUAL DIP';
+        }
+        const sumiQual = Math.max(1, Math.min(3, parseInt(getVal('sumiQuality', 3), 10) || 3));
+        const sqNames = { 1: 'FAST 1/2', 2: 'CRISP 3/4', 3: 'FULL 1:1' };
+        const sqValEl = el('val-sumi-quality');
+        if (sqValEl) sqValEl.innerText = sqNames[sumiQual] || 'FULL 1:1';
+        const advSqEl = el('adv-sumi-quality');
+        if (advSqEl) advSqEl.value = sumiQual;
+        const advSqValEl = el('adv-sumi-quality-val');
+        if (advSqValEl) advSqValEl.innerText = sqNames[sumiQual] || 'FULL 1:1';
+        for (let qi = 1; qi <= 3; qi++) {
+            const qb = el(`btn-sumi-q-${qi}`);
+            if (qb) qb.classList.toggle('active-btn', qi === sumiQual);
+        }
+        if (this.engine?.brush) {
+            this.engine.brush.sumiQuality = sumiQual;
+        }
+        const sumiPause = !!getVal('sumiPauseWhilePainting', false);
+        const chkSumiPause = el('chk-sumi-pause-paint');
+        const advChkSumiPause = el('adv-sumi-pause-paint');
+        if (chkSumiPause) chkSumiPause.checked = sumiPause;
+        if (advChkSumiPause) advChkSumiPause.checked = sumiPause;
+        if (this.engine?.brush) {
+            this.engine.brush.sumiPauseWhilePainting = sumiPause;
         }
         updateSumiSubtoolUI(getVal('sumiMode', 'draw'));
     }
@@ -2724,7 +2965,13 @@ class App {
             sumiWaterWash: settings.sumiWaterWash ?? settings.sumiWater ?? 75,
             sumiEraserInk: settings.sumiEraserInk ?? 85,
             sumiEraserWater: settings.sumiEraserWater ?? 25,
-            sumiBleed: settings.sumiBleed ?? 58,
+            sumiEraserMaxWater: settings.sumiEraserMaxWater ?? 100,
+            sumiEraserSpan: settings.sumiEraserSpan ?? 550,
+            sumiEraserBristles: settings.sumiEraserBristles ?? 28,
+            sumiEraserSplit: settings.sumiEraserSplit ?? 48,
+            sumiBleed: settings.sumiBleed ?? 50,
+            sumiBleedWater: settings.sumiBleedWater ?? settings.sumiBleed ?? 50,
+            sumiBleedEraser: settings.sumiBleedEraser ?? 50,
             sumiBristles: settings.sumiBristles ?? 28,
             sumiStiffness: settings.sumiStiffness ?? 60,
             sumiSplit: settings.sumiSplit ?? 48,
@@ -2746,7 +2993,9 @@ class App {
             sumiPressureGate: settings.sumiPressureGate ?? 20,
             sumiMaxWater: settings.sumiMaxWater ?? 100,
             sumiUseHeightmap: settings.sumiUseHeightmap ?? false,
-            sumiHeightSource: settings.sumiHeightSource || 'surface'
+            sumiHeightSource: settings.sumiHeightSource || 'surface',
+            sumiQuality: settings.sumiQuality ?? 3,
+            sumiPauseWhilePainting: !!settings.sumiPauseWhilePainting
         };
     }
     return settings.tips[tipId];
@@ -2778,6 +3027,13 @@ class App {
     this.engine.brush[key] = engineVal;
     
     this._dirtyTools.add(this.activeTool);
+    if (
+        key === 'size' || key === 'airbrush' || key === 'brushSharpen' ||
+        key === 'paintHeight' || key === 'oiliness' ||
+        key.startsWith('fluid') || key.startsWith('air') || key.startsWith('sumi') || key.startsWith('smudge')
+    ) {
+        this.scheduleTipWarmup(70);
+    }
     if (!skipSave) {
         this._saveBrushSettings();
     } else {
@@ -2791,15 +3047,12 @@ class App {
     this.activeTool = tool;
     if (this.perfMonitor) this.perfMonitor.markToolChange(tool, this.prevTool);
     
-    // Reset any stuck stroke or pointing states from previous tool
+    // Reset any stuck stroke or pointing states from previous tool (keep Liquify session warm until another tool actually draws)
     if (this.engine) {
         if (this.engine.isDrawing) {
             try { this.engine._endStroke(); } catch (e) { this.engine.isDrawing = false; }
         }
         this.engine._resetInteractionState({ cancelActive: false });
-        if (tool !== TOOLS.LIQUIFY && this.engine.invalidateLiquifySession) {
-            this.engine.invalidateLiquifySession();
-        }
     }
 
     // Deselect reference image when switching to anything that isn't generic move, only if one was selected
@@ -2864,7 +3117,7 @@ class App {
     if (
         this.engine &&
         !this.engine._isLoadingProject &&
-        (tool === TOOLS.LIQUIFY || tool === TOOLS.SMUDGE || tool === TOOLS.FLUID || tool === TOOLS.AIR || tool === TOOLS.SUMI || tool === TOOLS.ERASER)
+        (tool === TOOLS.BRUSH || tool === TOOLS.WIREFRAME || tool === TOOLS.LIQUIFY || tool === TOOLS.SMUDGE || tool === TOOLS.FLUID || tool === TOOLS.AIR || tool === TOOLS.SUMI || tool === TOOLS.ERASER)
     ) {
         this._toolWarmupTimer = setTimeout(() => {
             this._toolWarmupTimer = null;
@@ -2890,6 +3143,8 @@ class App {
         this.engine.brush.flow = settings.flow;
         this.engine.brush.falloff = settings.falloff ?? 0.50;
         this.engine.brush.liquifyQuality = settings.liquifyQuality ?? 2;
+        this.engine.brush.sumiQuality = settings.sumiQuality ?? 3;
+        this.engine.brush.sumiPauseWhilePainting = !!settings.sumiPauseWhilePainting;
         this.engine.brush.speedSize = (tool === TOOLS.LIQUIFY) ? 0 : (settings.speedSize ?? 0);
         this.engine.brush.speedOpacity = (tool === TOOLS.LIQUIFY) ? 0 : (settings.speedOpacity ?? 0);
         this.engine.brush.speedValue = (tool === TOOLS.LIQUIFY) ? 0 : (settings.speedValue ?? 0);
@@ -2957,6 +3212,7 @@ class App {
         this.hsv = rgbToHsv(rgb.r, rgb.g, rgb.b);
     }
     this._updateColorUI({ deferUi });
+    this.scheduleTipWarmup(50);
 
     // Smart Switch check: if color picked while using non-painting tools, switch to last brush
     if (this.activeTool === TOOLS.ERASER || this.activeTool === TOOLS.LASSO || this.activeTool === TOOLS.SMUDGE || this.activeTool === TOOLS.PICKER) {
@@ -3214,7 +3470,13 @@ class App {
             settings.sumiWaterWash = 75;
             settings.sumiEraserInk = 85;
             settings.sumiEraserWater = 25;
-            settings.sumiBleed = 58;
+            settings.sumiEraserMaxWater = 100;
+            settings.sumiEraserSpan = 550;
+            settings.sumiEraserBristles = 28;
+            settings.sumiEraserSplit = 48;
+            settings.sumiBleed = 50;
+            settings.sumiBleedWater = 50;
+            settings.sumiBleedEraser = 50;
             settings.sumiBristles = 28;
             settings.sumiStiffness = 60;
             settings.sumiSplit = 48;
@@ -3237,6 +3499,8 @@ class App {
             settings.sumiMaxWater = 100;
             settings.sumiUseHeightmap = false;
             settings.sumiHeightSource = 'surface';
+            settings.sumiQuality = 3;
+            settings.sumiPauseWhilePainting = false;
         }
         if (settings.tips && settings.tips[tipId]) {
             delete settings.tips[tipId];
